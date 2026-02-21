@@ -1,13 +1,13 @@
-"""Track 01: Let Me Fall — Melodic House (CYRIL x Avicii Style).
+"""Track 02: Stand Still — Melodic House / Progressive House (Lane 8 × Rufus Du Sol).
 
 Album: Midnight Frequency
-Genre: Melodic House
-BPM: 120
-Key: D minor
-Duration: 480 beats (4:00)
+Genre: Melodic House / Progressive House
+BPM: 122
+Key: A minor
+Duration: 480 beats (3:56)
 
-Emotional arc: Suffocation → grip slipping → freefall → euphoria → transcendence
-Hook: "Let me fall, I don't need the ground / Let me fall into the sound"
+Emotional arc: Rushing → exhaustion → sudden stop → clarity → peace
+Hook: "Stand still, let the whole world blur"
 """
 
 from __future__ import annotations
@@ -53,44 +53,51 @@ from instrumental_engine.mixer import (
 # ═══════════════════════════════════════════════════════════════════════════
 
 SAMPLE_RATE: Final[int] = 44100
-BPM: Final[int] = 120
+BPM: Final[int] = 122
 SECONDS_PER_BEAT: Final[float] = 60.0 / BPM
 TOTAL_BEATS: Final[float] = 480.0
 
 OUTPUT_DIR: Final[str] = "albums/midnight_frequency/output"
-WAV_PATH: Final[str] = os.path.join(OUTPUT_DIR, "01_Let_Me_Fall.wav")
-MP3_PATH: Final[str] = os.path.join(OUTPUT_DIR, "01_Let_Me_Fall.mp3")
+WAV_PATH: Final[str] = os.path.join(OUTPUT_DIR, "02_Stand_Still.wav")
+MP3_PATH: Final[str] = os.path.join(OUTPUT_DIR, "02_Stand_Still.mp3")
 
 # ═══════════════════════════════════════════════════════════════════════════
-# MIDI note constants (D minor: D E F G A Bb C)
+# MIDI note constants (A minor: A B C D E F G)
 # ═══════════════════════════════════════════════════════════════════════════
 
 # Bass octave (sub_bass)
+A1: Final[int] = 33
+C2: Final[int] = 36
 D2: Final[int] = 38
+E2: Final[int] = 40
 F2: Final[int] = 41
 G2: Final[int] = 43
-A2: Final[int] = 45
-BB2: Final[int] = 46
-C3: Final[int] = 48
 
-# Pad / supersaw octave
+# Pad octave
+A2: Final[int] = 45
+C3: Final[int] = 48
 D3: Final[int] = 50
+E3: Final[int] = 52
 F3: Final[int] = 53
 G3: Final[int] = 55
 A3: Final[int] = 57
-BB3: Final[int] = 58
+B3: Final[int] = 59
+
+# Supersaw / chord octave
 C4: Final[int] = 60
-CS4: Final[int] = 61
 D4: Final[int] = 62
 E4: Final[int] = 64
 F4: Final[int] = 65
 G4: Final[int] = 67
 A4: Final[int] = 69
-BB4: Final[int] = 70
+B4: Final[int] = 71
 
 # Arpeggio octave (pluck)
+C5: Final[int] = 72
 D5: Final[int] = 74
+E5: Final[int] = 76
 F5: Final[int] = 77
+G5: Final[int] = 79
 A5: Final[int] = 81
 
 
@@ -102,15 +109,7 @@ def _synth_white_noise_riser(
     duration_seconds: float,
     volume: float = 0.3,
 ) -> tuple[list[float], list[float]]:
-    """Synthesize a white noise riser with rising filter sweep.
-
-    Args:
-        duration_seconds: Length of riser in seconds.
-        volume: Peak volume (0.0-1.0).
-
-    Returns:
-        Stereo tuple (left, right) of float samples.
-    """
+    """Synthesize a white noise riser with rising filter sweep."""
     num_samples = int(duration_seconds * SAMPLE_RATE)
     left: list[float] = [0.0] * num_samples
     right: list[float] = [0.0] * num_samples
@@ -136,14 +135,7 @@ def _synth_white_noise_riser(
 
 
 def _synth_impact(volume: float = 0.5) -> tuple[list[float], list[float]]:
-    """Synthesize a downlifter impact hit for drop entries.
-
-    Args:
-        volume: Peak volume.
-
-    Returns:
-        Stereo tuple (left, right) of float samples.
-    """
+    """Synthesize a downlifter impact hit for drop entries."""
     duration_samples = int(0.8 * SAMPLE_RATE)
     left: list[float] = [0.0] * duration_samples
     right: list[float] = [0.0] * duration_samples
@@ -171,15 +163,12 @@ def _build_melodic_house_beat() -> DrumPattern:
         name="melodic_house",
         length_beats=4.0,
         hits=(
-            # Kick: every beat
             DrumHit(sound=DrumSound.KICK, beat_position=0.0, velocity=0.85),
             DrumHit(sound=DrumSound.KICK, beat_position=1.0, velocity=0.85),
             DrumHit(sound=DrumSound.KICK, beat_position=2.0, velocity=0.85),
             DrumHit(sound=DrumSound.KICK, beat_position=3.0, velocity=0.85),
-            # Clap on 2 and 4
-            DrumHit(sound=DrumSound.CLAP, beat_position=1.0, velocity=0.6),
-            DrumHit(sound=DrumSound.CLAP, beat_position=3.0, velocity=0.6),
-            # Closed hats: offbeat 8ths
+            DrumHit(sound=DrumSound.CLAP, beat_position=1.0, velocity=0.55),
+            DrumHit(sound=DrumSound.CLAP, beat_position=3.0, velocity=0.55),
             DrumHit(sound=DrumSound.CLOSED_HIHAT, beat_position=0.5, velocity=0.3),
             DrumHit(sound=DrumSound.CLOSED_HIHAT, beat_position=1.5, velocity=0.3),
             DrumHit(sound=DrumSound.CLOSED_HIHAT, beat_position=2.5, velocity=0.3),
@@ -216,7 +205,6 @@ def _build_build_beat() -> DrumPattern:
             DrumHit(sound=DrumSound.KICK, beat_position=1.0, velocity=0.8),
             DrumHit(sound=DrumSound.KICK, beat_position=2.0, velocity=0.8),
             DrumHit(sound=DrumSound.KICK, beat_position=3.0, velocity=0.8),
-            # Snare roll: 16th notes, increasing velocity
             DrumHit(sound=DrumSound.SNARE, beat_position=0.0, velocity=0.25),
             DrumHit(sound=DrumSound.SNARE, beat_position=0.25, velocity=0.28),
             DrumHit(sound=DrumSound.SNARE, beat_position=0.5, velocity=0.3),
@@ -247,15 +235,12 @@ def _build_drop_beat() -> DrumPattern:
             DrumHit(sound=DrumSound.KICK, beat_position=1.0, velocity=0.9),
             DrumHit(sound=DrumSound.KICK, beat_position=2.0, velocity=0.9),
             DrumHit(sound=DrumSound.KICK, beat_position=3.0, velocity=0.9),
-            # Clap on 2 and 4
             DrumHit(sound=DrumSound.CLAP, beat_position=1.0, velocity=0.7),
             DrumHit(sound=DrumSound.CLAP, beat_position=3.0, velocity=0.7),
-            # Open hats: offbeat
             DrumHit(sound=DrumSound.OPEN_HIHAT, beat_position=0.5, velocity=0.35),
             DrumHit(sound=DrumSound.OPEN_HIHAT, beat_position=1.5, velocity=0.35),
             DrumHit(sound=DrumSound.OPEN_HIHAT, beat_position=2.5, velocity=0.35),
             DrumHit(sound=DrumSound.OPEN_HIHAT, beat_position=3.5, velocity=0.35),
-            # Crash on beat 1
             DrumHit(sound=DrumSound.CRASH, beat_position=0.0, velocity=0.5),
         ),
     )
@@ -279,69 +264,69 @@ def _build_outro_beat() -> DrumPattern:
 # Chord / melody patterns
 # ═══════════════════════════════════════════════════════════════════════════
 
-# --- Verse progression: Dm → Bb → F → C (4 bars each, 16 beats each) ---
+# --- Verse progression: Am → F → C → G (4 bars each, 16 beats each) ---
 
 def _verse_pad_chords() -> tuple[Chord, ...]:
-    """Warm pad chords for verses: Dm → Bb → F → C, 16 beats each."""
+    """Warm pad chords for verses: Am → F → C → G, 16 beats each."""
     return (
-        Chord(notes=(D3, F3, A3), velocity=0.4, duration_beats=16.0),
-        Chord(notes=(BB3, D4, F4), velocity=0.4, duration_beats=16.0),
-        Chord(notes=(F3, A3, C4), velocity=0.4, duration_beats=16.0),
-        Chord(notes=(C4, E4, G4), velocity=0.4, duration_beats=16.0),
+        Chord(notes=(A2, C3, E3), velocity=0.4, duration_beats=16.0),   # Am
+        Chord(notes=(F3, A3, C4), velocity=0.4, duration_beats=16.0),   # F
+        Chord(notes=(C3, E3, G3), velocity=0.4, duration_beats=16.0),   # C
+        Chord(notes=(G3, B3, D4), velocity=0.4, duration_beats=16.0),   # G
     )
 
 
 def _chorus_pad_chords() -> tuple[Chord, ...]:
-    """Supporting pad under drops: Dm → Bb → C → Gm, 16 beats each."""
+    """Supporting pad under drops: Am → F → G → Em, 16 beats each."""
     return (
-        Chord(notes=(D3, F3, A3), velocity=0.35, duration_beats=16.0),
-        Chord(notes=(BB3, D4, F4), velocity=0.35, duration_beats=16.0),
-        Chord(notes=(C4, E4, G4), velocity=0.35, duration_beats=16.0),
-        Chord(notes=(G3, BB3, D4), velocity=0.35, duration_beats=16.0),
+        Chord(notes=(A2, C3, E3), velocity=0.35, duration_beats=16.0),  # Am
+        Chord(notes=(F3, A3, C4), velocity=0.35, duration_beats=16.0),  # F
+        Chord(notes=(G3, B3, D4), velocity=0.35, duration_beats=16.0),  # G
+        Chord(notes=(E3, G3, B3), velocity=0.35, duration_beats=16.0),  # Em
     )
 
 
 def _chorus_supersaw_chords() -> tuple[Chord, ...]:
-    """Full supersaw chords for drops: Dm → Bb → C → Gm, 16 beats each."""
+    """Full supersaw chords for drops: Am → F → G → Em, 16 beats each."""
     return (
-        Chord(notes=(D4, F4, A4), velocity=0.8, duration_beats=16.0),
-        Chord(notes=(BB3, D4, F4), velocity=0.8, duration_beats=16.0),
-        Chord(notes=(C4, E4, G4), velocity=0.8, duration_beats=16.0),
-        Chord(notes=(G3, BB3, D4), velocity=0.8, duration_beats=16.0),
+        Chord(notes=(A4, C5, E5), velocity=0.8, duration_beats=16.0),   # Am
+        Chord(notes=(F4, A4, C5), velocity=0.8, duration_beats=16.0),   # F
+        Chord(notes=(G4, B4, D5), velocity=0.8, duration_beats=16.0),   # G
+        Chord(notes=(E4, G4, B4), velocity=0.8, duration_beats=16.0),   # Em
     )
 
 
 def _final_supersaw_chords() -> tuple[Chord, ...]:
     """Stacked supersaw chords for final drop — octave doubled."""
     return (
-        Chord(notes=(D3, D4, F4, A4), velocity=0.9, duration_beats=16.0),
-        Chord(notes=(BB2, BB3, D4, F4), velocity=0.9, duration_beats=16.0),
-        Chord(notes=(C3, C4, E4, G4), velocity=0.9, duration_beats=16.0),
-        Chord(notes=(G2, G3, BB3, D4), velocity=0.9, duration_beats=16.0),
+        Chord(notes=(A3, A4, C5, E5), velocity=0.9, duration_beats=16.0),  # Am
+        Chord(notes=(F3, F4, A4, C5), velocity=0.9, duration_beats=16.0),  # F
+        Chord(notes=(G3, G4, B4, D5), velocity=0.9, duration_beats=16.0),  # G
+        Chord(notes=(E3, E4, G4, B4), velocity=0.9, duration_beats=16.0),  # Em
     )
 
 
 def _bridge_pad_chords() -> tuple[Chord, ...]:
-    """Bridge tension chords: Dm → A → Bb → Gm, 8 beats each."""
+    """Bridge tension chords: Am → E → F → Dm, 8 beats each."""
     return (
-        Chord(notes=(D3, F3, A3), velocity=0.3, duration_beats=8.0),
-        Chord(notes=(A3, CS4, E4), velocity=0.3, duration_beats=8.0),
-        Chord(notes=(BB3, D4, F4), velocity=0.35, duration_beats=8.0),
-        Chord(notes=(G3, BB3, D4), velocity=0.35, duration_beats=8.0),
+        Chord(notes=(A2, C3, E3), velocity=0.3, duration_beats=8.0),    # Am
+        Chord(notes=(E3, G3, B3), velocity=0.3, duration_beats=8.0),    # E (using Em voicing)
+        Chord(notes=(F3, A3, C4), velocity=0.35, duration_beats=8.0),   # F
+        Chord(notes=(D3, F3, A3), velocity=0.35, duration_beats=8.0),   # Dm
     )
 
 
 def _intro_pad_chord() -> tuple[Chord, ...]:
-    """Single sustained Dm chord for intro atmosphere."""
+    """Single sustained Am chord for intro atmosphere."""
     return (
-        Chord(notes=(D3, F3, A3), velocity=0.25, duration_beats=32.0),
+        Chord(notes=(A2, C3, E3), velocity=0.25, duration_beats=32.0),
     )
 
 
 def _outro_pad_chord() -> tuple[Chord, ...]:
-    """Fading Dm chord for outro."""
+    """Fading Am chord for outro."""
     return (
-        Chord(notes=(D3, F3, A3), velocity=0.2, duration_beats=32.0),
+        Chord(notes=(A2, C3, E3), velocity=0.2, duration_beats=32.0),
     )
 
 
@@ -350,13 +335,13 @@ def _outro_pad_chord() -> tuple[Chord, ...]:
 def _verse_bass() -> tuple[Note | Rest, ...]:
     """Sub bass for verses: root notes, 16 beats each."""
     return (
-        Note(midi=D2, velocity=0.6, duration_beats=14.0),
+        Note(midi=A1, velocity=0.6, duration_beats=14.0),   # Am
         Rest(duration_beats=2.0),
-        Note(midi=BB2, velocity=0.6, duration_beats=14.0),
+        Note(midi=F2, velocity=0.6, duration_beats=14.0),   # F
         Rest(duration_beats=2.0),
-        Note(midi=F2, velocity=0.6, duration_beats=14.0),
+        Note(midi=C2, velocity=0.6, duration_beats=14.0),   # C
         Rest(duration_beats=2.0),
-        Note(midi=C3, velocity=0.6, duration_beats=14.0),
+        Note(midi=G2, velocity=0.6, duration_beats=14.0),   # G
         Rest(duration_beats=2.0),
     )
 
@@ -364,7 +349,7 @@ def _verse_bass() -> tuple[Note | Rest, ...]:
 def _chorus_bass() -> tuple[Note | Rest, ...]:
     """Pumping sub bass for drops: root notes, 4-beat pulses."""
     elements: list[Note | Rest] = []
-    roots = (D2, BB2, C3, G2)
+    roots = (A1, F2, G2, E2)  # Am → F → G → Em
     for root in roots:
         for _ in range(4):
             elements.append(Note(midi=root, velocity=0.75, duration_beats=3.5))
@@ -375,7 +360,7 @@ def _chorus_bass() -> tuple[Note | Rest, ...]:
 def _final_bass() -> tuple[Note | Rest, ...]:
     """Maximum bass for final drop — octave doubled pulse."""
     elements: list[Note | Rest] = []
-    roots = (D2, BB2, C3, G2)
+    roots = (A1, F2, G2, E2)
     for root in roots:
         for _ in range(4):
             elements.append(Note(midi=root, velocity=0.85, duration_beats=3.5))
@@ -389,10 +374,10 @@ def _verse_arpeggios() -> tuple[Note, ...]:
     """Pluck arpeggios for verses: 16th notes through chord tones."""
     notes: list[Note] = []
     chord_tones = (
-        (D5, F5, A5, F5),   # Dm
-        (BB4, D5, F5, D5),  # Bb
-        (F5, A5, F5, A5),   # F (using available notes)
-        (C4, E4, G4, E4),   # C
+        (A5, C5, E5, C5),   # Am
+        (F5, A5, C5, A5),   # F
+        (C5, E5, G5, E5),   # C
+        (G4, B4, D5, B4),   # G
     )
     for chord in chord_tones:
         for _ in range(4):
@@ -405,10 +390,10 @@ def _chorus_arpeggios() -> tuple[Note, ...]:
     """Brighter arpeggios for drops."""
     notes: list[Note] = []
     chord_tones = (
-        (D5, F5, A5, F5),   # Dm
-        (BB4, D5, F5, D5),  # Bb
-        (C4, E4, G4, E4),   # C
-        (G4, BB4, D5, BB4), # Gm
+        (A5, C5, E5, C5),   # Am
+        (F5, A5, C5, A5),   # F
+        (G5, B4, D5, B4),   # G
+        (E5, G5, B4, G5),   # Em
     )
     for chord in chord_tones:
         for _ in range(4):
@@ -420,21 +405,21 @@ def _chorus_arpeggios() -> tuple[Note, ...]:
 def _intro_pluck() -> tuple[Note | Rest, ...]:
     """Sparse intro pluck — single notes with space."""
     return (
-        Note(midi=D5, velocity=0.25, duration_beats=2.0),
+        Note(midi=A5, velocity=0.25, duration_beats=2.0),
+        Rest(duration_beats=2.0),
+        Note(midi=E5, velocity=0.2, duration_beats=2.0),
+        Rest(duration_beats=2.0),
+        Note(midi=C5, velocity=0.25, duration_beats=2.0),
         Rest(duration_beats=2.0),
         Note(midi=A4, velocity=0.2, duration_beats=2.0),
         Rest(duration_beats=2.0),
-        Note(midi=F5, velocity=0.25, duration_beats=2.0),
+        Note(midi=E5, velocity=0.25, duration_beats=2.0),
         Rest(duration_beats=2.0),
-        Note(midi=D5, velocity=0.2, duration_beats=2.0),
+        Note(midi=C5, velocity=0.2, duration_beats=2.0),
         Rest(duration_beats=2.0),
-        Note(midi=A4, velocity=0.25, duration_beats=2.0),
+        Note(midi=A5, velocity=0.25, duration_beats=2.0),
         Rest(duration_beats=2.0),
-        Note(midi=F4, velocity=0.2, duration_beats=2.0),
-        Rest(duration_beats=2.0),
-        Note(midi=D5, velocity=0.25, duration_beats=2.0),
-        Rest(duration_beats=2.0),
-        Note(midi=A5, velocity=0.2, duration_beats=2.0),
+        Note(midi=E4, velocity=0.2, duration_beats=2.0),
         Rest(duration_beats=2.0),
     )
 
@@ -442,13 +427,13 @@ def _intro_pluck() -> tuple[Note | Rest, ...]:
 def _bridge_pluck() -> tuple[Note | Rest, ...]:
     """Sparse reverbed pluck for bridge breakdown."""
     return (
-        Note(midi=D5, velocity=0.3, duration_beats=4.0),
+        Note(midi=A5, velocity=0.3, duration_beats=4.0),
         Rest(duration_beats=4.0),
-        Note(midi=CS4, velocity=0.25, duration_beats=4.0),
+        Note(midi=E5, velocity=0.25, duration_beats=4.0),
         Rest(duration_beats=4.0),
-        Note(midi=BB4, velocity=0.3, duration_beats=4.0),
+        Note(midi=F5, velocity=0.3, duration_beats=4.0),
         Rest(duration_beats=4.0),
-        Note(midi=A4, velocity=0.25, duration_beats=4.0),
+        Note(midi=D5, velocity=0.25, duration_beats=4.0),
         Rest(duration_beats=4.0),
     )
 
@@ -456,13 +441,13 @@ def _bridge_pluck() -> tuple[Note | Rest, ...]:
 def _outro_pluck() -> tuple[Note | Rest, ...]:
     """Final pluck notes fading out."""
     return (
-        Note(midi=D5, velocity=0.2, duration_beats=4.0),
+        Note(midi=A5, velocity=0.2, duration_beats=4.0),
         Rest(duration_beats=4.0),
-        Note(midi=A4, velocity=0.15, duration_beats=4.0),
+        Note(midi=E5, velocity=0.15, duration_beats=4.0),
         Rest(duration_beats=4.0),
-        Note(midi=F4, velocity=0.1, duration_beats=4.0),
+        Note(midi=C5, velocity=0.1, duration_beats=4.0),
         Rest(duration_beats=4.0),
-        Note(midi=D5, velocity=0.08, duration_beats=8.0),
+        Note(midi=A4, velocity=0.08, duration_beats=8.0),
     )
 
 
@@ -471,18 +456,18 @@ def _outro_pluck() -> tuple[Note | Rest, ...]:
 def _build_pad_chords() -> tuple[Chord, ...]:
     """Rising pad for pre-chorus build."""
     return (
-        Chord(notes=(D3, F3, A3), velocity=0.5, duration_beats=8.0),
-        Chord(notes=(BB3, D4, F4), velocity=0.55, duration_beats=8.0),
-        Chord(notes=(C4, E4, G4), velocity=0.6, duration_beats=8.0),
-        Chord(notes=(D4, F4, A4), velocity=0.65, duration_beats=8.0),
+        Chord(notes=(A2, C3, E3), velocity=0.5, duration_beats=8.0),    # Am
+        Chord(notes=(F3, A3, C4), velocity=0.55, duration_beats=8.0),   # F
+        Chord(notes=(G3, B3, D4), velocity=0.6, duration_beats=8.0),    # G
+        Chord(notes=(A3, C4, E4), velocity=0.65, duration_beats=8.0),   # Am (octave up)
     )
 
 
 def _build_bass() -> tuple[Note, ...]:
     """Sustained bass during build."""
     return (
-        Note(midi=D2, velocity=0.5, duration_beats=16.0),
-        Note(midi=D2, velocity=0.6, duration_beats=16.0),
+        Note(midi=A1, velocity=0.5, duration_beats=16.0),
+        Note(midi=A1, velocity=0.6, duration_beats=16.0),
     )
 
 
@@ -497,9 +482,9 @@ OUTRO_BEAT: Final[DrumPattern] = _build_outro_beat()
 
 
 def build_arrangement() -> Arrangement:
-    """Build the complete arrangement for Let Me Fall."""
+    """Build the complete arrangement for Stand Still."""
     return Arrangement(
-        title="Let Me Fall",
+        title="Stand Still",
         default_bpm=BPM,
         sections=(
             # ─── INTRO: 0-32 beats ───
@@ -510,7 +495,7 @@ def build_arrangement() -> Arrangement:
                 bpm=BPM,
                 tracks=(
                     InstrumentTrack(
-                        name="pad", instrument_id="dark_pad",
+                        name="pad", instrument_id="pad",
                         events=_intro_pad_chord(),
                         volume=0.3,
                         pan=PanPosition.CENTER,
@@ -531,7 +516,7 @@ def build_arrangement() -> Arrangement:
                 bpm=BPM,
                 tracks=(
                     InstrumentTrack(
-                        name="pad", instrument_id="dark_pad",
+                        name="pad", instrument_id="pad",
                         events=_verse_pad_chords(),
                         volume=0.35,
                         pan=PanPosition.CENTER,
@@ -559,7 +544,7 @@ def build_arrangement() -> Arrangement:
                 bpm=BPM,
                 tracks=(
                     InstrumentTrack(
-                        name="pad", instrument_id="dark_pad",
+                        name="pad", instrument_id="pad",
                         events=_build_pad_chords(),
                         volume=0.45,
                         pan=PanPosition.CENTER,
@@ -593,7 +578,7 @@ def build_arrangement() -> Arrangement:
                         pan=PanPosition.CENTER,
                     ),
                     InstrumentTrack(
-                        name="pad", instrument_id="dark_pad",
+                        name="pad", instrument_id="pad",
                         events=_chorus_pad_chords(),
                         volume=0.25,
                         pan=PanPosition.CENTER,
@@ -621,7 +606,7 @@ def build_arrangement() -> Arrangement:
                 bpm=BPM,
                 tracks=(
                     InstrumentTrack(
-                        name="pad", instrument_id="dark_pad",
+                        name="pad", instrument_id="pad",
                         events=_verse_pad_chords(),
                         volume=0.3,
                         pan=PanPosition.CENTER,
@@ -649,7 +634,7 @@ def build_arrangement() -> Arrangement:
                 bpm=BPM,
                 tracks=(
                     InstrumentTrack(
-                        name="pad", instrument_id="dark_pad",
+                        name="pad", instrument_id="pad",
                         events=_build_pad_chords(),
                         volume=0.5,
                         pan=PanPosition.CENTER,
@@ -683,7 +668,7 @@ def build_arrangement() -> Arrangement:
                         pan=PanPosition.CENTER,
                     ),
                     InstrumentTrack(
-                        name="pad", instrument_id="dark_pad",
+                        name="pad", instrument_id="pad",
                         events=_chorus_pad_chords(),
                         volume=0.3,
                         pan=PanPosition.CENTER,
@@ -711,7 +696,7 @@ def build_arrangement() -> Arrangement:
                 bpm=BPM,
                 tracks=(
                     InstrumentTrack(
-                        name="pad", instrument_id="dark_pad",
+                        name="pad", instrument_id="pad",
                         events=_bridge_pad_chords(),
                         volume=0.2,
                         pan=PanPosition.CENTER,
@@ -738,7 +723,7 @@ def build_arrangement() -> Arrangement:
                         pan=PanPosition.CENTER,
                     ),
                     InstrumentTrack(
-                        name="pad", instrument_id="dark_pad",
+                        name="pad", instrument_id="pad",
                         events=_chorus_pad_chords(),
                         volume=0.3,
                         pan=PanPosition.CENTER,
@@ -766,7 +751,7 @@ def build_arrangement() -> Arrangement:
                 bpm=BPM,
                 tracks=(
                     InstrumentTrack(
-                        name="pad", instrument_id="dark_pad",
+                        name="pad", instrument_id="pad",
                         events=_outro_pad_chord(),
                         volume=0.2,
                         pan=PanPosition.CENTER,
@@ -792,24 +777,24 @@ VOCALS: Final[list[VocalSection]] = [
     # ─── INTRO ───
     VocalSection(
         section_id="intro",
-        text="I built these walls, with steady hands",
+        text="Everyone is moving, everyone but me",
         style=VocalStyle.WHISPER,
         singing=True,
         volume=0.6,
         gap_after_seconds=0.0,
         num_takes=3,
         pitch_correction_intensity=0.5,
-        pitch_correction_key="D",
+        pitch_correction_key="A",
         pitch_correction_scale="minor",
     ),
     # ─── VERSE 1A ───
     VocalSection(
         section_id="verse_1a",
         text=(
-            "I built these walls with steady hands, "
-            "but steady hands still shake at night. "
-            "I held my breath for twenty years, "
-            "forgot what air tastes like"
+            "I ran through every open door, "
+            "before I knew where they led. "
+            "I chased the clock around the block, "
+            "and slept inside its hands"
         ),
         style=VocalStyle.SINGING,
         singing=True,
@@ -817,17 +802,17 @@ VOCALS: Final[list[VocalSection]] = [
         gap_after_seconds=0.5,
         num_takes=3,
         pitch_correction_intensity=0.7,
-        pitch_correction_key="D",
+        pitch_correction_key="A",
         pitch_correction_scale="minor",
     ),
     # ─── VERSE 1B ───
     VocalSection(
         section_id="verse_1b",
         text=(
-            "I drew the map, I marked the lines, "
-            "colored inside every one. "
-            "The picture looked like someone's life, "
-            "but I don't know whose"
+            "I filled the silence up with noise, "
+            "and called the static peace. "
+            "I wore my busy like a crown, "
+            "until the gold turned green"
         ),
         style=VocalStyle.SINGING,
         singing=True,
@@ -835,15 +820,15 @@ VOCALS: Final[list[VocalSection]] = [
         gap_after_seconds=0.3,
         num_takes=3,
         pitch_correction_intensity=0.7,
-        pitch_correction_key="D",
+        pitch_correction_key="A",
         pitch_correction_scale="minor",
     ),
     # ─── PRE-CHORUS 1 ───
     VocalSection(
         section_id="pre_chorus_1",
         text=(
-            "My fingers slip, the edge is gone, "
-            "and I'm not scared anymore"
+            "My legs gave out, the world kept spinning, "
+            "and I just stayed right here"
         ),
         style=VocalStyle.SINGING,
         singing=True,
@@ -851,17 +836,17 @@ VOCALS: Final[list[VocalSection]] = [
         gap_after_seconds=0.0,
         num_takes=3,
         pitch_correction_intensity=0.7,
-        pitch_correction_key="D",
+        pitch_correction_key="A",
         pitch_correction_scale="minor",
     ),
     # ─── CHORUS 1A ───
     VocalSection(
         section_id="chorus_1a",
         text=(
-            "Let me fall, I don't need the ground. "
-            "Let me fall into the sound. "
-            "I've been holding on so long, "
-            "let me fall where I belong"
+            "Stand still, let the whole world blur. "
+            "Stand still, every sound a color I never heard. "
+            "I've been running all my life, "
+            "stand still, stand still"
         ),
         style=VocalStyle.SINGING,
         singing=True,
@@ -869,17 +854,17 @@ VOCALS: Final[list[VocalSection]] = [
         gap_after_seconds=0.3,
         num_takes=3,
         pitch_correction_intensity=0.8,
-        pitch_correction_key="D",
+        pitch_correction_key="A",
         pitch_correction_scale="minor",
     ),
     # ─── CHORUS 1B ───
     VocalSection(
         section_id="chorus_1b",
         text=(
-            "Let me fall, through the noise and the light. "
-            "Let me fall through the night. "
-            "I don't need to understand, "
-            "let me fall from my own hands"
+            "Stand still, let the streetlights bend. "
+            "Stand still, I don't need to know how this ends. "
+            "I've been everywhere but here, "
+            "stand still, stand still"
         ),
         style=VocalStyle.SINGING,
         singing=True,
@@ -887,17 +872,17 @@ VOCALS: Final[list[VocalSection]] = [
         gap_after_seconds=0.5,
         num_takes=3,
         pitch_correction_intensity=0.8,
-        pitch_correction_key="D",
+        pitch_correction_key="A",
         pitch_correction_scale="minor",
     ),
     # ─── VERSE 2A ───
     VocalSection(
         section_id="verse_2a",
         text=(
-            "I see the city from up here, "
-            "the lights look just like breathing. "
-            "My old life fits inside a window, "
-            "too small to climb back through"
+            "The traffic parts around my skin, "
+            "like water past a stone. "
+            "The people blur like painted streaks, "
+            "I'm solid and alone"
         ),
         style=VocalStyle.SINGING,
         singing=True,
@@ -905,17 +890,17 @@ VOCALS: Final[list[VocalSection]] = [
         gap_after_seconds=0.5,
         num_takes=3,
         pitch_correction_intensity=0.7,
-        pitch_correction_key="D",
+        pitch_correction_key="A",
         pitch_correction_scale="minor",
     ),
     # ─── VERSE 2B ───
     VocalSection(
         section_id="verse_2b",
         text=(
-            "I kept a list of all the things "
-            "that I was supposed to be. "
-            "I folded it into a bird, "
-            "and watched it leave without me"
+            "My phone is ringing in my coat, "
+            "I let it ring and ring. "
+            "The wind knows every word I need, "
+            "and says them all at once"
         ),
         style=VocalStyle.SINGING,
         singing=True,
@@ -923,15 +908,15 @@ VOCALS: Final[list[VocalSection]] = [
         gap_after_seconds=0.3,
         num_takes=3,
         pitch_correction_intensity=0.7,
-        pitch_correction_key="D",
+        pitch_correction_key="A",
         pitch_correction_scale="minor",
     ),
     # ─── PRE-CHORUS 2 ───
     VocalSection(
         section_id="pre_chorus_2",
         text=(
-            "The air is thin, the sky is wide, "
-            "and I was never meant to land"
+            "The ground is warm, the sky is close, "
+            "and I'm exactly where I am"
         ),
         style=VocalStyle.SINGING,
         singing=True,
@@ -939,17 +924,17 @@ VOCALS: Final[list[VocalSection]] = [
         gap_after_seconds=0.0,
         num_takes=3,
         pitch_correction_intensity=0.7,
-        pitch_correction_key="D",
+        pitch_correction_key="A",
         pitch_correction_scale="minor",
     ),
     # ─── CHORUS 2A ───
     VocalSection(
         section_id="chorus_2a",
         text=(
-            "Let me fall, I don't need the ground. "
-            "Let me fall into the sound. "
-            "I've been holding on so long, "
-            "let me fall where I belong"
+            "Stand still, let the whole world blur. "
+            "Stand still, every sound a color I never heard. "
+            "I've been running all my life, "
+            "stand still, stand still"
         ),
         style=VocalStyle.SINGING,
         singing=True,
@@ -957,17 +942,17 @@ VOCALS: Final[list[VocalSection]] = [
         gap_after_seconds=0.3,
         num_takes=3,
         pitch_correction_intensity=0.8,
-        pitch_correction_key="D",
+        pitch_correction_key="A",
         pitch_correction_scale="minor",
     ),
     # ─── CHORUS 2B ───
     VocalSection(
         section_id="chorus_2b",
         text=(
-            "Let me fall, through the noise and the light. "
-            "Let me fall through the night. "
-            "I don't need to understand, "
-            "let me fall from my own hands"
+            "Stand still, let the streetlights bend. "
+            "Stand still, I don't need to know how this ends. "
+            "I've been everywhere but here, "
+            "stand still, stand still"
         ),
         style=VocalStyle.SINGING,
         singing=True,
@@ -975,16 +960,16 @@ VOCALS: Final[list[VocalSection]] = [
         gap_after_seconds=0.5,
         num_takes=3,
         pitch_correction_intensity=0.8,
-        pitch_correction_key="D",
+        pitch_correction_key="A",
         pitch_correction_scale="minor",
     ),
     # ─── BRIDGE ───
     VocalSection(
         section_id="bridge",
         text=(
-            "There is no bottom. There is no end. "
-            "Just the fall. "
-            "And falling feels like flying"
+            "I'm not lost. I'm not late. "
+            "I'm just here. "
+            "And here is enough"
         ),
         style=VocalStyle.WHISPER,
         singing=True,
@@ -992,17 +977,17 @@ VOCALS: Final[list[VocalSection]] = [
         gap_after_seconds=0.0,
         num_takes=3,
         pitch_correction_intensity=0.3,
-        pitch_correction_key="D",
+        pitch_correction_key="A",
         pitch_correction_scale="minor",
     ),
     # ─── FINAL CHORUS A ───
     VocalSection(
         section_id="final_chorus_a",
         text=(
-            "Let me fall, I don't need the ground. "
-            "Let me fall into the sound. "
-            "I've been standing still so long, "
-            "let me fall where I belong"
+            "Stand still, let the whole world blur. "
+            "Stand still, every sound a color I never heard. "
+            "I stopped running from my life, "
+            "stand still, stand still"
         ),
         style=VocalStyle.EPIC,
         singing=True,
@@ -1010,16 +995,16 @@ VOCALS: Final[list[VocalSection]] = [
         gap_after_seconds=0.3,
         num_takes=3,
         pitch_correction_intensity=0.9,
-        pitch_correction_key="D",
+        pitch_correction_key="A",
         pitch_correction_scale="minor",
     ),
     # ─── FINAL CHORUS B ───
     VocalSection(
         section_id="final_chorus_b",
         text=(
-            "Let me fall, I don't need to understand. "
-            "Let me fall, "
-            "let me fall from my own hands"
+            "Stand still, I don't need to move. "
+            "Stand still, "
+            "stand still and let the world come to you"
         ),
         style=VocalStyle.EPIC,
         singing=True,
@@ -1027,20 +1012,20 @@ VOCALS: Final[list[VocalSection]] = [
         gap_after_seconds=0.5,
         num_takes=3,
         pitch_correction_intensity=0.9,
-        pitch_correction_key="D",
+        pitch_correction_key="A",
         pitch_correction_scale="minor",
     ),
     # ─── OUTRO ───
     VocalSection(
         section_id="outro",
-        text="Falling feels like flying, falling feels like flying",
+        text="Here is enough, here is enough",
         style=VocalStyle.WHISPER,
         singing=True,
         volume=0.5,
         gap_after_seconds=0.0,
         num_takes=3,
         pitch_correction_intensity=0.3,
-        pitch_correction_key="D",
+        pitch_correction_key="A",
         pitch_correction_scale="minor",
     ),
 ]
@@ -1084,7 +1069,7 @@ SFX_PLACEMENT: Final[
 # ═══════════════════════════════════════════════════════════════════════════
 
 def main() -> None:
-    """Generate Let Me Fall: instrumental + vocals + SFX → mastered MP3."""
+    """Generate Stand Still: instrumental + vocals + SFX → mastered MP3."""
     os.makedirs(OUTPUT_DIR, exist_ok=True)
 
     # ── 1. Render instrumental ──
