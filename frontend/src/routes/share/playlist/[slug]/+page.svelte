@@ -4,24 +4,22 @@
 	import { APP_NAME } from '$lib/constants';
 	import LegalContent from '$lib/components/LegalContent.svelte';
 
-	interface SharedSong {
-		title: string;
-		track_number: number;
+	interface SharedEntry {
+		song_title: string;
+		artist: string;
+		generation_number: number;
 		audio_url: string | null;
 	}
 
-	interface SharedAlbum {
+	interface SharedPlaylist {
 		title: string;
-		artist: string;
-		subtitle: string;
-		year: string;
-		songs: SharedSong[];
+		entries: SharedEntry[];
 	}
 
-	let album: SharedAlbum | null = $state(null);
+	let playlist: SharedPlaylist | null = $state(null);
 	let error: string | null = $state(null);
 	let loading = $state(true);
-	let currentTrack: SharedSong | null = $state(null);
+	let currentTrack: SharedEntry | null = $state(null);
 	let audioEl: HTMLAudioElement | null = $state(null);
 	let isPlaying = $state(false);
 	let progress = $state(0);
@@ -30,36 +28,36 @@
 	const slug = $derived(page.params.slug ?? '');
 
 	$effect(() => {
-		if (slug) fetchAlbum(slug);
+		if (slug) fetchData(slug);
 	});
 
-	async function fetchAlbum(s: string) {
+	async function fetchData(s: string) {
 		loading = true;
 		error = null;
 		try {
-			const resp = await fetch(`/shared/${s}`);
+			const resp = await fetch(`/shared/playlist/${s}`);
 			if (!resp.ok) {
-				error = resp.status === 404 ? 'Album not found' : 'Failed to load album';
+				error = resp.status === 404 ? 'Playlist not found' : 'Failed to load playlist';
 				return;
 			}
-			album = await resp.json();
+			playlist = await resp.json();
 		} catch {
-			error = 'Failed to load album';
+			error = 'Failed to load playlist';
 		} finally {
 			loading = false;
 		}
 	}
 
-	function play(song: SharedSong) {
-		if (!song.audio_url) return;
-		if (currentTrack === song && isPlaying) {
+	function play(entry: SharedEntry) {
+		if (!entry.audio_url) return;
+		if (currentTrack === entry && isPlaying) {
 			audioEl?.pause();
 			isPlaying = false;
 			return;
 		}
-		currentTrack = song;
+		currentTrack = entry;
 		if (audioEl) {
-			audioEl.src = song.audio_url;
+			audioEl.src = entry.audio_url;
 			audioEl.play();
 			isPlaying = true;
 		}
@@ -74,9 +72,9 @@
 	function onEnded() {
 		isPlaying = false;
 		progress = 0;
-		if (!album || !currentTrack) return;
-		const idx = album.songs.indexOf(currentTrack);
-		const next = album.songs.slice(idx + 1).find((s) => s.audio_url);
+		if (!playlist || !currentTrack) return;
+		const idx = playlist.entries.indexOf(currentTrack);
+		const next = playlist.entries.slice(idx + 1).find((e) => e.audio_url);
 		if (next) play(next);
 	}
 
@@ -96,7 +94,7 @@
 </script>
 
 <svelte:head>
-	<title>{album ? `${album.title} — ${album.artist}` : 'Shared Album'} | {APP_NAME}</title>
+	<title>{playlist ? playlist.title : 'Shared Playlist'} | {APP_NAME}</title>
 </svelte:head>
 
 <svelte:window
@@ -122,28 +120,31 @@
 		<div class="center">Loading...</div>
 	{:else if error}
 		<div class="center error">{error}</div>
-	{:else if album}
-		<div class="album-header">
-			<h1 data-text={album.title}>{album.title}</h1>
-			<p class="artist">{album.artist}</p>
-			{#if album.subtitle}<p class="subtitle">{album.subtitle}</p>{/if}
-			{#if album.year}<p class="year">{album.year}</p>{/if}
+	{:else if playlist}
+		<div class="playlist-header">
+			<h1 data-text={playlist.title}>{playlist.title}</h1>
+			<p class="track-count">
+				{playlist.entries.length} track{playlist.entries.length !== 1 ? 's' : ''}
+			</p>
 		</div>
 
 		<div class="tracklist">
-			{#each album.songs as song (song.track_number)}
+			{#each playlist.entries as entry, i (i)}
 				<button
 					class="track"
-					class:active={currentTrack === song}
-					class:disabled={!song.audio_url}
-					onclick={() => play(song)}
-					disabled={!song.audio_url}
+					class:active={currentTrack === entry}
+					class:disabled={!entry.audio_url}
+					onclick={() => play(entry)}
+					disabled={!entry.audio_url}
 				>
-					<span class="track-num">{song.track_number}</span>
-					<span class="track-title">{song.title}</span>
-					{#if currentTrack === song && isPlaying}
+					<span class="track-num">{i + 1}</span>
+					<span class="track-title">
+						{entry.song_title}
+						<span class="track-artist">{entry.artist}</span>
+					</span>
+					{#if currentTrack === entry && isPlaying}
 						<span class="track-status">&#9654;</span>
-					{:else if !song.audio_url}
+					{:else if !entry.audio_url}
 						<span class="track-status dim">--</span>
 					{/if}
 				</button>
@@ -153,7 +154,7 @@
 		{#if currentTrack && audioEl}
 			<div class="now-playing">
 				<div class="now-info">
-					<span class="now-title">{currentTrack.title}</span>
+					<span class="now-title">{currentTrack.song_title}</span>
 					<span class="now-time">
 						{formatTime(audioEl.currentTime || 0)} / {formatTime(audioEl.duration || 0)}
 					</span>
@@ -268,58 +269,25 @@
 		color: var(--primary, #ff3220);
 	}
 
-	.album-header {
+	.playlist-header {
 		text-align: center;
 		margin-bottom: 2rem;
 		position: relative;
 	}
 
-	.album-header h1 {
+	.playlist-header h1 {
 		font-family: var(--font-display, 'Oswald', sans-serif);
 		font-size: 2.4rem;
 		text-transform: uppercase;
 		letter-spacing: 0.05em;
 		margin: 0 0 0.3rem;
 		color: var(--text);
-		position: relative;
 	}
 
-	@media (prefers-reduced-motion: no-preference) {
-		.album-header h1:hover::after {
-			content: attr(data-text);
-			position: absolute;
-			top: 0;
-			left: 0;
-			right: 0;
-			color: var(--accent);
-			clip-path: inset(0 0 50% 0);
-			animation: title-glitch 0.3s steps(2) infinite;
-		}
-	}
-
-	@keyframes title-glitch {
-		0% {
-			transform: translate(0);
-		}
-		50% {
-			transform: translate(3px, -1px);
-		}
-		100% {
-			transform: translate(-2px, 1px);
-		}
-	}
-
-	.artist {
-		font-size: 1.1rem;
-		color: var(--primary, #ff3220);
-		margin: 0;
-	}
-
-	.subtitle,
-	.year {
-		color: var(--text-muted, #888);
-		margin: 0.2rem 0 0;
+	.track-count {
 		font-size: 0.9rem;
+		color: var(--text-muted, #888);
+		margin: 0;
 	}
 
 	.tracklist {
@@ -342,14 +310,12 @@
 		text-align: left;
 		transition:
 			background 0.15s,
-			border-color 0.15s,
-			box-shadow 0.15s;
+			border-color 0.15s;
 	}
 
 	.track:hover:not(.disabled) {
 		background: color-mix(in srgb, var(--surface-hover) 90%, transparent);
 		border-color: color-mix(in srgb, var(--accent) 15%, transparent);
-		box-shadow: 0 0 12px color-mix(in srgb, var(--accent) 8%, transparent);
 	}
 
 	.track.active {
@@ -372,6 +338,14 @@
 
 	.track-title {
 		flex: 1;
+		display: flex;
+		flex-direction: column;
+		gap: 2px;
+	}
+
+	.track-artist {
+		font-size: 0.75rem;
+		color: var(--text-muted, #888);
 	}
 
 	.track-status {
