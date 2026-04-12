@@ -8,61 +8,61 @@ license = { text = "MIT" }
 requires-python = ">=3.12,<3.13"
 
 dependencies = [
-    "numpy>=1.26,<3",
-    "scipy>=1.12,<2",
-    "pydantic>=2.0,<3",
-    "pydantic-settings>=2.0,<3",
-    "cyclopts>=4.0,<5",
-    "pyloudnorm>=0.1,<1",
-    "httpx>=0.27,<1",
-    "python-slugify>=8.0,<9",
+    "numpy>=2.4.4,<3",
+    "scipy>=1.17.1,<2",
+    "pydantic>=2.12.5,<3",
+    "pydantic-settings>=2.13.1,<3",
+    "cyclopts>=4.10.2,<5",
+    "pyloudnorm>=0.2.0,<1",
+    "httpx>=0.28.1,<1",
+    "python-slugify>=8.0.4,<9",
 ]
 
 [project.optional-dependencies]
 scoring = [
-    "librosa>=0.10,<1",
+    "librosa>=0.11.0,<1",
     "soundfile",
     "audiobox-aesthetics>=0.0.4,<1",
-    "torch>=2.2,<3",
+    "torch>=2.11.0,<3",
     "nvidia-ml-py3>=7.352,<8",
 ]
 whisper = [
-    "faster-whisper>=1.1,<2",
-    "torch>=2.2,<3",
+    "faster-whisper>=1.2.1,<2",
+    "torch>=2.11.0,<3",
     "soundfile",
-    "librosa>=0.10,<1",
+    "librosa>=0.11.0,<1",
     "numba",
 ]
 server = [
-    "fastapi>=0.100,<1",
-    "uvicorn>=0.20,<1",
-    "sqlalchemy>=2.0,<3",
-    "alembic>=1.13,<2",
-    "bcrypt>=4.0,<5",
-    "python-dotenv>=1.0,<2",
-    "structlog>=24.0,<26",
-    "redis[hiredis]>=5.0,<6",
-    "psycopg2-binary>=2.9,<3",
-    "arq>=0.26,<1",
+    "fastapi>=0.135.3,<1",
+    "uvicorn>=0.44.0,<1",
+    "sqlalchemy>=2.0.49,<3",
+    "alembic>=1.18.4,<2",
+    "bcrypt>=5.0.0,<6",
+    "python-dotenv>=1.2.2,<2",
+    "structlog>=25.5.0,<26",
+    "redis[hiredis]>=7.4.0,<8",
+    "psycopg2-binary>=2.9.11,<3",
+    "arq>=0.27.0,<1",
     "mutagen>=1.47,<2",
-    "python-multipart>=0.0.7,<1",
+    "python-multipart>=0.0.26,<1",
 ]
 claude = [
-    "anthropic>=0.20,<1",
+    "anthropic>=0.94.0,<1",
 ]
 acestep-worker = [
-    "fastapi>=0.100,<1",
-    "uvicorn>=0.20,<1",
-    "redis[hiredis]>=5.0,<6",
-    "huggingface_hub>=0.20,<1",
+    "fastapi>=0.135.3,<1",
+    "uvicorn>=0.44.0,<1",
+    "redis[hiredis]>=7.4.0,<8",
+    "huggingface_hub>=1.10.1,<2",
     "nvidia-ml-py3>=7.352,<8",
 ]
 dev = [
-    "pytest>=7.0,<10",
-    "pytest-cov>=7.0,<8",
+    "pytest>=9.0.3,<10",
+    "pytest-cov>=7.1.0,<8",
     "pytest-xdist>=3.8,<4",
-    "ruff>=0.4,<1",
-    "fakeredis[lua]>=2.0,<3",
+    "ruff>=0.15.10,<1",
+    "fakeredis[lua]>=2.35.0,<3",
 ]
 
 [project.scripts]
@@ -72,7 +72,7 @@ songmaker = "songmaker_cli.main:main"
 Repository = "https://github.com/flex0r/songmaker"
 
 [build-system]
-requires = ["setuptools>=68.0", "wheel"]
+requires = ["setuptools>=82.0.1", "wheel"]
 build-backend = "setuptools.build_meta"
 
 [tool.setuptools.packages.find]
