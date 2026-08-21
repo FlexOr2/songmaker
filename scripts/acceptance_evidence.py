@@ -21,6 +21,21 @@ class AcceptanceEvidenceError(Exception):
     pass
 
 
+class KnownClaimsError(AcceptanceEvidenceError):
+    def __init__(self, error: Exception, claims: tuple[AcceptanceClaim, ...]) -> None:
+        super().__init__(str(error))
+        self.claims = claims
+
+
+class ClaimsExecutionError(AcceptanceEvidenceError):
+    def __init__(
+        self, error: Exception, records: list[dict[str, object]], commands: list[str]
+    ) -> None:
+        super().__init__(str(error))
+        self.records = records
+        self.commands = commands
+
+
 @dataclass(frozen=True, slots=True)
 class AcceptanceClaim:
     nodeid: str
@@ -35,17 +50,20 @@ def collect_claims(project_root: Path) -> tuple[AcceptanceClaim, ...]:
     claims: list[AcceptanceClaim] = []
     claimed_ids: set[str] = set()
     for source in sorted(tests_directory.rglob("*.py")):
-        if not source.is_file() or source.is_symlink():
-            raise AcceptanceEvidenceError(
-                f"{source.relative_to(project_root)} must be a regular file"
-            )
         try:
-            tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
-        except (OSError, UnicodeDecodeError, SyntaxError) as error:
-            raise AcceptanceEvidenceError(
-                f"cannot parse {source.relative_to(project_root)}"
-            ) from error
-        claims.extend(_claims_from_module(project_root, source, tree, claimed_ids))
+            if not source.is_file() or source.is_symlink():
+                raise AcceptanceEvidenceError(
+                    f"{source.relative_to(project_root)} must be a regular file"
+                )
+            try:
+                tree = ast.parse(source.read_text(encoding="utf-8"), filename=str(source))
+            except (OSError, UnicodeDecodeError, SyntaxError) as error:
+                raise AcceptanceEvidenceError(
+                    f"cannot parse {source.relative_to(project_root)}"
+                ) from error
+            _claims_from_module(project_root, source, tree, claimed_ids, claims)
+        except AcceptanceEvidenceError as error:
+            raise KnownClaimsError(error, tuple(claims)) from error
     return tuple(claims)
 
 
@@ -83,10 +101,14 @@ def validate_claims(
 
 
 def load_claims(project_root: Path) -> tuple[AcceptanceClaim, ...]:
-    shelf = read_requirement_shelf(project_root)
-    return validate_claims(
-        collect_claims(project_root), read_acceptance_manifest(project_root, shelf)
-    )
+    claims = collect_claims(project_root)
+    acceptances: tuple[AcceptanceEntry, ...] = ()
+    try:
+        shelf = read_requirement_shelf(project_root)
+        acceptances = read_acceptance_manifest(project_root, shelf)
+        return validate_claims(claims, acceptances)
+    except Exception as error:
+        raise KnownClaimsError(error, _claims_with_proof_kinds(claims, acceptances)) from error
 
 
 def run_claims(
@@ -95,10 +117,14 @@ def run_claims(
     records: list[dict[str, object]] = []
     commands: list[str] = []
     exit_status = 0
-    for claim in claims:
+    for index, claim in enumerate(claims):
         command = [*PYTEST_COMMAND, claim.nodeid]
-        result = subprocess.run(command, cwd=project_root, check=False)
         commands.extend(command)
+        try:
+            result = subprocess.run(command, cwd=project_root, check=False)
+        except Exception as error:
+            records.extend(_not_run_records(claims[index:]))
+            raise ClaimsExecutionError(error, records, commands) from error
         records.append(
             {
                 "nodeid": claim.nodeid,
@@ -122,6 +148,14 @@ def run(project_root: Path, output: Path) -> int:
         records, exit_status, command = run_claims(project_root, claims)
         report["records"] = records
         report["command"] = command
+    except KnownClaimsError as error:
+        report["records"] = _not_run_records(error.claims)
+        report["error"] = str(error)
+        report["command"] = ["acceptance-evidence", "check"]
+    except ClaimsExecutionError as error:
+        report["records"] = error.records
+        report["error"] = str(error)
+        report["command"] = error.commands
     except Exception as error:
         report["error"] = str(error)
         report["command"] = ["acceptance-evidence", "check"]
@@ -132,10 +166,13 @@ def run(project_root: Path, output: Path) -> int:
 
 
 def _claims_from_module(
-    project_root: Path, source: Path, tree: ast.Module, claimed_ids: set[str]
-) -> list[AcceptanceClaim]:
+    project_root: Path,
+    source: Path,
+    tree: ast.Module,
+    claimed_ids: set[str],
+    claims: list[AcceptanceClaim],
+) -> None:
     accepted_attributes: set[int] = set()
-    claims: list[AcceptanceClaim] = []
     for node in tree.body:
         if not isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
             continue
@@ -180,7 +217,36 @@ def _claims_from_module(
         ):
             location = f"{source.relative_to(project_root)}:{node.lineno}"
             raise AcceptanceEvidenceError(f"{location} acceptance marker is not direct top-level")
-    return claims
+
+
+def _claims_with_proof_kinds(
+    claims: tuple[AcceptanceClaim, ...], acceptances: tuple[AcceptanceEntry, ...]
+) -> tuple[AcceptanceClaim, ...]:
+    proof_kinds = {entry.identifier: entry.proof_kind for entry in acceptances}
+    return tuple(
+        AcceptanceClaim(
+            claim.nodeid,
+            claim.acceptance_id,
+            proof_kinds.get(claim.acceptance_id, claim.proof_kind),
+        )
+        for claim in claims
+    )
+
+
+def _not_run_records(claims: tuple[AcceptanceClaim, ...]) -> list[dict[str, object]]:
+    return [
+        {
+            "nodeid": claim.nodeid,
+            "acceptance_id": claim.acceptance_id,
+            "proof_kind": claim.proof_kind,
+            "outcome": "not_run",
+            "command": [*PYTEST_COMMAND, claim.nodeid],
+            "exit_status": None,
+        }
+        for claim in sorted(
+            claims, key=lambda claim: (claim.nodeid, claim.acceptance_id, claim.proof_kind)
+        )
+    ]
 
 
 def _looks_like_acceptance(expression: ast.expr) -> bool:
