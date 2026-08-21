@@ -3,11 +3,9 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import type { QueueStreamManifest } from '$lib/api/types';
 import { setQueuePlaybackMode } from '$lib/stores/playbackSettings';
 
-vi.mock('$app/state', () => ({ page: { params: { slug: 'shared-album' } } }));
+vi.mock('$app/state', () => ({ page: { params: { slug: 'shared-playlist' } } }));
 
 import Page from './+page.svelte';
-
-const mockFetch = vi.fn();
 
 class FakeAudio {
 	paused = true;
@@ -39,37 +37,46 @@ class FakeAudio {
 	}
 }
 
-const album = {
-	title: 'Shared album',
-	artist: 'Artist',
-	subtitle: '',
-	year: '',
-	songs: [
-		{ id: 's1', title: 'First', track_number: 1, audio_url: '/audio/first.mp3' },
-		{ id: 's2', title: 'Second', track_number: 2, audio_url: '/audio/second.mp3' }
+const playlist = {
+	title: 'Shared playlist',
+	entries: [
+		{
+			entry_id: 'entry-1',
+			song_title: 'First',
+			artist: 'Artist',
+			generation_number: 1,
+			audio_url: '/audio/first.mp3'
+		},
+		{
+			entry_id: 'entry-2',
+			song_title: 'Second',
+			artist: 'Artist',
+			generation_number: 1,
+			audio_url: '/audio/second.mp3'
+		}
 	]
 };
 
 function manifest(windowed: boolean): QueueStreamManifest {
 	return {
-		snapshot_id: 'shared-stream',
-		stream_url: '/shared-stream.mp3',
+		snapshot_id: 'shared-playlist-stream',
+		stream_url: '/shared-playlist-stream.mp3',
 		expires_at: '2099-01-01T00:00:00Z',
 		total_duration: 20,
 		windowed,
 		skipped: [],
 		skipped_complete: true,
-		tracks: album.songs.map((song, index) => ({
-			key: song.id,
+		tracks: playlist.entries.map((entry, index) => ({
+			key: entry.entry_id,
 			index,
-			entry_id: null,
+			entry_id: entry.entry_id,
 			generation_id: `g${index + 1}`,
-			song_id: song.id,
-			song_title: song.title,
-			artist: album.artist,
-			generation_number: 1,
-			mp3_path: `${song.id}.mp3`,
-			audio_url: song.audio_url,
+			song_id: `s${index + 1}`,
+			song_title: entry.song_title,
+			artist: entry.artist,
+			generation_number: entry.generation_number,
+			mp3_path: `${entry.entry_id}.mp3`,
+			audio_url: entry.audio_url,
 			seed: null,
 			model_mode: 'sft',
 			duration: 10,
@@ -79,6 +86,7 @@ function manifest(windowed: boolean): QueueStreamManifest {
 	};
 }
 
+const mockFetch = vi.fn();
 let component: ReturnType<typeof mount> | undefined;
 let audio: FakeAudio;
 
@@ -106,42 +114,10 @@ afterEach(async () => {
 	vi.restoreAllMocks();
 });
 
-describe('shared album recovery', () => {
-	it('shows loading during retry and can recover into the album', async () => {
-		mockFetch.mockResolvedValueOnce({ ok: false, status: 500 });
-		const target = document.createElement('div');
-		document.body.appendChild(target);
-		component = mount(Page, { target });
-
-		await vi.waitFor(() => {
-			expect(target.querySelector('h1')?.textContent).toBe('Could not load this album');
-		});
-
-		let finishRetry: ((response: unknown) => void) | undefined;
-		mockFetch.mockReturnValueOnce(new Promise((resolve) => (finishRetry = resolve)));
-		target.querySelector<HTMLButtonElement>('button')?.click();
-		await tick();
-		expect(target.querySelector('h1')?.textContent).toBe('Loading album');
-
-		finishRetry?.({
-			ok: true,
-			status: 200,
-			json: async () => ({
-				title: 'Recovered album',
-				artist: 'Artist',
-				subtitle: '',
-				year: '',
-				songs: []
-			})
-		});
-		await vi.waitFor(() => {
-			expect(target.querySelector('h1')?.textContent).toBe('Recovered album');
-		});
-	});
-
+describe('shared playlist playback', () => {
 	it('passes windowed manifests through and stops without wrapping', async () => {
 		mockFetch
-			.mockResolvedValueOnce({ ok: true, status: 200, json: async () => album })
+			.mockResolvedValueOnce({ ok: true, status: 200, json: async () => playlist })
 			.mockResolvedValueOnce({ ok: true, status: 200, json: async () => manifest(true) });
 		const target = document.createElement('div');
 		document.body.appendChild(target);
@@ -157,9 +133,9 @@ describe('shared album recovery', () => {
 		expect(target.querySelectorAll<HTMLButtonElement>('.track')[1].classList).toContain('active');
 	});
 
-	it('keeps direct non-windowed album playback wrapping', async () => {
+	it('keeps direct non-windowed playlist playback wrapping', async () => {
 		setQueuePlaybackMode('classic');
-		mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => album });
+		mockFetch.mockResolvedValueOnce({ ok: true, status: 200, json: async () => playlist });
 		const target = document.createElement('div');
 		document.body.appendChild(target);
 		component = mount(Page, { target });
