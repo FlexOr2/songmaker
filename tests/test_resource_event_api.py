@@ -792,10 +792,20 @@ def test_outer_app_deadline_cancels_blocked_send_and_schedules_lease_release(
     ]
     assert len(deadline_middleware) == 1
     assert app.user_middleware[0] is deadline_middleware[0]
+    app.middleware_stack = app.build_middleware_stack()
+    runtime_middleware = app.middleware_stack
+    while runtime_middleware is not None and not isinstance(
+        runtime_middleware,
+        ResourceStreamDeadlineMiddleware,
+    ):
+        runtime_middleware = getattr(runtime_middleware, "app", None)
+    assert isinstance(runtime_middleware, ResourceStreamDeadlineMiddleware)
+    runtime_middleware.deadline_seconds = 0.5
 
     async def _run() -> float:
         body_send_started = asyncio.Event()
         response_status: list[int] = []
+        request_sent = False
 
         async def _send(message: dict) -> None:
             if message["type"] == "http.response.start":
@@ -808,34 +818,32 @@ def test_outer_app_deadline_cancels_blocked_send_and_schedules_lease_release(
                 body_send_started.set()
                 await asyncio.Event().wait()
 
-        async def _blocked_stream(_scope, _receive, send) -> None:
-            stream = resource_api._leased_resource_event_generator(
-                SimpleNamespace(),
-                _Limiter(),
-                "lease-token",
-                "alice-id",
-                None,
-                0,
-                None,
-            )
-            try:
-                await send({"type": "http.response.start", "status": 200, "headers": []})
-                async for frame in stream:
-                    await send(
-                        {
-                            "type": "http.response.body",
-                            "body": frame.encode(),
-                            "more_body": True,
-                        }
-                    )
-            finally:
-                await stream.aclose()
+        async def _receive() -> dict:
+            nonlocal request_sent
+            if not request_sent:
+                request_sent = True
+                return {"type": "http.request", "body": b"", "more_body": False}
+            await asyncio.Event().wait()
+            raise AssertionError("unreachable")
 
-        guarded_app = ResourceStreamDeadlineMiddleware(_blocked_stream, deadline_seconds=0.05)
-        scope = {"type": "http", "path": "/api/resource-events/stream"}
+        cookie = "; ".join(f"{key}={value}" for key, value in clients["alice"].cookies.items())
+        scope = {
+            "type": "http",
+            "asgi": {"version": "3.0", "spec_version": "2.4"},
+            "http_version": "1.1",
+            "method": "GET",
+            "scheme": "http",
+            "path": "/api/resource-events/stream",
+            "raw_path": b"/api/resource-events/stream",
+            "query_string": b"",
+            "root_path": "",
+            "headers": [(b"host", b"testserver"), (b"cookie", cookie.encode())],
+            "client": ("testclient", 50_000),
+            "server": ("testserver", 80),
+        }
         loop = asyncio.get_running_loop()
         started_at = loop.time()
-        await guarded_app(scope, lambda: None, _send)
+        await app(scope, _receive, _send)
         elapsed = loop.time() - started_at
         assert response_status == [200]
         assert body_send_started.is_set()
@@ -847,7 +855,7 @@ def test_outer_app_deadline_cancels_blocked_send_and_schedules_lease_release(
         assert not resource_api._LEASE_RELEASE_TASKS
         return elapsed
 
-    assert asyncio.run(_run()) < 0.5
+    assert asyncio.run(_run()) < 1.5
 
 
 def test_per_user_open_rate_is_bounded(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
