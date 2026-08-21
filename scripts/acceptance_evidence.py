@@ -217,8 +217,6 @@ def _claims_from_module(
         ):
             location = f"{source.relative_to(project_root)}:{node.lineno}"
             raise AcceptanceEvidenceError(f"{location} acceptance marker is not direct top-level")
-
-
 def _claims_with_proof_kinds(
     claims: tuple[AcceptanceClaim, ...], acceptances: tuple[AcceptanceEntry, ...]
 ) -> tuple[AcceptanceClaim, ...]:
