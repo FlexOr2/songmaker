@@ -339,19 +339,24 @@ function selectSongHistoryMode(
 	return song?.album_id === collection.id ? 'replace' : 'stack';
 }
 
-export function selectSong(songId: string, knownSong?: SongItem): void {
+// Returns a promise instead of firing void: a caller that sets follow-up
+// state after the selected song is current (e.g. LibraryWall's shared-take
+// open, which needs the song in place before it can pin the generation) must
+// await this. Most callers are fire-and-forget rail/list clicks and simply
+// don't await it, which is fine for them.
+export function selectSong(songId: string, knownSong?: SongItem): Promise<void> {
 	// Evaluated before the guard's await: it reads selectedSongId/openCollection
 	// as they stand right now, not after ensureLibraryWorkspaceRoute has (maybe)
 	// already let applySelectedSong change them.
 	const historyMode = selectSongHistoryMode(songId, knownSong);
-	void guardDirtyNavigation(async () => {
+	return guardDirtyNavigation(async () => {
 		await ensureLibraryWorkspaceRoute();
 		applySelectedSong(songId, knownSong, historyMode, 'write');
 	});
 }
 
-export function selectNeighborSong(song: SongItem): void {
-	void guardDirtyNavigation(async () => {
+export function selectNeighborSong(song: SongItem): Promise<void> {
+	return guardDirtyNavigation(async () => {
 		await ensureLibraryWorkspaceRoute();
 		applySelectedSong(song.id, song, 'replace', 'keep');
 	});

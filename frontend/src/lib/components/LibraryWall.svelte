@@ -341,7 +341,7 @@
 		} else if (item.type === 'song') selectSong(item.id);
 		else if (item.type === 'playlist') openPlaylist(item.id);
 		else if (item.song_id) {
-			selectSong(item.song_id);
+			await selectSong(item.song_id);
 			selectedGenerationId.set(item.id);
 			persistLibraryHistory();
 		}
