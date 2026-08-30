@@ -333,6 +333,9 @@ function poolTakeToPlaybackInfo(take: LibraryPoolTakeItem): PlaybackInfo {
 			wav_path: null,
 			seed: take.seed,
 			status: 'completed',
+			// LibraryPoolTakeItem carries no duration field at all -- null is
+			// the honest value here, not a stand-in for a real one.
+			audio_duration_sec: null,
 			is_archived: false,
 			is_picked: take.is_picked,
 			is_kept: take.is_kept,
@@ -1357,6 +1360,7 @@ function playlistEntryToGeneration(entry: PlaylistEntryItem): GenerationItem {
 		wav_path: null,
 		seed: entry.seed,
 		status: 'completed',
+		audio_duration_sec: entry.audio_duration,
 		is_archived: false,
 		is_picked: false,
 		is_kept: true,
