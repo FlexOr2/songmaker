@@ -2,6 +2,8 @@
 Description=Songmaker stack (docker compose up -d) after boot
 After=docker.service
 Requires=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=5
 
 [Service]
 Type=oneshot
