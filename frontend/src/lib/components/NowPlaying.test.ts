@@ -80,6 +80,7 @@ function song(overrides: Partial<SongItem> = {}): SongItem {
 	const gen = generation();
 	return {
 		id: 's1',
+		slug: 'tide',
 		title: 'Tide',
 		album_id: 'a1',
 		album_title: 'Nachtstrom',
