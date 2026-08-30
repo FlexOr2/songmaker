@@ -28,8 +28,14 @@ const api = vi.hoisted(() => ({
 const routeParams = vi.hoisted(() => ({ slug: 'anfield' }));
 
 vi.mock('$app/state', () => ({ page: { params: routeParams } }));
+// Stands in for the router the way the real one behaves for this app: it
+// moves the history entry, but nothing here re-resolves the mounted route.
 vi.mock('$app/navigation', () => ({
-	goto: vi.fn(() => Promise.resolve()),
+	goto: vi.fn((url: string, options?: { replaceState?: boolean }) => {
+		if (options?.replaceState) history.replaceState(null, '', url);
+		else history.pushState(null, '', url);
+		return Promise.resolve();
+	}),
 	afterNavigate: vi.fn()
 }));
 vi.mock('$app/paths', () => ({ resolve: vi.fn((path: string) => path) }));
@@ -226,6 +232,30 @@ describe('/album/<slug> opened cold', () => {
 
 		await vi.waitFor(() => expect(target.textContent).toContain(ALBUM_TITLE));
 		expect(get(openCollection)).toEqual({ kind: 'album', id: ALBUM_SLUG });
+	});
+});
+
+describe('/album/<slug> whose album cannot be reached', () => {
+	beforeEach(() => {
+		api.fetchAlbum.mockRejectedValue(new ApiError(500, 'Album service is down', '/api/albums'));
+	});
+
+	it('states the failure instead of claiming the album does not exist', async () => {
+		const target = openAddress();
+
+		await vi.waitFor(() => expect(target.textContent).toContain('Album service is down'));
+		expect(target.textContent).not.toContain('No such album');
+	});
+
+	it('shows the album after Try again once the failure is over', async () => {
+		const target = openAddress();
+		await vi.waitFor(() => expect(target.textContent).toContain('Album service is down'));
+		api.fetchAlbum.mockResolvedValue(album());
+
+		requireElement(target, 'button.address-action').click();
+
+		await vi.waitFor(() => expect(target.textContent).toContain(ALBUM_TITLE));
+		expect(target.textContent).toContain(TRACK_TITLE);
 	});
 });
 

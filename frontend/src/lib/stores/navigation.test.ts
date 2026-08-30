@@ -26,8 +26,9 @@ const fetchLastFailedGeneration = vi.fn();
 // SvelteKit goto) so tests can assert the landed-on route, not just that
 // goto was called with some argument (see issue #264's done-when).
 vi.mock('$app/navigation', () => ({
-	goto: vi.fn((url: string) => {
-		history.pushState(null, '', url);
+	goto: vi.fn((url: string, options?: { replaceState?: boolean }) => {
+		if (options?.replaceState) history.replaceState(null, '', url);
+		else history.pushState(null, '', url);
 		return Promise.resolve();
 	})
 }));
@@ -83,6 +84,7 @@ import {
 	openLibraryWall,
 	openPlaylist,
 	pendingDirtyNavigation,
+	persistLibraryHistory,
 	resetNavigationForTests,
 	revealPlayingSong,
 	selectLibraryFilter,
@@ -218,11 +220,65 @@ describe('isLibraryWorkspacePath', () => {
 	});
 
 	// Issue #269: the guard must leave an album address alone, or opening a
-	// song from an album would bounce through the wall on the way there.
-	it('leaves an album address in place instead of pushing back to the home path', async () => {
+	// song from an album would take a detour through the wall on the way there.
+	it('goes straight from an album address to the song, without a detour', async () => {
 		history.replaceState(null, '', '/album/a1');
 		await selectSong('s1');
+		expect(vi.mocked(goto).mock.calls.map((call) => call[0])).toEqual(['/?song=s1']);
+	});
+});
+
+// A history write that changes the route pattern (/ <-> /album/<slug>) must
+// reach SvelteKit's router, not just the address bar: a raw write leaves the
+// router mounting the route it last saw, and the next Back/Forward or real
+// navigation that disagrees tears the workspace down mid-session. The
+// interaction with the router is the contract here, so it is asserted directly.
+describe('history writes across the route boundary (issue #269)', () => {
+	it('opens an album address through the router', async () => {
+		await openAlbum('a1');
+		expect(vi.mocked(goto)).toHaveBeenCalledWith('/album/a1', {
+			replaceState: false,
+			noScroll: true,
+			keepFocus: true
+		});
+		expect(window.location.pathname).toBe('/album/a1');
+		expect(history.state.collection).toEqual({ kind: 'album', id: 'a1' });
+	});
+
+	it('leaves an album address through the router', async () => {
+		await openAlbum('a1');
+		vi.mocked(goto).mockClear();
+		await openLibraryWall();
+		expect(vi.mocked(goto)).toHaveBeenCalledWith('/', {
+			replaceState: false,
+			noScroll: true,
+			keepFocus: true
+		});
+		expect(window.location.pathname).toBe('/');
+		expect(history.state.surface).toBe('browse');
+	});
+
+	it('writes the frequent churn inside one route straight to history', async () => {
+		await selectSong('s1');
+		vi.mocked(goto).mockClear();
+
+		selectLibraryFilter('playlists');
+		persistLibraryHistory();
+
 		expect(vi.mocked(goto)).not.toHaveBeenCalled();
+		expect(history.state.filter).toBe('playlists');
+	});
+
+	it('keeps a second write behind the crossing one it follows', async () => {
+		history.replaceState(null, '', '/album/a1');
+		songList.set([song({ id: 's1', album_id: 'a1', generations: [generation()] })]);
+
+		await selectSong('s1', song({ id: 's1', album_id: 'a1' }));
+		selectedGenerationId.set('g1');
+		persistLibraryHistory();
+
+		await vi.waitFor(() => expect(history.state.generationId).toBe('g1'));
+		expect(window.location.pathname + window.location.search).toBe('/?song=s1&gen=g1');
 	});
 });
 
@@ -237,7 +293,7 @@ describe('the address an open album carries (issue #269)', () => {
 		await selectSong('s1', song({ id: 's1', album_id: 'a1' }));
 		expect(window.location.pathname).toBe('/');
 		backToCollection();
-		expect(window.location.pathname).toBe('/album/a1');
+		await vi.waitFor(() => expect(window.location.pathname).toBe('/album/a1'));
 	});
 
 	it('gives the wall back the home address when the album is only the rail context', async () => {

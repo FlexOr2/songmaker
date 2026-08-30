@@ -165,10 +165,22 @@ cold tab opened on an album address resolves the slug against the API first:
 an unknown slug is stated as such instead of falling back to the wall, and a
 known one is written into the library's own restore state, so the album is
 restored by `hydrateLibraryFromHistory` — the same path a reload and Back
-take — and stays present even when it is not on the first browse page. The
-remaining hand-built history (`pushLibraryHistory` / `replaceLibraryHistory`)
-and the route guard fall away once songs and takes have addresses too
-(issue #265, S7).
+take — and stays present even when it is not on the first browse page. Because an
+address can now change the route pattern, `writeLibraryHistory` in
+`stores/libraryContext.ts` is the single owner of every library history write:
+SvelteKit reconciles its mounted route tree only on a real navigation, so a
+write that crosses `/` ⇄ `/album/<slug>` goes through `goto` (which keeps the
+router in step and, since `goto`'s own `state` lands in `page.state`, has the
+restore state written onto the entry afterwards), while the frequent
+same-route churn — filter, sort, scroll, search cursor — keeps the cheap
+synchronous write. Turning one of those crossing writes back into a bare
+`history.pushState` would leave the router mounting the route it last saw and
+let the next Back/Forward tear the workspace down mid-edit. Crossing writes
+are asynchronous and therefore serialized, and `currentLibraryHistoryState()`
+— not `history.state` — answers what the entry will be, so a caller that
+writes twice in a row (open a song, then pin its take) is not read against a
+stale entry. The remaining hand-built history and the route guard fall away
+once songs and takes have addresses too (issue #265, S7).
 
 The single source of navigation truth for "what collection is open" is the
 leaf store `stores/collection.ts` (`openCollection: {kind: 'album'|'playlist',
