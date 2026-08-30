@@ -583,25 +583,64 @@ def test_load_rejects_second_model_when_measured_vram_leaves_no_room() -> None:
     assert unloaded_log == []
 
 
-def test_load_evicts_using_measured_vram_not_declared_size() -> None:
-    """Eviction must stop as soon as measured usage fits, not after removing
-    enough declared-size GB to satisfy the static table."""
-    cache_box: dict[str, ModelCache] = {}
+def test_load_evicts_using_declared_floor_even_when_measurement_lags() -> None:
+    """A model that has not generated yet can measure near-zero on NVML even
+    though it is genuinely loaded (ACE-Step lazy-loads on first request).
+    Capacity planning must still credit its declared size, or three such
+    "cold" loads would all stay resident forever — the mirror image of the
+    original bug, reproduced against a live worker by an independent
+    reviewer: budget 24GB, a reader stuck at 0.5GB, loading turbo (6GB),
+    xl-sft (12GB), then xl-base (12GB) evicted nothing and left 30GB
+    "loaded" against a 24GB budget."""
     cache, _, unloaded_log = _make_cache(
         budget=24.0,
-        sizes={"turbo": 6.0, "sft": 6.0, "xl-sft": 12.0},
-        vram_reader=_reader_reporting_high_once_loaded(
-            cache_box, "turbo",
-            low=VramStats(used_gb=6.0, total_gb=24.0),
-            high=VramStats(used_gb=20.0, total_gb=24.0),
-        ),
+        sizes={"turbo": 6.0, "xl-sft": 12.0, "xl-base": 12.0},
+        vram_reader=lambda: VramStats(used_gb=0.5, total_gb=24.0),
     )
-    cache_box["cache"] = cache
+    _run(cache.load("turbo"))
+    _run(cache.load("xl-sft"))
+    result = _run(cache.load("xl-base"))
+    assert result.evicted == ["turbo"]
+    assert sorted(cache.loaded_modes()) == ["xl-base", "xl-sft"]
+    assert len(unloaded_log) == 1
+    assert unloaded_log[0].mode == "turbo"
+
+
+def test_load_rejects_without_destroying_anything_when_plan_would_still_fail() -> None:
+    """If evicting every eligible model still would not make room, nothing
+    may be evicted at all — deciding must happen before any destruction, not
+    interleaved with it."""
+    cache, _, unloaded_log = _make_cache(
+        budget=20.0,
+        sizes={"sft": 6.0, "xl-base": 12.0, "xl-sft": 12.0},
+    )
+    _run(cache.load("sft"))
+    _run(cache.load("xl-base"))
+    _run(cache.pin("xl-base"))
+    with pytest.raises(CapacityError):
+        _run(cache.load("xl-sft"))
+    assert cache.loaded_modes() == ["sft", "xl-base"]
+    assert unloaded_log == []
+
+
+def test_load_does_not_destroy_both_loaded_models_when_reader_never_moves() -> None:
+    """Reviewer-reported regression: with a reader stuck at a constant
+    reading (NVML lag, or a subprocess whose child never fully released
+    VRAM), re-measuring after every eviction used to evict everything
+    eligible and still raise. The eviction count must instead come from a
+    plan built once, up front, from declared sizes."""
+    cache, _, unloaded_log = _make_cache(
+        budget=24.0,
+        sizes={"sft": 6.0, "turbo": 6.0, "xl-sft": 12.0},
+        vram_reader=lambda: VramStats(used_gb=16.4, total_gb=24.0),
+    )
+    _run(cache.load("sft"))
     _run(cache.load("turbo"))
     result = _run(cache.load("xl-sft"))
-    assert result.evicted == ["turbo"]
-    assert cache.loaded_modes() == ["xl-sft"]
+    assert result.evicted == ["sft"]
+    assert cache.loaded_modes() == ["turbo", "xl-sft"]
     assert len(unloaded_log) == 1
+    assert unloaded_log[0].mode == "sft"
 
 
 def test_load_does_not_evict_when_measured_vram_already_fits() -> None:

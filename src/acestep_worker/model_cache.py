@@ -222,29 +222,76 @@ class ModelCache:
             if self._in_use[mode] <= 0:
                 del self._in_use[mode]
 
-    async def _evict_to_fit(self, incoming_size_gb: float) -> list[str]:
-        evicted: list[str] = []
+    def _declared_used_gb(self) -> float:
+        return sum(self._sizes.get(m, 0.0) for m in self._loaded)
+
+    def _planning_used_gb(self) -> tuple[float, bool]:
+        """The number capacity decisions plan against: never below what the
+        declared-size table says is already loaded, so a model ACE-Step
+        hasn't lazily grown into yet still counts for at least its estimate.
+        ``snapshot()`` never uses this — it reports the raw measurement so
+        ``vram_measured`` stays honest."""
         used_gb, _, measured = self._current_usage()
-        while used_gb + incoming_size_gb > self._budget_gb:
-            victim_mode = next(
-                (
-                    m for m in self._loaded
-                    if m not in self._pinned and self._in_use.get(m, 0) == 0
-                ),
-                None,
+        return max(used_gb, self._declared_used_gb()), measured
+
+    def _build_eviction_plan(
+        self, planning_used_gb: float, incoming_size_gb: float,
+    ) -> tuple[list[str], float]:
+        plan: list[str] = []
+        projected_used_gb = planning_used_gb
+        for mode in self._loaded:
+            if projected_used_gb + incoming_size_gb <= self._budget_gb:
+                break
+            if mode in self._pinned or self._in_use.get(mode, 0) > 0:
+                continue
+            plan.append(mode)
+            projected_used_gb -= self._sizes.get(mode, 0.0)
+        return plan, projected_used_gb
+
+    def _capacity_error(
+        self, incoming_size_gb: float, planning_used_gb: float,
+        projected_used_gb: float, measured: bool,
+    ) -> CapacityError:
+        used_label = "measured" if measured else "estimated from declared sizes"
+        if not self._loaded:
+            return CapacityError(
+                f"Cannot fit {incoming_size_gb:.1f}GB (estimated, not yet loaded) within "
+                f"the {self._budget_gb:.1f}GB budget: {planning_used_gb:.1f}GB is already "
+                f"in use on the GPU ({used_label}) although this worker has no model "
+                f"loaded — that VRAM is not tracked by this cache (a stray process or an "
+                f"unreleased subprocess). Check nvidia-smi on the worker host; loading "
+                f"cannot proceed until it is freed.",
             )
-            if victim_mode is None:
-                used_label = "measured" if measured else "estimated from declared sizes"
-                raise CapacityError(
-                    f"Cannot fit {incoming_size_gb:.1f}GB (estimated, not yet loaded) on "
-                    f"top of {used_gb:.1f}GB already in use ({used_label}) within a "
-                    f"{self._budget_gb:.1f}GB budget: all eligible models are in use or "
-                    f"pinned (loaded={list(self._loaded)}, in_use={dict(self._in_use)}, "
-                    f"pinned={sorted(self._pinned)})",
-                )
-            victim_model = self._loaded[victim_mode]
+        return CapacityError(
+            f"Cannot fit {incoming_size_gb:.1f}GB (estimated, not yet loaded) on top of "
+            f"{planning_used_gb:.1f}GB already in use ({used_label}) within a "
+            f"{self._budget_gb:.1f}GB budget: evicting every eligible model still leaves "
+            f"{projected_used_gb:.1f}GB in use (loaded={list(self._loaded)}, "
+            f"in_use={dict(self._in_use)}, pinned={sorted(self._pinned)})",
+        )
+
+    async def _evict_to_fit(self, incoming_size_gb: float) -> list[str]:
+        planning_used_gb, measured = self._planning_used_gb()
+        plan, projected_used_gb = self._build_eviction_plan(
+            planning_used_gb, incoming_size_gb,
+        )
+        if projected_used_gb + incoming_size_gb > self._budget_gb:
+            raise self._capacity_error(
+                incoming_size_gb, planning_used_gb, projected_used_gb, measured,
+            )
+
+        evicted: list[str] = []
+        running_used_gb = planning_used_gb
+        for mode in plan:
+            if running_used_gb + incoming_size_gb <= self._budget_gb:
+                break
+            victim_model = self._loaded[mode]
             await self._unloader(victim_model)
-            del self._loaded[victim_mode]
-            evicted.append(victim_mode)
-            used_gb, _, measured = self._current_usage()
+            del self._loaded[mode]
+            evicted.append(mode)
+            fresh = self._vram_reader() if self._vram_reader is not None else None
+            fresh_used_gb = fresh.used_gb if fresh is not None else running_used_gb
+            running_used_gb = min(
+                fresh_used_gb, running_used_gb - self._sizes.get(mode, 0.0),
+            )
         return evicted
