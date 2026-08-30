@@ -542,6 +542,118 @@ def test_loading_last_log_line_visible_during_load_then_cleared() -> None:
     assert final.target_loading is None
 
 
+# ── measured VRAM decides capacity, not the declared-size table ──
+
+
+def _reader_reporting_high_once_loaded(
+    cache_box: dict[str, ModelCache], mode: str, *, low: VramStats, high: VramStats,
+):
+    """Simulates ACE-Step's lazy loading: real usage stays low until ``mode``
+    has actually been loaded into the cache, then jumps to its true (larger
+    than declared) footprint — never a NVML reading taken before the model
+    could possibly have grown into it."""
+
+    def reader() -> VramStats:
+        return high if mode in cache_box["cache"].loaded_modes() else low
+
+    return reader
+
+
+def test_load_rejects_second_model_when_measured_vram_leaves_no_room() -> None:
+    """A model already loaded can occupy far more real VRAM than its declared
+    size suggests (e.g. ACE-Step's lazily-loaded 4B LM). The declared sizes
+    alone would say plenty of room remains; the measurement says otherwise,
+    and the measurement must win."""
+    cache_box: dict[str, ModelCache] = {}
+    cache, _, unloaded_log = _make_cache(
+        budget=24.0,
+        sizes={"turbo": 6.0, "sft": 6.0},
+        vram_reader=_reader_reporting_high_once_loaded(
+            cache_box, "turbo",
+            low=VramStats(used_gb=2.0, total_gb=24.0),
+            high=VramStats(used_gb=22.0, total_gb=24.0),
+        ),
+    )
+    cache_box["cache"] = cache
+    _run(cache.load("turbo"))
+    _run(cache.pin("turbo"))
+    with pytest.raises(CapacityError, match="measured"):
+        _run(cache.load("sft"))
+    assert cache.loaded_modes() == ["turbo"]
+    assert unloaded_log == []
+
+
+def test_load_evicts_using_measured_vram_not_declared_size() -> None:
+    """Eviction must stop as soon as measured usage fits, not after removing
+    enough declared-size GB to satisfy the static table."""
+    cache_box: dict[str, ModelCache] = {}
+    cache, _, unloaded_log = _make_cache(
+        budget=24.0,
+        sizes={"turbo": 6.0, "sft": 6.0, "xl-sft": 12.0},
+        vram_reader=_reader_reporting_high_once_loaded(
+            cache_box, "turbo",
+            low=VramStats(used_gb=6.0, total_gb=24.0),
+            high=VramStats(used_gb=20.0, total_gb=24.0),
+        ),
+    )
+    cache_box["cache"] = cache
+    _run(cache.load("turbo"))
+    result = _run(cache.load("xl-sft"))
+    assert result.evicted == ["turbo"]
+    assert cache.loaded_modes() == ["xl-sft"]
+    assert len(unloaded_log) == 1
+
+
+def test_load_does_not_evict_when_measured_vram_already_fits() -> None:
+    """Declared sizes alone would demand an eviction; the measurement shows
+    real headroom, so nothing is evicted."""
+    cache, _, unloaded_log = _make_cache(
+        budget=12.0,
+        sizes={"turbo": 6.0, "sft": 6.0},
+        vram_reader=lambda: VramStats(used_gb=2.0, total_gb=24.0),
+    )
+    _run(cache.load("turbo"))
+    result = _run(cache.load("sft"))
+    assert sorted(result.loaded) == ["sft", "turbo"]
+    assert result.evicted == []
+    assert unloaded_log == []
+
+
+def test_load_rejects_when_gpu_already_full_with_nothing_tracked_loaded() -> None:
+    """Stray VRAM usage the cache never loaded (a leaked subprocess, another
+    process) must still block a load — capacity planning cannot assume an
+    empty ``_loaded`` means an empty GPU."""
+    cache, loaded_log, _ = _make_cache(
+        budget=24.0,
+        sizes={"turbo": 6.0},
+        vram_reader=lambda: VramStats(used_gb=23.0, total_gb=24.0),
+    )
+    with pytest.raises(CapacityError, match="measured"):
+        _run(cache.load("turbo"))
+    assert cache.loaded_modes() == []
+    assert loaded_log == []
+
+
+def test_snapshot_reports_vram_measured_true_when_reader_available() -> None:
+    cache, _, _ = _make_cache(
+        vram_reader=lambda: VramStats(used_gb=15.3, total_gb=24.0),
+    )
+    _run(cache.load("sft"))
+    assert cache.snapshot().vram_measured is True
+
+
+def test_snapshot_reports_vram_measured_false_without_reader() -> None:
+    cache, _, _ = _make_cache()
+    _run(cache.load("sft"))
+    assert cache.snapshot().vram_measured is False
+
+
+def test_snapshot_reports_vram_measured_false_when_reader_returns_none() -> None:
+    cache, _, _ = _make_cache(vram_reader=lambda: None)
+    _run(cache.load("sft"))
+    assert cache.snapshot().vram_measured is False
+
+
 def test_loading_last_log_line_cleared_on_loader_failure() -> None:
     async def failing_loader(mode: str) -> LoadedModel:
         cache.set_loading_log_line("about to crash")

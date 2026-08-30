@@ -47,6 +47,7 @@ class CacheStateSnapshot:
     target_loading: str | None
     vram_used_gb: float
     vram_total_gb: float
+    vram_measured: bool
     pinned: tuple[str, ...]
     loading_started_at: datetime | None
     loading_last_log_line: str | None = None
@@ -120,23 +121,25 @@ class ModelCache:
     def in_use_count(self, mode: str) -> int:
         return self._in_use.get(mode, 0)
 
+    def _current_usage(self) -> tuple[float, float, bool]:
+        measured = self._vram_reader() if self._vram_reader is not None else None
+        if measured is not None:
+            return measured.used_gb, measured.total_gb, True
+        estimated_used_gb = sum(self._sizes.get(m, 0.0) for m in self._loaded)
+        return estimated_used_gb, self._budget_gb, False
+
     def snapshot(self) -> CacheStateSnapshot:
         loaded_tuple = tuple(
             LoadedModelInfo(mode=m, size_gb=self._sizes.get(m, 0.0))
             for m in self._loaded
         )
-        measured = self._vram_reader() if self._vram_reader is not None else None
-        if measured is not None:
-            used_gb = measured.used_gb
-            total_gb = measured.total_gb
-        else:
-            used_gb = sum(info.size_gb for info in loaded_tuple)
-            total_gb = self._budget_gb
+        used_gb, total_gb, measured = self._current_usage()
         return CacheStateSnapshot(
             loaded=loaded_tuple,
             target_loading=self._target_loading,
             vram_used_gb=used_gb,
             vram_total_gb=total_gb,
+            vram_measured=measured,
             pinned=tuple(sorted(self._pinned)),
             loading_started_at=self._loading_started_at,
             loading_last_log_line=self._loading_last_log_line,
@@ -221,8 +224,8 @@ class ModelCache:
 
     async def _evict_to_fit(self, incoming_size_gb: float) -> list[str]:
         evicted: list[str] = []
-        used = sum(self._sizes.get(m, 0.0) for m in self._loaded)
-        while self._loaded and used + incoming_size_gb > self._budget_gb:
+        used_gb, _, measured = self._current_usage()
+        while used_gb + incoming_size_gb > self._budget_gb:
             victim_mode = next(
                 (
                     m for m in self._loaded
@@ -231,14 +234,17 @@ class ModelCache:
                 None,
             )
             if victim_mode is None:
+                used_label = "measured" if measured else "estimated from declared sizes"
                 raise CapacityError(
-                    f"Cannot fit {incoming_size_gb:.1f}GB: all eligible models "
-                    f"are in use or pinned (loaded={list(self._loaded)}, "
-                    f"in_use={dict(self._in_use)}, pinned={sorted(self._pinned)})",
+                    f"Cannot fit {incoming_size_gb:.1f}GB (estimated, not yet loaded) on "
+                    f"top of {used_gb:.1f}GB already in use ({used_label}) within a "
+                    f"{self._budget_gb:.1f}GB budget: all eligible models are in use or "
+                    f"pinned (loaded={list(self._loaded)}, in_use={dict(self._in_use)}, "
+                    f"pinned={sorted(self._pinned)})",
                 )
             victim_model = self._loaded[victim_mode]
             await self._unloader(victim_model)
             del self._loaded[victim_mode]
-            used -= self._sizes.get(victim_mode, 0.0)
             evicted.append(victim_mode)
+            used_gb, _, measured = self._current_usage()
         return evicted
