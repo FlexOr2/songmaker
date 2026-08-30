@@ -2476,7 +2476,7 @@ describe('buildQueueViewModel', () => {
 		expect(vm.items.map((item) => item.durationSec)).toEqual([141, null]);
 	});
 
-	it("shows a native row's own measured length, not the \"auto\" (0) duration it was requested with", () => {
+	it('shows a native row\'s own measured length, not the "auto" (0) duration it was requested with', () => {
 		const song = makeSong({ id: 's1', audio_duration: 200 });
 		const requestedAuto = makePlayback(
 			makeGen({ id: 'g1', generation_params: { audio_duration: 0 }, audio_duration_sec: 188 }),

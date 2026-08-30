@@ -120,7 +120,11 @@ describe('NowPlayingQueue', () => {
 	});
 
 	it('formats a row with its own measured duration', async () => {
-		const queue: QueueViewModel = { items: [item({ durationSec: 195 })], currentIndex: 0, upNext: null };
+		const queue: QueueViewModel = {
+			items: [item({ durationSec: 195 })],
+			currentIndex: 0,
+			upNext: null
+		};
 		await render({ queue });
 		expect(target.querySelector('.queue-duration')?.textContent).toBe('3:15');
 	});

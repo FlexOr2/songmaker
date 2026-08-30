@@ -126,7 +126,9 @@ describe('NowPlayingTake', () => {
 				audio_duration_sec: 188
 			})
 		});
-		expect(target.querySelector('.take-heading')?.textContent).toBe('v4 · take 4 · 3:08 · xl-turbo');
+		expect(target.querySelector('.take-heading')?.textContent).toBe(
+			'v4 · take 4 · 3:08 · xl-turbo'
+		);
 	});
 
 	it('names no duration at all for a take whose length has not been measured', async () => {
