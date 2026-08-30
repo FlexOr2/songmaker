@@ -29,6 +29,7 @@ import {
 	applyLibraryHistory,
 	cancelLibraryHistoryApply,
 	detailTab,
+	isAlbumRoutePath,
 	isLibraryHistoryState,
 	libraryHistoryUrl,
 	librarySurface,
@@ -98,8 +99,12 @@ export function persistLibraryHistory(): void {
 	replaceLibraryHistory();
 }
 
+// The routes that mount the library workspace: the home path and, since
+// issue #269, an album address. Both render the same workspace, so nothing
+// has to be pushed off /album/<slug> to make a song, a playlist or the wall
+// visible — the address a surface owns is written by libraryHistoryUrl.
 export function isLibraryWorkspacePath(pathname: string): boolean {
-	return pathname === '/';
+	return pathname === '/' || isAlbumRoutePath(pathname);
 }
 
 // Every entry point that opens a collection or a song onto the library

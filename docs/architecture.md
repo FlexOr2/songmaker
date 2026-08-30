@@ -152,6 +152,24 @@ of the current user's public slugs (`GET /api/library/shares`) as before,
 just reached via the Shared chip; membership, `N`, and the DELETE endpoints
 are unchanged.
 
+An open album has an address of its own, `/album/<slug>` (issue #269; album
+ids are already readable slugs). `libraryHistoryUrl` in
+`stores/libraryContext.ts` maps library state to that address — an open song
+still wins with `/?song=…`, and an album that is only the rail context behind
+the wall stays on `/` — so opening an album, or leaving a song for its album,
+writes the album's address. Both `/` and `/album/<slug>` mount the same
+library workspace (`routes/album/[slug]/+page.svelte` renders
+`routes/+page.svelte`), which is why `isLibraryWorkspacePath` counts both and
+`ensureLibraryWorkspaceRoute` never pushes anything off an album address. A
+cold tab opened on an album address resolves the slug against the API first:
+an unknown slug is stated as such instead of falling back to the wall, and a
+known one is written into the library's own restore state, so the album is
+restored by `hydrateLibraryFromHistory` — the same path a reload and Back
+take — and stays present even when it is not on the first browse page. The
+remaining hand-built history (`pushLibraryHistory` / `replaceLibraryHistory`)
+and the route guard fall away once songs and takes have addresses too
+(issue #265, S7).
+
 The single source of navigation truth for "what collection is open" is the
 leaf store `stores/collection.ts` (`openCollection: {kind: 'album'|'playlist',
 id} | null`), which nothing but `openAlbum`/`openPlaylist`/history restore in
@@ -289,7 +307,7 @@ root.
 
 | Layer | What | Key files |
 |-------|------|-----------|
-| Routes | Pages: main view, login, setup, settings, public share pages (`share/[slug]`, `share/playlist`/`song`/`gen`) | `src/routes/` |
+| Routes | Pages: main view, album address (`album/[slug]`), login, setup, settings, public share pages (`share/[slug]`, `share/playlist`/`song`/`gen`) | `src/routes/` |
 | Components | Editor (`components/editor/`: `EditorHeader`, `SongMenu`, `RecipeChips`, `RecipePanel`, `EditorStacked`, `WriteColumn`, `TakeStrip`, `TakesList`, `TakeMenu`, `EditorSheet`), `ConfirmDialog` (generic Save/Discard/Cancel-style confirm), PlayerBar/`TransportBarFrame`, `NowPlaying`/`NowPlayingFrame`/`NowPlayingQueue`/`NowPlayingTake`, LibraryWall, `CollectionHeader`/`CollectionHeaderFrame`/Menu, shell/Rail, CoWriterPanel, `components/share/` (`SharedCollection`, `SharedFooter`), etc. | `src/lib/components/` |
 | Stores | Reactive state: player, collection, libraryContext, navigation, editor, recipe, filter, jobs, auth, settings, ui | `src/lib/stores/` |
 | API client | Typed HTTP client, mirrors `songmaker_cli.api_models` | `src/lib/api/client.ts`, `types.ts` |

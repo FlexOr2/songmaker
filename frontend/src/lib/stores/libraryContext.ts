@@ -69,6 +69,8 @@ const FILTERS: ReadonlySet<string> = new Set(['albums', 'playlists', 'shared']);
 
 const SORTS: ReadonlySet<string> = new Set(CREATED_SORTS);
 
+const ALBUM_ROUTE_PREFIX = '/album/';
+
 let historyApplyGeneration = 0;
 
 export function isLibraryFilter(value: unknown): value is LibraryFilter {
@@ -132,10 +134,70 @@ export function libraryWallStateFrom(state: LibraryHistoryState): LibraryHistory
 	};
 }
 
+export function albumRoutePath(albumId: string): string {
+	return `${ALBUM_ROUTE_PREFIX}${encodeURIComponent(albumId)}`;
+}
+
+export function isAlbumRoutePath(pathname: string): boolean {
+	return pathname.startsWith(ALBUM_ROUTE_PREFIX) && pathname.length > ALBUM_ROUTE_PREFIX.length;
+}
+
 export function libraryHistoryUrl(state: LibraryHistoryState): string {
 	if (state.songId && state.generationId) return `/?song=${state.songId}&gen=${state.generationId}`;
 	if (state.songId) return `/?song=${state.songId}`;
+	if (state.surface === 'detail' && state.collection?.kind === 'album') {
+		return albumRoutePath(state.collection.id);
+	}
 	return '/';
+}
+
+export type AlbumAddress = 'found' | 'unknown';
+
+// The entry point of the /album/<slug> route (issue #269). A pasted address
+// is the only thing a cold tab knows, so the slug is checked against the API
+// first — an unknown one is a verdict the route states, never a silent fall
+// back to the wall — and a known one is written into the library's own restore
+// state. Everything after that is the restore path every reload and Back
+// already take (hydrateLibraryFromHistory), which is what keeps the album
+// present even when it is not on the first page of the browse listing.
+//
+// An existing restore state that already opens this album is richer than the
+// address (it carries sort, scroll and offsets) and wins; the address only
+// overrules a state that disagrees with it.
+export async function openAlbumAddress(albumId: string): Promise<AlbumAddress> {
+	if (!(await albumExists(albumId))) return 'unknown';
+	if (!historyAlreadyOpens(albumId)) {
+		history.replaceState(albumAddressState(albumId), '', albumRoutePath(albumId));
+	}
+	return 'found';
+}
+
+function historyAlreadyOpens(albumId: string): boolean {
+	const state = history.state;
+	return (
+		isLibraryHistoryState(state) &&
+		state.surface === 'detail' &&
+		state.collection?.kind === 'album' &&
+		state.collection.id === albumId
+	);
+}
+
+function albumAddressState(albumId: string): LibraryHistoryState {
+	return {
+		...libraryRootState(),
+		surface: 'detail',
+		collection: { kind: 'album', id: albumId }
+	};
+}
+
+async function albumExists(albumId: string): Promise<boolean> {
+	try {
+		await fetchAlbum(albumId);
+		return true;
+	} catch (err) {
+		if (isNotFound(err)) return false;
+		throw err;
+	}
 }
 
 export function snapshotLibraryHistory(index: number): LibraryHistoryState {
