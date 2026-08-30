@@ -289,9 +289,7 @@ class ModelCache:
             await self._unloader(victim_model)
             del self._loaded[mode]
             evicted.append(mode)
-            fresh = self._vram_reader() if self._vram_reader is not None else None
-            fresh_used_gb = fresh.used_gb if fresh is not None else running_used_gb
             running_used_gb = min(
-                fresh_used_gb, running_used_gb - self._sizes.get(mode, 0.0),
+                self._planning_used_gb()[0], running_used_gb - self._sizes.get(mode, 0.0),
             )
         return evicted

@@ -586,12 +586,9 @@ def test_load_rejects_second_model_when_measured_vram_leaves_no_room() -> None:
 def test_load_evicts_using_declared_floor_even_when_measurement_lags() -> None:
     """A model that has not generated yet can measure near-zero on NVML even
     though it is genuinely loaded (ACE-Step lazy-loads on first request).
-    Capacity planning must still credit its declared size, or three such
-    "cold" loads would all stay resident forever — the mirror image of the
-    original bug, reproduced against a live worker by an independent
-    reviewer: budget 24GB, a reader stuck at 0.5GB, loading turbo (6GB),
-    xl-sft (12GB), then xl-base (12GB) evicted nothing and left 30GB
-    "loaded" against a 24GB budget."""
+    Capacity planning must still credit its declared size, or successive
+    "cold" loads would all stay resident well past budget — the mirror
+    image of the original declared-size-only bug."""
     cache, _, unloaded_log = _make_cache(
         budget=24.0,
         sizes={"turbo": 6.0, "xl-sft": 12.0, "xl-base": 12.0},
@@ -604,6 +601,26 @@ def test_load_evicts_using_declared_floor_even_when_measurement_lags() -> None:
     assert sorted(cache.loaded_modes()) == ["xl-base", "xl-sft"]
     assert len(unloaded_log) == 1
     assert unloaded_log[0].mode == "turbo"
+
+
+def test_load_evicts_every_planned_victim_even_when_the_reading_stays_cold() -> None:
+    """A plan with more than one victim must run to completion: the floor
+    that decides whether enough has been freed comes from the declared
+    sizes of what is still loaded, not from a reader that never reflects
+    the earlier evictions in this same call."""
+    cache, _, unloaded_log = _make_cache(
+        budget=24.0,
+        sizes={"s1": 6.0, "s2": 6.0, "big": 12.0, "incoming": 12.0},
+        vram_reader=lambda: VramStats(used_gb=0.5, total_gb=24.0),
+    )
+    _run(cache.load("s1"))
+    _run(cache.load("s2"))
+    _run(cache.load("big"))
+    result = _run(cache.load("incoming"))
+    assert result.evicted == ["s1", "s2"]
+    assert len(unloaded_log) == 2
+    declared_resident_gb = sum(info.size_gb for info in cache.snapshot().loaded)
+    assert declared_resident_gb <= cache.vram_budget_gb
 
 
 def test_load_rejects_without_destroying_anything_when_plan_would_still_fail() -> None:
@@ -623,12 +640,29 @@ def test_load_rejects_without_destroying_anything_when_plan_would_still_fail() -
     assert unloaded_log == []
 
 
+def test_load_rejects_without_destroying_anything_when_measured_and_plan_would_still_fail() -> None:
+    """The same no-partial-destruction guarantee must hold on the measured
+    path, not only when falling back to declared-size estimates."""
+    cache, _, unloaded_log = _make_cache(
+        budget=20.0,
+        sizes={"sft": 6.0, "xl-base": 12.0, "xl-sft": 12.0},
+        vram_reader=lambda: VramStats(used_gb=0.5, total_gb=24.0),
+    )
+    _run(cache.load("sft"))
+    _run(cache.load("xl-base"))
+    _run(cache.pin("xl-base"))
+    with pytest.raises(CapacityError, match="measured"):
+        _run(cache.load("xl-sft"))
+    assert cache.loaded_modes() == ["sft", "xl-base"]
+    assert unloaded_log == []
+
+
 def test_load_does_not_destroy_both_loaded_models_when_reader_never_moves() -> None:
-    """Reviewer-reported regression: with a reader stuck at a constant
-    reading (NVML lag, or a subprocess whose child never fully released
-    VRAM), re-measuring after every eviction used to evict everything
-    eligible and still raise. The eviction count must instead come from a
-    plan built once, up front, from declared sizes."""
+    """A reader stuck at a constant reading (NVML lag, or a subprocess
+    whose child never fully released VRAM) must not force more evictions
+    than the plan calls for, and must not raise after having already
+    destroyed everything eligible — the eviction count comes from a plan
+    built once, up front, from declared sizes."""
     cache, _, unloaded_log = _make_cache(
         budget=24.0,
         sizes={"sft": 6.0, "turbo": 6.0, "xl-sft": 12.0},
