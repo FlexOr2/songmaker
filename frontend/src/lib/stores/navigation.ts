@@ -212,7 +212,7 @@ export function backToCollection(): void {
 		openTakesTab();
 		setLibrarySurface(get(openCollection) ? 'detail' : 'browse');
 		suppressPush = false;
-		replaceLibraryHistory();
+		void replaceLibraryHistory();
 	});
 }
 
@@ -302,7 +302,7 @@ function reportSongLinkNotFound(songId: string): void {
 	selectedGenerationId.set(null);
 	setLibrarySurface(get(openCollection) ? 'detail' : 'browse');
 	suppressPush = false;
-	replaceLibraryHistory();
+	void replaceLibraryHistory();
 	addToast(SONG_LINK_NOT_FOUND_TOAST, 'error');
 }
 
@@ -394,7 +394,7 @@ export function backToSong(): void {
 	openTakesTab();
 	setLibrarySurface('detail');
 	suppressPush = false;
-	replaceLibraryHistory();
+	void replaceLibraryHistory();
 }
 
 export function clearGenerationSelection(): void {
@@ -435,7 +435,7 @@ export function goBack(): void {
 			return;
 		}
 		setLibrarySurface('browse');
-		replaceLibraryHistory();
+		void replaceLibraryHistory();
 		return;
 	}
 	const state = currentLibraryHistoryState();
@@ -449,7 +449,7 @@ export function goBack(): void {
 	openTakesTab();
 	setLibrarySurface('browse');
 	suppressPush = false;
-	replaceLibraryHistory();
+	void replaceLibraryHistory();
 }
 
 // Browser Back/Forward has already committed the history change by the time
@@ -504,7 +504,7 @@ export function initNavigation(): () => void {
 			suppressPush = false;
 		}
 
-		replaceLibraryHistory();
+		void replaceLibraryHistory();
 	} else if (existing.songId) {
 		loadSongContext(existing.songId);
 	}
