@@ -153,7 +153,16 @@ just reached via the Shared chip; membership, `N`, and the DELETE endpoints
 are unchanged.
 
 An open album has an address of its own, `/album/<slug>` (issue #269; album
-ids are already readable slugs). `libraryHistoryUrl` in
+ids are already readable slugs). Both `/` and `/album/<slug>` render
+`components/LibraryWorkspace.svelte` — the bootstrap gate and the surface
+switch — while `routes/+layout.svelte` owns the live event stream and the
+history listener, so swapping between the two addresses neither rebuilds the
+workspace nor re-runs its bootstrap. The layout starts the stream only for a
+signed-in browser on a library route, which is the reach the workspace page
+had when it owned this; Settings, login, setup and the share pages leave it
+off. The workspace itself gates on `resourceSync.ready` rather than on a
+promise resolved once per mount, so a mount that finds the stream already live
+shows the library on its first frame. `libraryHistoryUrl` in
 `stores/libraryContext.ts` maps library state to that address — an open song
 still wins with `/?song=…`, and an album that is only the rail context behind
 the wall stays on `/` — so opening an album, or leaving a song for its album,

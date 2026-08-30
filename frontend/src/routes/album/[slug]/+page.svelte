@@ -2,11 +2,11 @@
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { openAlbumAddress } from '$lib/stores/libraryContext';
-	// routes/+page.svelte is the library workspace; an album address is a
-	// second entrance to the same one, so it is rendered rather than rebuilt
-	// here. Issue #265's S7 gives the workspace its own home once every
-	// surface has a route of its own.
-	import LibraryWorkspace from '../../+page.svelte';
+	// An album address is a second entrance to the one library workspace, not
+	// a surface of its own; `/` is the other. The component is shared so a
+	// route swap between them neither rebuilds the workspace nor re-runs its
+	// bootstrap.
+	import LibraryWorkspace from '$lib/components/LibraryWorkspace.svelte';
 
 	type AddressState = 'resolving' | 'open' | 'unknown' | 'unreachable';
 

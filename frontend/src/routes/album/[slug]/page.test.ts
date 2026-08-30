@@ -8,7 +8,7 @@ import { openCollection, resetCollectionForTests } from '$lib/stores/collection'
 import { albumList, songList } from '$lib/stores/libraryData';
 import { resetLibraryContextForTests } from '$lib/stores/libraryContext';
 import { resetLibrarySearchForTests } from '$lib/stores/librarySearch';
-import { resetResourceSyncForTests } from '$lib/stores/resourceSync';
+import { resetResourceSyncForTests, startLibraryResourceSync } from '$lib/stores/resourceSync';
 import { selectedGenerationId, selectedSongId } from '$lib/stores/player';
 
 const ALBUM_SLUG = 'anfield';
@@ -162,7 +162,8 @@ function openAddress(): HTMLElement {
 }
 
 // A tab that knows nothing but the address: no library stores, no history
-// state, nothing opened before.
+// state, nothing opened before — with the live library stream running, which
+// routes/+layout.svelte starts for every signed-in library route.
 function coldTabAt(pathname: string): void {
 	routeParams.slug = pathname.slice('/album/'.length);
 	history.replaceState(null, '', pathname);
@@ -174,6 +175,7 @@ function coldTabAt(pathname: string): void {
 	resetLibraryContextForTests();
 	resetLibrarySearchForTests();
 	resetResourceSyncForTests();
+	startLibraryResourceSync();
 }
 
 beforeEach(() => {

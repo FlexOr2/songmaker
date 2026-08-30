@@ -227,13 +227,17 @@ function applyHistoryWrite(state: LibraryHistoryState, url: string, mode: Histor
 
 export type AlbumAddress = 'found' | 'unknown';
 
-// The entry point of the /album/<slug> route (issue #269). A pasted address
-// is the only thing a cold tab knows, so the slug is checked against the API
+// The entry point of the /album/<slug> route (issue #269). A pasted address is
+// the only thing a cold tab knows, so the slug is checked against the API
 // first — an unknown one is a verdict the route states, never a silent fall
-// back to the wall — and a known one is written into the library's own restore
-// state. Everything after that is the restore path every reload and Back
-// already take (hydrateLibraryFromHistory), which is what keeps the album
-// present even when it is not on the first page of the browse listing.
+// back to the wall — and a known one becomes the library's own restore state
+// and is then applied through the very path every reload and Back take, unless
+// the library already shows that album. Going through applyLibraryHistory
+// rather than setting the stores by hand is what keeps the album present even
+// when the browse listing that loads alongside it does not carry it, and it is
+// applied here rather than left to the live stream's snapshot load because the
+// two start independently: whichever runs second re-applies the same state, so
+// the address wins either way.
 //
 // An existing restore state that already opens this album is richer than the
 // address (it carries sort, scroll and offsets) and wins; the address only
@@ -244,11 +248,32 @@ export type AlbumAddress = 'found' | 'unknown';
 // address bar — see the note there before turning any of these back into a
 // bare history.replaceState.
 export async function openAlbumAddress(albumId: string): Promise<AlbumAddress> {
-	if (!(await albumExists(albumId))) return 'unknown';
-	if (!historyAlreadyOpens(albumId)) {
-		await writeLibraryHistory(albumAddressState(albumId), albumRoutePath(albumId), 'replace');
+	if (!(await albumIsKnown(albumId))) return 'unknown';
+	const opened = historyAlreadyOpens(albumId);
+	const state = opened
+		? (currentLibraryHistoryState() as LibraryHistoryState)
+		: albumAddressState(albumId);
+	if (!opened) {
+		await writeLibraryHistory(state, albumRoutePath(albumId), 'replace');
 	}
+	if (!albumAlreadyShown(albumId)) await applyLibraryHistory(state);
 	return 'found';
+}
+
+// Both short circuits keep the address from re-asking what the library has
+// already answered, which is what the in-app route to this album -- the wall,
+// which loaded the album list and then opened the album before the address
+// changed -- always has. A cold tab has neither and pays for both.
+async function albumIsKnown(albumId: string): Promise<boolean> {
+	if (get(albumList).some((album) => album.id === albumId)) return true;
+	return albumExists(albumId);
+}
+
+function albumAlreadyShown(albumId: string): boolean {
+	const collection = get(openCollection);
+	return (
+		get(librarySurface) === 'detail' && collection?.kind === 'album' && collection.id === albumId
+	);
 }
 
 function historyAlreadyOpens(albumId: string): boolean {
