@@ -2445,9 +2445,9 @@ describe('buildQueueViewModel', () => {
 	});
 
 	it('exposes the current item and up next for a native library/album queue', () => {
-		const songs = [makeSong({ id: 's1', audio_duration: 200 }), makeSong({ id: 's2' })];
+		const songs = [makeSong({ id: 's1' }), makeSong({ id: 's2' })];
 		const current = makePlayback(
-			makeGen({ id: 'g1', version_number: 3, generation_number: 2 }),
+			makeGen({ id: 'g1', version_number: 3, generation_number: 2, audio_duration_sec: 200 }),
 			songs[0]
 		);
 		const next = makePlayback(makeGen({ id: 'g2' }), songs[1]);
@@ -2462,15 +2462,17 @@ describe('buildQueueViewModel', () => {
 		expect(vm.upNext).toEqual(expect.objectContaining({ generationId: 'g2' }));
 	});
 
-	it("reads a native row's duration from the take, falling back to the song", () => {
-		const song = makeSong({ id: 's1', audio_duration: 200 });
+	it("reads only a native row's own measured duration, never the song's requested one", () => {
+		// A song requested with "auto" (0) duration is the exact shape that
+		// used to leak a false 0:00 through the song-level fallback (#258).
+		const song = makeSong({ id: 's1', audio_duration: 0 });
 		const ownDuration = makePlayback(makeGen({ id: 'g1', audio_duration_sec: 141 }), song);
-		const noOwnDuration = makePlayback(makeGen({ id: 'g2' }), song);
-		const ctx = { type: 'library' as const, takes: [ownDuration, noOwnDuration], index: 0 };
+		const unmeasured = makePlayback(makeGen({ id: 'g2', audio_duration_sec: null }), song);
+		const ctx = { type: 'library' as const, takes: [ownDuration, unmeasured], index: 0 };
 
 		const vm = buildQueueViewModel(ctx, ownDuration, [song]);
 
-		expect(vm.items.map((item) => item.durationSec)).toEqual([141, 200]);
+		expect(vm.items.map((item) => item.durationSec)).toEqual([141, null]);
 	});
 
 	it("shows a native row's own measured length, not the \"auto\" (0) duration it was requested with", () => {
@@ -2486,8 +2488,8 @@ describe('buildQueueViewModel', () => {
 		expect(vm.items.map((item) => item.durationSec)).toEqual([188]);
 	});
 
-	it("reads a playlist row's duration from the entry, falling back to the song", () => {
-		const song = makeSong({ id: 's1', audio_duration: 200 });
+	it("reads only a playlist row's own measured duration, never the song's requested one", () => {
+		const song = makeSong({ id: 's1', audio_duration: 0 });
 		const entries = [
 			makePlaylistEntry({ id: 'e1', generation_id: 'g1', audio_duration: 141 }),
 			makePlaylistEntry({ id: 'e2', generation_id: 'g2', audio_duration: null })
@@ -2496,7 +2498,7 @@ describe('buildQueueViewModel', () => {
 
 		const vm = buildQueueViewModel(ctx, null, [song]);
 
-		expect(vm.items.map((item) => item.durationSec)).toEqual([141, 200]);
+		expect(vm.items.map((item) => item.durationSec)).toEqual([141, null]);
 	});
 
 	it('carries no version number for a native take with no version (library pool)', () => {

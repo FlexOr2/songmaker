@@ -749,37 +749,28 @@ function nextQueueItem(items: QueueRowItem[], currentIndex: number): QueueRowIte
 	return items[(currentIndex + 1) % items.length] ?? null;
 }
 
-// Every queue row reads its length from the same place: the take's own
-// duration when the row carries one, and the song's latest-version duration
-// as the fallback for rows that do not (library-pool takes, and album rows
-// built before the take's params were loaded).
-function queueRowDurationSec(
-	takeDurationSec: number | null | undefined,
-	songs: SongItem[],
-	songId: string
-): number | null {
-	return takeDurationSec ?? songs.find((s) => s.id === songId)?.audio_duration ?? null;
-}
-
-function nativeQueueItem(take: PlaybackInfo, songs: SongItem[]): QueueRowItem {
+// Every queue row reads its own measured length, never a stand-in --
+// neither the "auto" (0) request parameter nor another row's estimate.
+// Unmeasured is unmeasured: the row carries no duration until one exists.
+function nativeQueueItem(take: PlaybackInfo): QueueRowItem {
 	return {
 		key: `${take.songId}:${take.generation.id}`,
 		songId: take.songId,
 		songTitle: take.songTitle,
 		generationId: take.generation.id,
-		durationSec: queueRowDurationSec(take.generation.audio_duration_sec, songs, take.songId),
+		durationSec: take.generation.audio_duration_sec ?? null,
 		versionNumber: take.generation.version_number,
 		generationNumber: take.generation.generation_number
 	};
 }
 
-function playlistQueueItem(entry: PlaylistEntryItem, songs: SongItem[]): QueueRowItem {
+function playlistQueueItem(entry: PlaylistEntryItem): QueueRowItem {
 	return {
 		key: entry.id,
 		songId: entry.song_id,
 		songTitle: entry.song_title,
 		generationId: entry.generation_id,
-		durationSec: queueRowDurationSec(entry.audio_duration, songs, entry.song_id),
+		durationSec: entry.audio_duration ?? null,
 		versionNumber: entry.version_number,
 		generationNumber: entry.generation_number
 	};
@@ -793,17 +784,21 @@ function playlistQueueItem(entry: PlaylistEntryItem, songs: SongItem[]): QueueRo
 export function buildQueueViewModel(
 	ctx: QueueContext,
 	current: PlaybackInfo | null,
-	songs: SongItem[]
+	// Unused since #258: a queue row's duration is its own measured length
+	// (see nativeQueueItem/playlistQueueItem), never derived from the song.
+	// Kept in the signature to avoid rippling an unrelated API change into
+	// this function's other callers.
+	_songs: SongItem[]
 ): QueueViewModel {
 	if (ctx.type === 'playlist') {
-		const items = ctx.entries.map((entry) => playlistQueueItem(entry, songs));
+		const items = ctx.entries.map((entry) => playlistQueueItem(entry));
 		const currentIndex = currentPlaylistIndex(ctx, current);
 		return { items, currentIndex, upNext: nextQueueItem(items, currentIndex) };
 	}
 	if (!ctx.takes || ctx.takes.length === 0) {
 		return { items: [], currentIndex: -1, upNext: null };
 	}
-	const items = ctx.takes.map((take) => nativeQueueItem(take, songs));
+	const items = ctx.takes.map((take) => nativeQueueItem(take));
 	const currentIndex = nativeTakeIndex(ctx, current);
 	return { items, currentIndex, upNext: nextQueueItem(items, currentIndex) };
 }

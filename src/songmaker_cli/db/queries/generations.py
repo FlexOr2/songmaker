@@ -8,9 +8,9 @@ from datetime import datetime, timezone
 from pathlib import Path
 from typing import Final
 
-from fastapi import HTTPException
 from sqlalchemy.orm import Session, aliased, joinedload
 
+from songmaker_cli import queue_streams
 from songmaker_cli.constants import JobStatus
 from songmaker_cli.db.models import Generation, Rating, Score, Song
 from songmaker_cli.db.queries.sharing import disable_sharing, enable_sharing
@@ -21,21 +21,11 @@ INITIAL_GENERATION_NUMBER: Final[int] = 1
 
 
 def _probe_audio_duration_or_none(audio_dir: Path, mp3_rel: str) -> float | None:
-    """Measure a generation's real audio length, or None if it can't be read.
-
-    ``probe_audio_duration`` (queue_streams.py) raises HTTPException — a
-    shape meant for a request boundary. This function also runs at
-    background-job completion, outside any request, so an unreadable file
-    here is not a client error to report — it's a fact the caller stores as
-    "not yet known" rather than as a failure.
-    """
-    from songmaker_cli.queue_streams import probe_audio_duration
-
-    try:
-        return probe_audio_duration(audio_dir / mp3_rel)
-    except HTTPException:
+    """Measure a generation's real audio length, logging if it can't be read."""
+    duration = queue_streams.read_audio_duration(audio_dir / mp3_rel)
+    if duration is None:
         log.warning("Could not measure audio duration for %s", mp3_rel)
-        return None
+    return duration
 
 
 def measure_generation_audio_duration(
@@ -43,8 +33,10 @@ def measure_generation_audio_duration(
 ) -> float | None:
     """Backfill a generation's measured duration if it doesn't have one yet.
 
-    Idempotent: a generation that already carries a measured duration is
-    returned unchanged rather than re-probed.
+    Skips re-probing a generation that already carries a measured duration.
+    A failed probe stores None, same as an unmeasured generation, so a later
+    call retries rather than getting stuck on a transient read failure —
+    this is deliberately not idempotent across a failure.
     """
     if generation.audio_duration_sec is not None:
         return generation.audio_duration_sec

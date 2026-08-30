@@ -442,10 +442,17 @@ def test_get_generation_measures_and_persists_audio_duration(
     view, and the measurement is persisted (#258) -- not just returned once."""
     import songmaker_cli.queue_streams as qs
 
-    monkeypatch.setattr(qs, "probe_audio_duration", lambda _path: 188.0)
+    probed: list[Path] = []
+
+    def _read(path: Path) -> float:
+        probed.append(path)
+        return 188.0
+
+    monkeypatch.setattr(qs, "read_audio_duration", _read)
     resp = client.get("/api/generations/g1")
     assert resp.status_code == 200
     assert resp.json()["audio_duration_sec"] == 188.0
+    assert probed == [client.app.state.ctx.audio_dir / "u-test/g1.mp3"]
 
     monkeypatch.undo()
     resp = client.get("/api/generations/g1")
@@ -457,14 +464,9 @@ def test_get_generation_reports_unmeasurable_duration_as_null(
     client: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """An unreadable file is reported as unknown, never as a 0-second take."""
-    from fastapi import HTTPException
-
     import songmaker_cli.queue_streams as qs
 
-    def _unreadable(_path: Path) -> float:
-        raise HTTPException(422, "Could not read audio duration")
-
-    monkeypatch.setattr(qs, "probe_audio_duration", _unreadable)
+    monkeypatch.setattr(qs, "read_audio_duration", lambda _path: None)
     resp = client.get("/api/generations/g1")
     assert resp.status_code == 200
     assert resp.json()["audio_duration_sec"] is None

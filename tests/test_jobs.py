@@ -185,7 +185,13 @@ def test_generation_job_persists_the_takes_own_measured_duration(
     calling create_generation() with audio_dir directly."""
     import songmaker_cli.queue_streams as qs
 
-    monkeypatch.setattr(qs, "probe_audio_duration", lambda _path: 188.0)
+    probed: list[Path] = []
+
+    def _read(path: Path) -> float:
+        probed.append(path)
+        return 188.0
+
+    monkeypatch.setattr(qs, "read_audio_duration", _read)
 
     dispatch, post_process, defaults = _patch_dispatch_and_post_process(_make_dto(seed=42))
     with dispatch, post_process, defaults:
@@ -201,6 +207,14 @@ def test_generation_job_persists_the_takes_own_measured_duration(
     with seeded_db() as session:
         gen = session.query(Generation).filter_by(song_id="s1").one()
         assert gen.audio_duration_sec == 188.0
+        # The file-naming id create_generation() probes against is the
+        # transient id post_process_generation mints for the audio files,
+        # not the DB row's own primary key (jobs/generation.py:
+        # "Returns the persisted Generation.id ... distinct from
+        # generation_id, used only to name the audio files") -- so this
+        # asserts against the persisted mp3_path, the one value both the
+        # probe call and the row agree on.
+        assert probed == [tmp_path / "audio" / gen.mp3_path]
 
 
 def test_generation_job_multiple_count(seeded_db, tmp_path: Path) -> None:

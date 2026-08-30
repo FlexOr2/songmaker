@@ -149,7 +149,7 @@ export interface GenerationItem {
 	version_lyrics: string | null;
 	scores: TrackScores | null;
 	generation_params: GenerationParams | null;
-	audio_duration_sec?: number | null;
+	audio_duration_sec: number | null;
 	created_at: string;
 }
 

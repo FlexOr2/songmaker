@@ -404,8 +404,28 @@ def test_shared_generation_view_includes_pick_media(sharing_app: TestClient) -> 
     data = unauthed.get(f"/shared/gen/{slug}").json()
 
     assert data["generation_id"] == "g1"
-    assert data["audio_duration"] == 0
+    # audio_duration is the take's own measured length (#258), never the
+    # requested parameter -- unmeasured is None here, not 0.
+    assert data["audio_duration"] is None
     assert data["lyrics"] == "Hello"
+
+
+def test_shared_generation_reports_the_takes_measured_duration(
+    sharing_app: TestClient,
+) -> None:
+    factory = sharing_app.app.state.ctx.db
+    with factory() as session:
+        gen = session.query(Generation).filter_by(id="g1").one()
+        gen.audio_duration_sec = 188.0
+        session.commit()
+
+    resp = sharing_app.post("/api/generations/g1/share")
+    slug = resp.json()["share_slug"]
+
+    unauthed = TestClient(sharing_app.app, cookies={})
+    data = unauthed.get(f"/shared/gen/{slug}").json()
+
+    assert data["audio_duration"] == 188.0
 
 
 def _seed_playlist_with_entries(session) -> None:
