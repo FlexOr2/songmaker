@@ -161,7 +161,7 @@ Operators need to know what's in Redis to debug stuck state. Keys to know:
 
 | Key pattern | Set by | Read by | TTL | Purpose |
 |---|---|---|---|---|
-| `songmaker:acestep:worker:{worker_id}` | `acestep-worker` heartbeat loop (every 5 s) | `admin_api` `/admin/workers`, `scheduler.pick_worker`, `/health`, `/metrics` | 15 s | Ephemeral worker state — JSON object with `loaded`, `target_loading`, `vram_used_gb`, `vram_total_gb`, `available_modes`, `queue_depth`, `last_heartbeat_at` |
+| `songmaker:acestep:worker:{worker_id}` | `acestep-worker` heartbeat loop (every 5 s) | `admin_api` `/admin/workers`, `scheduler.pick_worker`, `/health`, `/metrics` | 15 s | Ephemeral worker state — JSON object with `loaded`, `target_loading`, `vram_used_gb`, `vram_total_gb`, `vram_measured`, `available_modes`, `queue_depth`, `last_heartbeat_at` |
 | `songmaker:acestep:queue:{worker_id}` | `scheduler.incr_queue_depth` / `decr_queue_depth` (per generation dispatch) | `admin_api`, `scheduler.pick_worker`, `/metrics` | none | Per-worker generation queue depth (atomic counter) |
 | `songmaker:acestep:download:{mode}` | `download_model_on_worker` arq job (atomic SET-NX) | admin endpoint pre-check, arq job duplicate guard | 1800 s | Download-in-progress flag; value is the job_id of the arq job that owns it |
 
@@ -205,21 +205,51 @@ The cancel-on-shutdown behavior: if the worker is shut down (SIGTERM, container 
 
 The Worker Pool admin panel has a **Restart** button per card. Clicking it (after a confirm dialog) calls `POST /api/admin/workers/{id}/restart`, which proxies to the worker's `POST /restart` endpoint. The worker logs the restart request, schedules `os.kill(os.getpid(), SIGTERM)` after a 100 ms delay (so the HTTP response is flushed first), and returns `{"status": "restarting", "pid": ...}`.
 
-The container is running with `restart: unless-stopped`, so docker compose brings it back up automatically. The new process goes through the normal startup sequence above (FastAPI bind → `/health` 503 → register → `/health` 200). Expected total downtime: ~10–15 s.
+The container is already running when the SIGTERM lands, so the Docker daemon's `restart: unless-stopped` policy restarts *that same container* automatically — this narrow in-process case needs neither docker compose nor a reboot. See [Restart-policy limits and boot autostart](#restart-policy-limits-and-boot-autostart) below for what `unless-stopped` does **not** cover. The new process goes through the normal startup sequence above (FastAPI bind → `/health` 503 → register → `/health` 200). Expected total downtime: ~10–15 s.
 
 **In-flight generations fail.** Restarting kills the worker process, including any subprocess holding a generate task. Affected jobs surface as `error_type=worker_unreachable` in the user's job list. Restart only when the operator is willing to lose the in-flight work.
 
 To verify the restart cycle from the admin UI: the Worker Pool card flips `online → offline → loading → online` over the cycle. The transitions are visible because the heartbeat TTL (15 s) outlasts the brief downtime.
 
+### Restart-policy limits and boot autostart
+
+`restart: unless-stopped` is a per-container Docker Engine policy, not a docker-compose feature: the daemon consults it whenever a container's own process exits, and again for every container whose last recorded state was `running` when the daemon itself restarts. It has one hard limit — **it only ever applies to a container that has been started at least once.** A container docker compose merely *created* but never started (e.g. `docker compose up` failing partway through, such as the NVIDIA driver mismatch in #252) sits in state `Created` with `RestartCount: 0`. Docker ignores `Created` containers on every daemon start and every host reboot, indefinitely — there is no timeout and no self-heal. The only way out is an explicit `docker start <container>` or `docker compose up -d`.
+
+**`docker compose ps` hides this.** Without `-a` it omits containers in `Created`, so the stack can look fully up when a container has in fact never run once. Diagnose a suspected stuck container with:
+
+```bash
+docker compose ps -a
+```
+
+**Boot autostart.** Since neither dockerd nor compose retries a `Created` container on its own, the host runs a systemd unit (`scripts/songmaker.service`) that runs `docker compose up -d` (no `--build`) once per boot, after `docker.service` is up. `docker compose up -d` starts every container regardless of the state it was left in — `running`, `exited`, or `Created` alike — which is exactly what the restart policy cannot do. Install it once with:
+
+```bash
+./scripts/install-autostart.sh
+```
+
+The script copies the unit into `/etc/systemd/system/` (deriving `WorkingDirectory` from wherever the script itself lives, so running it from a worktree doesn't silently point the unit at the main checkout, and `User` from whoever is running the installer — `$SUDO_USER` under `sudo`, otherwise the current user, refusing outright if that resolves to `root` — so the unit runs as the stack owner, not as whoever happened to invoke it) and runs `systemctl enable` — it does **not** touch the currently running stack. `enable` only takes effect on the *next* boot; the script's own output names the explicit `systemctl start` command for applying it immediately, and warns that doing so recreates containers (killing an in-flight generation) if `.env` or code changed since the containers last started, so that should happen in a maintenance window, not as a side effect of installing the unit. Rerunning the script is a no-op only if the unit file content is unchanged; if it changed, `daemon-reload` picks up the new file immediately, but `RemainAfterExit=yes` means an already-active unit only picks up the new `ExecStart` on the next boot or an explicit `systemctl restart songmaker.service`.
+
+**Verifying the fix.** To reproduce and confirm the exact failure this closes, without disturbing the live stack for longer than a deliberate maintenance window:
+
+```bash
+docker compose stop songmaker-acestep-worker-0
+docker compose rm -f songmaker-acestep-worker-0
+docker compose create songmaker-acestep-worker-0   # creates but does not start it
+docker compose ps -a                                # confirm: State = created
+sudo reboot
+# after the host comes back:
+docker compose ps -a                                # confirm: State = running, no manual `docker start` needed
+```
+
 ### pin_model semantics
 
-The cache is normally LRU: when a new `load_model` would exceed the VRAM budget, the least-recently-used loaded model is evicted to make room. **Pinning** marks a loaded model as exempt from LRU eviction. Use it when a single-GPU multi-user deployment has a "must always be loaded" preference (e.g. the operator wants `sft` to stay resident regardless of how many other modes get loaded).
+The cache is normally LRU: when a new `load_model` would exceed the VRAM budget, the least-recently-used loaded model is evicted to make room. Capacity is planned against `max(measured VRAM used, sum of declared sizes of what's currently loaded)`, not the declared-size table alone: ACE-Step loads lazily, so a model that hasn't served its first generation yet can measure almost nothing on NVML even though it is genuinely resident, and without that floor the cache would read it as free and overbook the GPU. The full eviction plan — which models, in what order — is computed and checked against the budget before anything is actually unloaded; a load the plan can't satisfy is rejected outright, with nothing destroyed. **Pinning** marks a loaded model as exempt from eviction. Use it when a single-GPU multi-user deployment has a "must always be loaded" preference (e.g. the operator wants `sft` to stay resident regardless of how many other modes get loaded).
 
 How pinning interacts with the cache:
 
 - `POST /api/admin/workers/{id}/pin_model` requires the model to already be loaded (returns 409 otherwise).
-- `_evict_to_fit` skips pinned **and** in-use models when picking an LRU victim.
-- If **all** loaded models are pinned and a new load doesn't fit, the cache raises `CapacityError` with a clear message naming the pinned set. The admin must explicitly unpin one before the next load can succeed.
+- `_evict_to_fit` builds the eviction plan in LRU order, skipping pinned **and** in-use models, and only executes it once the plan proves sufficient.
+- If **all** loaded models are pinned (or otherwise ineligible) and the plan still doesn't fit, the cache raises `CapacityError` with a clear message naming the loaded, in-use, and pinned sets — without evicting anything. The admin must explicitly unpin one before the next load can succeed.
 - Explicit `evict_model` (the admin "Evict X" button) unpins implicitly — the operator asked for it. `_evict_to_fit` (LRU) does not unpin.
 - Worker shutdown (`evict_all`) drains everything regardless of pin state.
 
@@ -234,7 +264,7 @@ Generations and model loads share the same cache. Without coordination, an admin
 - `_evict_to_fit` skips both pinned and in-use models (refcount > 0). If no eligible victim exists, the load fails with `CapacityError`.
 - Explicit `evict_model` refuses to evict a mode with refcount > 0 (returns 409 with the in-flight count).
 
-The user-visible failure mode: if an admin tries to load a model that would require evicting an in-use one, the load job ends `failed` with a clear "all eligible models are in use or pinned" message in the job-tracking UI. The running generation continues unharmed.
+The user-visible failure mode: if an admin tries to load a model that would require evicting an in-use one, the load job ends `failed` with a message naming the loaded, in-use, and pinned sets in the job-tracking UI. The running generation continues unharmed.
 
 ### Download auto-retry
 
@@ -269,7 +299,7 @@ On this Docker 29 host, the legacy `--gpus all` / Compose `deploy.resources.rese
 
 **"Download stalls"** — check the download flag: `docker compose exec redis redis-cli GET 'songmaker:acestep:download:{mode}'`. Cross-reference the value (a job_id) with the job's status in the admin UI. If the job is gone but the flag remains, it's stale — `redis-cli DEL` it and retry. The 30-minute TTL is the automatic safety net.
 
-**"Load fails with CapacityError"** — the message includes the loaded set, the pinned set, and the in-use set. If the in-use set is non-empty, wait for those generations to finish; if it's all pinned, unpin one explicitly. The Worker Pool card's per-mode buttons make this directly actionable.
+**"Load fails with CapacityError"** — two distinct messages, both actionable. If the worker has models loaded, the message names the loaded/pinned/in-use sets and how much VRAM is already in use (measured or, without a reader, estimated from declared sizes); if the in-use set is non-empty, wait for those generations to finish; if it's all pinned, unpin one explicitly. If the worker has **nothing** loaded and still can't fit the request, the message says so explicitly — VRAM outside this cache's tracking (a stray process, an unreleased subprocess) is holding the GPU; check `nvidia-smi` on the worker host before retrying. The Worker Pool card's per-mode buttons make the first case directly actionable; the second needs a host-level check.
 
 **"Stale-job reaper killed my long generation"** — the reaper looks at `Job.last_heartbeat_at`. The arq job calls `_touch_heartbeat` on every SSE progress event from the worker (which fires every ~2 s for downloads, every ~1–5 s for generation steps). If a long task is being killed unexpectedly, check whether the on_progress callback is wired into the SSE consumer — the contract is that *every* yielded event refreshes the heartbeat, not just the milestone events.
 
