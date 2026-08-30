@@ -20,10 +20,14 @@
 # in-flight generation. Do that deliberately, in a maintenance window —
 # this script does not do it for you.
 #
-# The project root and the user the unit runs as are derived from where
-# this script lives, not hardcoded, so running it from a worktree installs
-# a unit pointing at that worktree rather than silently at the main
-# checkout.
+# WorkingDirectory is derived from where this script lives, not hardcoded,
+# so running it from a worktree installs a unit pointing at that worktree
+# rather than silently at the main checkout. User is derived from who is
+# running the installer (SUDO_USER when invoked via `sudo`, otherwise the
+# current user) — NOT from where the script lives — because that's whose
+# stack (.env, docker group membership, Claude CLI credentials) the unit
+# should run as. Run this script as your normal user (with sudo prompting
+# inline), not from an already-root login: see the root check below.
 #
 # Idempotent for `enable`: rerunning it re-copies the unit file and
 # re-applies enable, both no-ops if already applied. If the unit file
@@ -49,10 +53,37 @@ if [ ! -f "$UNIT_SOURCE" ]; then
     exit 1
 fi
 
+if [ "$INSTALL_USER" = "root" ]; then
+    echo "ERROR: refusing to install a unit that runs as root." >&2
+    echo "You're running this as root directly (no SUDO_USER set), so the unit" >&2
+    echo "would get User=root and HOME=/root — that silently breaks the Claude" >&2
+    echo "CLI bind mounts co-writer/lyrical_coherence depend on (docker-compose.yml" >&2
+    echo "expects them under the stack owner's home, not /root)." >&2
+    echo "Log in as the user the stack belongs to and run:" >&2
+    echo "  sudo ./scripts/install-autostart.sh" >&2
+    exit 1
+fi
+
+# Escape backslash, the sed delimiter (#), and & (which sed would otherwise
+# expand to "whatever matched the pattern" in the replacement text) so an
+# unusual PROJECT_ROOT or INSTALL_USER can never corrupt or misdirect the
+# substitution below.
+sed_escape_replacement() {
+    printf '%s' "$1" | sed -e 's/[\&#]/\\&/g'
+}
+
+ESCAPED_PROJECT_ROOT="$(sed_escape_replacement "$PROJECT_ROOT")"
+ESCAPED_INSTALL_USER="$(sed_escape_replacement "$INSTALL_USER")"
+
+TMP_UNIT="$(mktemp)"
+trap 'rm -f "$TMP_UNIT"' EXIT
+
+sed -e "s#^WorkingDirectory=.*#WorkingDirectory=$ESCAPED_PROJECT_ROOT#" \
+    -e "s#^User=.*#User=$ESCAPED_INSTALL_USER#" \
+    "$UNIT_SOURCE" > "$TMP_UNIT"
+
 echo "Installing $UNIT_TARGET (WorkingDirectory=$PROJECT_ROOT, User=$INSTALL_USER)..."
-sed -e "s#^WorkingDirectory=.*#WorkingDirectory=$PROJECT_ROOT#" \
-    -e "s#^User=.*#User=$INSTALL_USER#" \
-    "$UNIT_SOURCE" | sudo tee "$UNIT_TARGET" > /dev/null
+sudo install -m 0644 "$TMP_UNIT" "$UNIT_TARGET"
 
 echo "Reloading systemd unit files..."
 sudo systemctl daemon-reload
