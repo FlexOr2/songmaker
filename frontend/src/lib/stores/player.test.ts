@@ -2464,16 +2464,26 @@ describe('buildQueueViewModel', () => {
 
 	it("reads a native row's duration from the take, falling back to the song", () => {
 		const song = makeSong({ id: 's1', audio_duration: 200 });
-		const ownDuration = makePlayback(
-			makeGen({ id: 'g1', generation_params: { audio_duration: 141 } }),
-			song
-		);
+		const ownDuration = makePlayback(makeGen({ id: 'g1', audio_duration_sec: 141 }), song);
 		const noOwnDuration = makePlayback(makeGen({ id: 'g2' }), song);
 		const ctx = { type: 'library' as const, takes: [ownDuration, noOwnDuration], index: 0 };
 
 		const vm = buildQueueViewModel(ctx, ownDuration, [song]);
 
 		expect(vm.items.map((item) => item.durationSec)).toEqual([141, 200]);
+	});
+
+	it("shows a native row's own measured length, not the \"auto\" (0) duration it was requested with", () => {
+		const song = makeSong({ id: 's1', audio_duration: 200 });
+		const requestedAuto = makePlayback(
+			makeGen({ id: 'g1', generation_params: { audio_duration: 0 }, audio_duration_sec: 188 }),
+			song
+		);
+		const ctx = { type: 'library' as const, takes: [requestedAuto], index: 0 };
+
+		const vm = buildQueueViewModel(ctx, requestedAuto, [song]);
+
+		expect(vm.items.map((item) => item.durationSec)).toEqual([188]);
 	});
 
 	it("reads a playlist row's duration from the entry, falling back to the song", () => {

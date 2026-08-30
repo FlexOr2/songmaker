@@ -767,11 +767,7 @@ function nativeQueueItem(take: PlaybackInfo, songs: SongItem[]): QueueRowItem {
 		songId: take.songId,
 		songTitle: take.songTitle,
 		generationId: take.generation.id,
-		durationSec: queueRowDurationSec(
-			take.generation.generation_params?.audio_duration,
-			songs,
-			take.songId
-		),
+		durationSec: queueRowDurationSec(take.generation.audio_duration_sec, songs, take.songId),
 		versionNumber: take.generation.version_number,
 		generationNumber: take.generation.generation_number
 	};
