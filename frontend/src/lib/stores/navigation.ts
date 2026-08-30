@@ -102,6 +102,20 @@ export function isLibraryWorkspacePath(pathname: string): boolean {
 	return pathname === '/';
 }
 
+// Every entry point that opens a collection or a song onto the library
+// workspace (openLibraryWall, openAlbum, openPlaylist, revealPlayingSong)
+// needs this precondition first: the browser may be sitting on an unrelated
+// route (e.g. Settings), and mutating the library stores without also
+// switching the route leaves the change invisible behind whatever layout is
+// still mounted (issue #264). Route through this instead of re-testing
+// isLibraryWorkspacePath at each call site — a copy is exactly what got two
+// of the four entry points forgotten in the first place.
+async function ensureLibraryWorkspaceRoute(): Promise<void> {
+	if (!isLibraryWorkspacePath(window.location.pathname)) {
+		await goto(resolve('/'));
+	}
+}
+
 // A dirty editor draft blocks a song switch or leave (rail row, prev/next,
 // breadcrumb, Escape, Library) until the owner resolves it: the deferred
 // navigation is parked here, and SongDetailView — the only surface where a
@@ -139,7 +153,8 @@ selectedSong.subscribe((song) => {
 	ensureCollectionMatchesSong(song);
 });
 
-export function openAlbum(albumId: string): void {
+export async function openAlbum(albumId: string): Promise<void> {
+	await ensureLibraryWorkspaceRoute();
 	storeDeselectPlaylist();
 	setOpenCollection({ kind: 'album', id: albumId });
 	selectedSongId.set(null);
@@ -150,7 +165,8 @@ export function openAlbum(albumId: string): void {
 	pushLibraryHistory();
 }
 
-export function openPlaylist(playlistId: string): void {
+export async function openPlaylist(playlistId: string): Promise<void> {
+	await ensureLibraryWorkspaceRoute();
 	selectedSongId.set(null);
 	selectedGenerationId.set(null);
 	void loadPlaylistDetail(playlistId);
@@ -173,8 +189,8 @@ export function openCollectionEntry(collection: OpenCollection): void {
 		backToCollection();
 		return;
 	}
-	if (collection.kind === 'album') openAlbum(collection.id);
-	else openPlaylist(collection.id);
+	if (collection.kind === 'album') void openAlbum(collection.id);
+	else void openPlaylist(collection.id);
 }
 
 export function backToCollection(): void {
@@ -201,9 +217,7 @@ export function openLibraryCreate(): void {
 // entry so the browser back button returns to whatever was open before.
 export async function openLibraryWall(): Promise<void> {
 	await guardDirtyNavigation(async () => {
-		if (!isLibraryWorkspacePath(window.location.pathname)) {
-			await goto(resolve('/'));
-		}
+		await ensureLibraryWorkspaceRoute();
 		selectedSongId.set(null);
 		selectedGenerationId.set(null);
 		setLibrarySurface('browse');
@@ -384,9 +398,7 @@ export function openTakesTab(): void {
 }
 
 export async function revealPlayingSong(song: SongItem, generationId: string): Promise<void> {
-	if (!isLibraryWorkspacePath(window.location.pathname)) {
-		await goto(resolve('/'));
-	}
+	await ensureLibraryWorkspaceRoute();
 	await guardDirtyNavigation(() => {
 		applySelectedSong(song.id, song, 'stack', 'write');
 		selectedGenerationId.set(generationId);
