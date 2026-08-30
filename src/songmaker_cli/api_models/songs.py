@@ -286,6 +286,7 @@ class GenerationResponse(BaseModel):
     version_lyrics: str | None
     scores: dict | None
     generation_params: dict | None
+    audio_duration_sec: float | None = None
     created_at: str
 
     @classmethod
@@ -344,6 +345,7 @@ class GenerationResponse(BaseModel):
             version_lyrics=generation_version_lyrics(gen),
             scores=scores if scores else None,
             generation_params=generation_params,
+            audio_duration_sec=gen.audio_duration_sec,
             created_at=gen.created_at.isoformat(),
         )
 

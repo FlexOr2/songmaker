@@ -68,6 +68,7 @@ from songmaker_cli.db.queries import (
     list_login_attempts,
     list_songs,
     list_users,
+    measure_generation_audio_duration,
     move_song,
     pick_generation,
     prune_overflow_sessions,
@@ -733,6 +734,111 @@ def test_create_generation_with_wav_path(seeded_session: Session) -> None:
     )
     seeded_session.commit()
     assert gen.wav_path == "test/gen.wav"
+
+
+def test_create_generation_measures_duration_even_when_requested_zero(
+    seeded_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The take's own length is measured, not copied from the "auto" (0)
+    request parameter it was generated with (#258)."""
+    import songmaker_cli.queue_streams as qs
+
+    monkeypatch.setattr(qs, "probe_audio_duration", lambda _path: 188.0)
+
+    gen = create_generation(
+        seeded_session,
+        "s1",
+        "v1",
+        "test/gen.mp3",
+        model_mode="sft",
+        seed=1,
+        generation_params={"audio_duration": 0},
+        audio_dir=tmp_path,
+    )
+    seeded_session.commit()
+
+    assert gen.audio_duration_sec == 188.0
+    assert gen.generation_params["audio_duration"] == 0
+
+
+def test_create_generation_without_audio_dir_leaves_duration_unmeasured(
+    seeded_session: Session,
+) -> None:
+    gen = create_generation(
+        seeded_session,
+        "s1",
+        "v1",
+        "test/gen.mp3",
+        model_mode="sft",
+        seed=1,
+    )
+    seeded_session.commit()
+    assert gen.audio_duration_sec is None
+
+
+def test_measure_generation_audio_duration_backfills_a_generation(
+    seeded_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import songmaker_cli.queue_streams as qs
+
+    monkeypatch.setattr(qs, "probe_audio_duration", lambda _path: 42.5)
+
+    gen = get_generation(seeded_session, "g1")
+    assert gen.audio_duration_sec is None
+
+    duration = measure_generation_audio_duration(seeded_session, tmp_path, gen)
+
+    assert duration == 42.5
+    assert gen.audio_duration_sec == 42.5
+
+
+def test_measure_generation_audio_duration_does_not_reprobe_a_measured_generation(
+    seeded_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import songmaker_cli.queue_streams as qs
+
+    gen = get_generation(seeded_session, "g1")
+    gen.audio_duration_sec = 99.0
+    seeded_session.flush()
+
+    def _fail(_path: Path) -> float:
+        raise AssertionError("should not re-probe an already-measured generation")
+
+    monkeypatch.setattr(qs, "probe_audio_duration", _fail)
+
+    duration = measure_generation_audio_duration(seeded_session, tmp_path, gen)
+
+    assert duration == 99.0
+
+
+def test_measure_generation_audio_duration_stores_none_when_file_unreadable(
+    seeded_session: Session, tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """probe_audio_duration raises HTTPException for a request boundary; this
+    call runs at job completion, outside any request, so the failure must
+    resolve to "unknown" rather than propagate as an HTTP-flavored error."""
+    import songmaker_cli.queue_streams as qs
+    from fastapi import HTTPException
+
+    def _unreadable(_path: Path) -> float:
+        raise HTTPException(422, "Could not read audio duration")
+
+    monkeypatch.setattr(qs, "probe_audio_duration", _unreadable)
+
+    gen = get_generation(seeded_session, "g1")
+    duration = measure_generation_audio_duration(seeded_session, tmp_path, gen)
+
+    assert duration is None
+    assert gen.audio_duration_sec is None
+
+
+def test_generation_response_exposes_audio_duration_sec(seeded_session: Session) -> None:
+    gen = get_generation(seeded_session, "g1")
+    assert GenerationResponse.from_orm(gen).audio_duration_sec is None
+
+    gen.audio_duration_sec = 12.5
+    seeded_session.flush()
+    assert GenerationResponse.from_orm(gen).audio_duration_sec == 12.5
 
 
 def test_generations_model_mode_not_null(tmp_path: Path) -> None:
