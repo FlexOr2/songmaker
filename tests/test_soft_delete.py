@@ -67,8 +67,12 @@ def db_session(tmp_path: Path) -> Session:
 
 def _seed(session: Session, owner: str | None = None) -> None:
     session.add(Album(id="rock", title="Rock", artist="A", created_by=owner))
-    session.add(Song(id="s1", title="Song1", album_id="rock", track_number=1))
-    session.add(Song(id="s2", title="Song2", album_id="rock", track_number=2))
+    session.add(
+        Song(id="s1", title="Song1", album_id="rock", track_number=1, slug="song1"),
+    )
+    session.add(
+        Song(id="s2", title="Song2", album_id="rock", track_number=2, slug="song2"),
+    )
     session.add(Version(id="v1", song_id="s1", version_number=1))
     session.add(Version(id="v2", song_id="s2", version_number=1))
     session.add(Generation(

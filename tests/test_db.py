@@ -101,7 +101,9 @@ def seeded_session(db_session: Session) -> Session:
     album = Album(id="test", title="Test Album", artist="TestArtist")
     db_session.add(album)
 
-    song = Song(id="s1", title="Song One", album_id="test", track_number=1)
+    song = Song(
+        id="s1", title="Song One", album_id="test", track_number=1, slug="song-one",
+    )
     db_session.add(song)
 
     ver = Version(id="v1", song_id="s1", version_number=1, lyrics="verse one", prompt="rock")

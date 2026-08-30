@@ -171,8 +171,8 @@ def tool_create_song(
     slug = unique_song_slug(session, album_id, title)
     song = db_create_song(
         session, title=title, album_id=album_id, lyrics=lyrics, prompt=prompt,
+        slug=slug,
     )
-    song.slug = slug
     refreshed = _reload_song(session, song.id)
     return WriteResult(
         song_id=song.id,
@@ -258,8 +258,7 @@ def tool_rename_song(
     except HTTPException as exc:
         raise _to_tool_error(exc) from exc
     slug = unique_song_slug(session, song.album_id, title, exclude_song_id=song_id)
-    song = db_rename_song(session, song_id=song_id, title=title)
-    song.slug = slug
+    db_rename_song(session, song_id=song_id, title=title, slug=slug)
     refreshed = _reload_song(session, song_id)
     return WriteResult(
         song_id=song_id,
