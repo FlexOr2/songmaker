@@ -340,13 +340,21 @@ function selectSongHistoryMode(
 }
 
 export function selectSong(songId: string, knownSong?: SongItem): void {
-	void guardDirtyNavigation(() =>
-		applySelectedSong(songId, knownSong, selectSongHistoryMode(songId, knownSong), 'write')
-	);
+	// Evaluated before the guard's await: it reads selectedSongId/openCollection
+	// as they stand right now, not after ensureLibraryWorkspaceRoute has (maybe)
+	// already let applySelectedSong change them.
+	const historyMode = selectSongHistoryMode(songId, knownSong);
+	void guardDirtyNavigation(async () => {
+		await ensureLibraryWorkspaceRoute();
+		applySelectedSong(songId, knownSong, historyMode, 'write');
+	});
 }
 
 export function selectNeighborSong(song: SongItem): void {
-	void guardDirtyNavigation(() => applySelectedSong(song.id, song, 'replace', 'keep'));
+	void guardDirtyNavigation(async () => {
+		await ensureLibraryWorkspaceRoute();
+		applySelectedSong(song.id, song, 'replace', 'keep');
+	});
 }
 
 function hydrateSongIntoLibrary(song: SongItem): void {

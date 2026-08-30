@@ -225,11 +225,11 @@
 		captureLibraryScroll(target.scrollTop);
 	}
 
-	function hydrateAndOpenAlbum(album: AlbumItem): void {
+	async function hydrateAndOpenAlbum(album: AlbumItem): Promise<void> {
 		albumList.update((list) =>
 			list.some((item) => item.id === album.id) ? list : [...list, album]
 		);
-		openAlbum(album.id);
+		await openAlbum(album.id);
 	}
 
 	function onPlayAlbum(albumId: string): void {
@@ -317,7 +317,7 @@
 		try {
 			const playlist = await createNewPlaylist('Playlist');
 			selectLibraryFilter('playlists');
-			openPlaylist(playlist.id);
+			await openPlaylist(playlist.id);
 		} catch {
 			addToast('Create failed', 'error');
 		}
@@ -334,7 +334,7 @@
 	async function onOpenShare(item: ShareInventoryItem): Promise<void> {
 		if (item.type === 'album') {
 			try {
-				hydrateAndOpenAlbum(await fetchAlbum(item.id));
+				await hydrateAndOpenAlbum(await fetchAlbum(item.id));
 			} catch {
 				addToast('Open failed', 'error');
 			}
