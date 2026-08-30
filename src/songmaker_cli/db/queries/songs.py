@@ -154,6 +154,7 @@ def create_song(
     session: Session,
     title: str,
     album_id: str,
+    slug: str,
     lyrics: str = "",
     prompt: str = "",
     bpm: int = 0,
@@ -161,7 +162,6 @@ def create_song(
     key_scale: str = "",
     vocal_language: str = "",
     generation_params: dict | None = None,
-    slug: str = "",
 ) -> Song:
     """Create a song and its first version.
 
@@ -343,34 +343,29 @@ def restore_song(session: Session, song_id: str) -> Song:
     return song
 
 
-def rename_song(
-    session: Session, song_id: str, title: str, slug: str | None = None,
-) -> Song:
-    """Rename a song, optionally moving its slug along in the same flush.
+def rename_song(session: Session, song_id: str, title: str, slug: str) -> Song:
+    """Rename a song, moving its slug along in the same flush.
 
-    Pass ``slug`` (already reserved via unique_song_slug()) together with
-    the title so both change atomically — setting it in a later, separate
-    flush would briefly leave the row on its old slug, next to whatever
-    sibling has just claimed it.
+    ``slug`` (already reserved via unique_song_slug()) changes together
+    with the title so both change atomically in one flush — setting it in
+    a later, separate flush would briefly leave the row on its old slug,
+    next to whatever sibling has just claimed it.
     """
     song = session.query(Song).filter_by(id=song_id).first()
     if not song:
         raise ValueError(f"Song not found: {song_id}")
     song.title = title
-    if slug is not None:
-        song.slug = slug
+    song.slug = slug
     session.flush()
     log.info("Renamed song %s to %r", song_id, title)
     return song
 
 
-def move_song(
-    session: Session, song_id: str, new_album_id: str, slug: str | None = None,
-) -> Song:
-    """Move a song to another album, optionally re-slugging in the same flush.
+def move_song(session: Session, song_id: str, new_album_id: str, slug: str) -> Song:
+    """Move a song to another album, re-slugging in the same flush.
 
-    Pass ``slug`` (already reserved via unique_song_slug() against the
-    target album) together with the move so both change atomically — the
+    ``slug`` (already reserved via unique_song_slug() against the target
+    album) moves together with the album_id change in one flush — the
     song's old slug may already be taken by a sibling in the target album,
     and a separate later flush would briefly collide with it.
     """
@@ -387,8 +382,7 @@ def move_song(
 
     old_album_id = song.album_id
     song.album_id = new_album_id
-    if slug is not None:
-        song.slug = slug
+    song.slug = slug
     session.flush()
     log.info("Moved song %s from album %s to %s", song_id, old_album_id, new_album_id)
     return song

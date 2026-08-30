@@ -75,13 +75,40 @@ def _backfill_empty_slugs() -> None:
         bind.execute(sa.text(_UPDATE_SLUG), {"slug": candidate, "id": song_id})
 
 
+def _assert_no_empty_slugs_remain() -> None:
+    """Second belt: state the invariant even though the ACCESS EXCLUSIVE
+    lock already makes it unreachable on PostgreSQL. Costs one query."""
+    bind = op.get_bind()
+    straggler = bind.execute(sa.text("SELECT count(*) FROM songs WHERE slug = ''")).scalar()
+    if straggler:
+        raise RuntimeError(f"{straggler} song(s) still carry slug='' after backfill")
+
+
 def upgrade() -> None:
-    """Upgrade schema."""
+    """Upgrade schema.
+
+    On PostgreSQL, an old songmaker-web instance can still be serving
+    writes while this migration runs (rolling deploy) — it can insert new
+    slug='' rows between the backfill and the index creation, or hold a
+    long-lived read lock on songs (a co-writer turn's SSE session keeps its
+    DB session open for the whole response). Locking the table ACCESS
+    EXCLUSIVE before touching it closes that window entirely: either the
+    lock is granted immediately (nothing else was writing/reading songs)
+    or, within lock_timeout, the migration aborts loudly and rolls back
+    instead of silently landing a permanent slug='' row or hanging the
+    live app behind a queued lock. SQLite (tests, this migration's own
+    throwaway-DB probe) has no comparable lock primitive and doesn't need
+    one — the whole migration already runs single-connection there.
+    """
+    if op.get_bind().dialect.name == "postgresql":
+        op.execute("SET LOCAL lock_timeout = '5s'")
+        op.execute("LOCK TABLE songs IN ACCESS EXCLUSIVE MODE")
     _backfill_empty_slugs()
     op.drop_index('ix_songs_album_id_slug', table_name='songs')
     op.create_index(
         'ix_songs_album_id_slug', 'songs', ['album_id', 'slug'], unique=True,
     )
+    _assert_no_empty_slugs_remain()
 
 
 def downgrade() -> None:

@@ -203,7 +203,7 @@ def test_restore_album_idempotent_on_live(seeded: Session) -> None:
 def test_create_song_after_soft_delete_no_track_collision(seeded: Session) -> None:
     soft_delete_song(seeded, "s2")
     seeded.commit()
-    new_song = create_song(seeded, title="Song3", album_id="rock")
+    new_song = create_song(seeded, title="Song3", album_id="rock", slug="song3")
     seeded.commit()
     assert new_song.track_number == 3
 
@@ -214,14 +214,14 @@ def test_move_song_target_filtered_when_album_soft_deleted(seeded: Session) -> N
     soft_delete_album(seeded, "other")
     seeded.commit()
     with pytest.raises(ValueError, match="Album not found"):
-        move_song(seeded, "s1", "other")
+        move_song(seeded, "s1", "other", slug="song1")
 
 
 def test_move_song_source_filtered_when_song_soft_deleted(seeded: Session) -> None:
     soft_delete_song(seeded, "s1")
     seeded.commit()
     with pytest.raises(ValueError, match="Song not found"):
-        move_song(seeded, "s1", "rock")
+        move_song(seeded, "s1", "rock", slug="song1")
 
 
 def test_list_expired_finds_only_past_cutoff(seeded: Session) -> None:

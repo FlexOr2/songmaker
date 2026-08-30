@@ -229,7 +229,9 @@ def test_save_rating_update(seeded_session: Session) -> None:
 
 
 def test_create_song(seeded_session: Session) -> None:
-    song = create_song(seeded_session, "Song Two", "test", lyrics="hello", bpm=140)
+    song = create_song(
+        seeded_session, "Song Two", "test", slug="song-two", lyrics="hello", bpm=140,
+    )
     seeded_session.commit()
     assert song.track_number == 2
     assert song.latest_version.lyrics == "hello"
@@ -242,7 +244,7 @@ def test_create_song_first_in_album_uses_initial_track_number(
 
     db_session.add(Album(id="empty", title="E", artist="X"))
     db_session.flush()
-    song = create_song(db_session, "First Song", "empty")
+    song = create_song(db_session, "First Song", "empty", slug="first-song")
     db_session.commit()
     assert song.track_number == INITIAL_TRACK_NUMBER
 
@@ -534,32 +536,32 @@ def test_move_song(seeded_session: Session) -> None:
     seeded_session.add(Album(id="other", title="Other Album", artist="A"))
     seeded_session.commit()
 
-    song = move_song(seeded_session, "s1", "other")
+    song = move_song(seeded_session, "s1", "other", slug="song-one")
     seeded_session.commit()
     assert song.album_id == "other"
     assert get_song(seeded_session, "s1").album_id == "other"
 
 
 def test_move_song_same_album(seeded_session: Session) -> None:
-    song = move_song(seeded_session, "s1", "test")
+    song = move_song(seeded_session, "s1", "test", slug="song-one")
     assert song.album_id == "test"
 
 
 def test_move_song_not_found(seeded_session: Session) -> None:
     with pytest.raises(ValueError, match="Song not found"):
-        move_song(seeded_session, "nonexistent", "test")
+        move_song(seeded_session, "nonexistent", "test", slug="song-one")
 
 
 def test_move_song_target_not_found(seeded_session: Session) -> None:
     with pytest.raises(ValueError, match="Album not found"):
-        move_song(seeded_session, "s1", "nonexistent")
+        move_song(seeded_session, "s1", "nonexistent", slug="song-one")
 
 
 def test_move_song_updates_album(seeded_session: Session) -> None:
     seeded_session.add(Album(id="other", title="Other", artist="A"))
     seeded_session.commit()
 
-    move_song(seeded_session, "s1", "other")
+    move_song(seeded_session, "s1", "other", slug="song-one")
     seeded_session.commit()
 
     gen = get_generation(seeded_session, "g1")
@@ -1039,7 +1041,7 @@ def test_create_song_with_generation_params(db_session: Session) -> None:
     db_session.add(Album(id="a1", title="A", artist="X"))
     db_session.flush()
     params = {"inference_steps": 50, "guidance_scale": 5.5}
-    song = create_song(db_session, "S", "a1", generation_params=params)
+    song = create_song(db_session, "S", "a1", slug="s", generation_params=params)
     db_session.commit()
     ver = song.latest_version
     assert ver.generation_params == params
@@ -1048,7 +1050,7 @@ def test_create_song_with_generation_params(db_session: Session) -> None:
 def test_create_song_without_generation_params(db_session: Session) -> None:
     db_session.add(Album(id="a1", title="A", artist="X"))
     db_session.flush()
-    song = create_song(db_session, "S", "a1")
+    song = create_song(db_session, "S", "a1", slug="s")
     db_session.commit()
     assert song.latest_version.generation_params is None
 
@@ -1066,6 +1068,7 @@ def test_version_validator_rejects_unknown_key(db_session: Session) -> None:
             db_session,
             "S",
             "a1",
+            slug="s",
             generation_params={"infrence_steps": 50},
         )
 
@@ -1175,7 +1178,7 @@ def test_list_songs_with_unknown_album_filter(seeded_session: Session) -> None:
 
 def test_create_song_album_not_found(db_session: Session) -> None:
     with pytest.raises(ValueError, match="Album not found"):
-        create_song(db_session, "Test", "nonexistent")
+        create_song(db_session, "Test", "nonexistent", slug="test")
 
 
 def test_update_song_not_found(db_session: Session) -> None:
