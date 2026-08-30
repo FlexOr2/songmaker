@@ -786,12 +786,7 @@ function playlistQueueItem(entry: PlaylistEntryItem): QueueRowItem {
 // title/duration still come from the caller's own `PlaybackInfo` prop.
 export function buildQueueViewModel(
 	ctx: QueueContext,
-	current: PlaybackInfo | null,
-	// Unused since #258: a queue row's duration is its own measured length
-	// (see nativeQueueItem/playlistQueueItem), never derived from the song.
-	// Kept in the signature to avoid rippling an unrelated API change into
-	// this function's other callers.
-	_songs: SongItem[]
+	current: PlaybackInfo | null
 ): QueueViewModel {
 	if (ctx.type === 'playlist') {
 		const items = ctx.entries.map((entry) => playlistQueueItem(entry));

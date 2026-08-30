@@ -297,6 +297,7 @@ def _seed_multi_track_album(session) -> None:
         session.add(Generation(
             id=f"g{i}", song_id=song_id, version_id=f"v{i}", generation_number=1,
             mp3_path=f"admin_user/g{i}.mp3", seed=1, is_picked=True,
+            audio_duration_sec=100 + i,
         ))
     session.add(Song(id="s_no_pick", title="No Pick", album_id="test_album", track_number=4))
 
@@ -358,6 +359,7 @@ def _seed_song_with_pick(session) -> None:
     session.add(Generation(
         id="g1", song_id="s1", version_id="v1", generation_number=1,
         mp3_path="admin_user/g1.mp3", seed=42, is_picked=True,
+        audio_duration_sec=180.0,
     ))
 
 
@@ -443,6 +445,7 @@ def _seed_playlist_with_entries(session) -> None:
         session.add(Generation(
             id=f"g{i}", song_id=song_id, version_id=f"v{i}", generation_number=1,
             mp3_path=f"admin_user/g{i}.mp3", seed=1,
+            audio_duration_sec=100 + i,
         ))
         session.add(PlaylistEntry(id=f"e{i}", playlist_id="pl1", generation_id=f"g{i}", position=i))
 

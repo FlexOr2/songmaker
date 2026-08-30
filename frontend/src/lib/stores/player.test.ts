@@ -1660,7 +1660,7 @@ describe('playAlbumFromGeneration', () => {
 
 		await playAlbumFromGeneration('a1', song, gen);
 
-		const vm = buildQueueViewModel(get(queueContext), audioPlayer.current, get(songList));
+		const vm = buildQueueViewModel(get(queueContext), audioPlayer.current);
 		expect(vm.items[0]).toEqual(expect.objectContaining({ versionNumber: 3, generationNumber: 2 }));
 	});
 
@@ -2439,7 +2439,7 @@ describe('playIdleStart', () => {
 
 describe('buildQueueViewModel', () => {
 	it('classic-mode contexts without takes render current only, with no up next', () => {
-		const vm = buildQueueViewModel({ type: 'library' }, makePlayback(makeGen(), makeSong()), []);
+		const vm = buildQueueViewModel({ type: 'library' }, makePlayback(makeGen(), makeSong()));
 		expect(vm.items).toEqual([]);
 		expect(vm.currentIndex).toBe(-1);
 		expect(vm.upNext).toBeNull();
@@ -2454,7 +2454,7 @@ describe('buildQueueViewModel', () => {
 		const next = makePlayback(makeGen({ id: 'g2' }), songs[1]);
 		const ctx = { type: 'library' as const, takes: [current, next], index: 0 };
 
-		const vm = buildQueueViewModel(ctx, current, songs);
+		const vm = buildQueueViewModel(ctx, current);
 
 		expect(vm.items.map((item) => item.generationId)).toEqual(['g1', 'g2']);
 		expect(vm.items[0]?.durationSec).toBe(200);
@@ -2471,7 +2471,7 @@ describe('buildQueueViewModel', () => {
 		const unmeasured = makePlayback(makeGen({ id: 'g2', audio_duration_sec: null }), song);
 		const ctx = { type: 'library' as const, takes: [ownDuration, unmeasured], index: 0 };
 
-		const vm = buildQueueViewModel(ctx, ownDuration, [song]);
+		const vm = buildQueueViewModel(ctx, ownDuration);
 
 		expect(vm.items.map((item) => item.durationSec)).toEqual([141, null]);
 	});
@@ -2484,20 +2484,19 @@ describe('buildQueueViewModel', () => {
 		);
 		const ctx = { type: 'library' as const, takes: [requestedAuto], index: 0 };
 
-		const vm = buildQueueViewModel(ctx, requestedAuto, [song]);
+		const vm = buildQueueViewModel(ctx, requestedAuto);
 
 		expect(vm.items.map((item) => item.durationSec)).toEqual([188]);
 	});
 
-	it("reads only a playlist row's own measured duration, never the song's requested one", () => {
-		const song = makeSong({ id: 's1', audio_duration: 0 });
+	it("reads a playlist row's own measured duration, showing none for an unmeasured entry", () => {
 		const entries = [
 			makePlaylistEntry({ id: 'e1', generation_id: 'g1', audio_duration: 141 }),
 			makePlaylistEntry({ id: 'e2', generation_id: 'g2', audio_duration: null })
 		];
 		const ctx = playlistQueue(entries, 0);
 
-		const vm = buildQueueViewModel(ctx, null, [song]);
+		const vm = buildQueueViewModel(ctx, null);
 
 		expect(vm.items.map((item) => item.durationSec)).toEqual([141, null]);
 	});
@@ -2507,7 +2506,7 @@ describe('buildQueueViewModel', () => {
 		const current = makePlayback(makeGen({ version_number: null, generation_number: 5 }), song);
 		const ctx = { type: 'library' as const, takes: [current], index: 0 };
 
-		const vm = buildQueueViewModel(ctx, current, [song]);
+		const vm = buildQueueViewModel(ctx, current);
 
 		expect(vm.items[0]).toEqual(
 			expect.objectContaining({ versionNumber: null, generationNumber: 5 })
@@ -2519,7 +2518,7 @@ describe('buildQueueViewModel', () => {
 		const current = makePlayback(makeGen(), song);
 		const ctx = { type: 'library' as const, takes: [current], index: 0 };
 
-		const vm = buildQueueViewModel(ctx, current, [song]);
+		const vm = buildQueueViewModel(ctx, current);
 
 		expect(vm.upNext).toBeNull();
 	});
@@ -2537,7 +2536,7 @@ describe('buildQueueViewModel', () => {
 		];
 		const ctx = playlistQueue(entries, 0);
 
-		const vm = buildQueueViewModel(ctx, null, []);
+		const vm = buildQueueViewModel(ctx, null);
 
 		expect(vm.currentIndex).toBe(0);
 		expect(vm.items[0]).toEqual(expect.objectContaining({ versionNumber: 4, generationNumber: 1 }));
