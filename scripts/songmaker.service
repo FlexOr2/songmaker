@@ -1,0 +1,17 @@
+[Unit]
+Description=Songmaker stack (docker compose up -d) after boot
+After=docker.service
+Requires=docker.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=/home/felix-hummert/git/songmaker
+ExecStart=/usr/bin/docker compose up -d
+Restart=on-failure
+RestartSec=10
+User=felix-hummert
+Group=docker
+
+[Install]
+WantedBy=multi-user.target
