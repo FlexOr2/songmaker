@@ -13,6 +13,7 @@ from fastapi.testclient import TestClient
 from songmaker_cli.auth import hash_password
 from songmaker_cli.db.models import Album, AvailableModel, Generation, Job, Song, Version
 from songmaker_cli.db.queries import create_user
+from songmaker_cli.middleware.rate_limit import RateLimitClass, _classify_path
 
 
 def _seed_rate_limit_data(session) -> None:
@@ -267,6 +268,55 @@ def test_exempt_paths_do_not_consume_api_budget(ip_limited_client: TestClient) -
     resp = ip_limited_client.get("/api/auth/check")
 
     assert resp.status_code != 429
+
+
+# ── Path classification (_classify_path) ────────────────────────────
+
+# Media: `/audio/*`, the authenticated queue-stream audio route (review
+# finding 2a: previously untested), and every public share's audio route.
+# Stream: the two SSE endpoints. Everything else, including a slug that
+# literally reads "audio" hitting a real metadata route, is API -- fail
+# closed, and the documented exception (finding 2b: previously untested)
+# that `/shared/{slug}/cover` and `/shared/{slug}/stream` stay API however
+# their slug is spelled.
+@pytest.mark.parametrize(("path", "expected_class"), [
+    ("/audio/owner/file.mp3", RateLimitClass.MEDIA),
+    ("/api/queue-streams/some-id/audio", RateLimitClass.MEDIA),
+    ("/shared/realslug/audio/owner/file.mp3", RateLimitClass.MEDIA),
+    ("/shared/song/realslug/audio/owner/file.mp3", RateLimitClass.MEDIA),
+    ("/shared/gen/realslug/audio/owner/file.mp3", RateLimitClass.MEDIA),
+    ("/shared/playlist/realslug/audio/owner/file.mp3", RateLimitClass.MEDIA),
+    ("/shared/queue-streams/some-id/audio", RateLimitClass.MEDIA),
+    ("/api/resource-events/stream", RateLimitClass.STREAM),
+    ("/api/jobs/some-job-id/stream", RateLimitClass.STREAM),
+    ("/this-path-does-not-exist", RateLimitClass.API),
+    ("/api/auth/check", RateLimitClass.API),
+    ("/api/audio/upload", RateLimitClass.API),
+    ("/api/queue-streams", RateLimitClass.API),
+    ("/api/queue-streams/library", RateLimitClass.API),
+    ("/api/queue-streams/some-id/pin", RateLimitClass.API),
+    ("/shared/realslug", RateLimitClass.API),
+    ("/shared/realslug/cover", RateLimitClass.API),
+    ("/shared/realslug/stream", RateLimitClass.API),
+    ("/shared/song/realslug", RateLimitClass.API),
+    ("/shared/song/realslug/cover", RateLimitClass.API),
+    ("/shared/gen/realslug", RateLimitClass.API),
+    ("/shared/playlist/realslug", RateLimitClass.API),
+    ("/shared/playlist/realslug/stream", RateLimitClass.API),
+    # Regression (review finding 1): a slug that literally reads "audio"
+    # must not slide a real metadata route into Media by shape alone.
+    ("/shared/audio", RateLimitClass.API),
+    ("/shared/audio/cover", RateLimitClass.API),
+    ("/shared/audio/stream", RateLimitClass.API),
+    ("/shared/song/audio", RateLimitClass.API),
+    ("/shared/gen/audio", RateLimitClass.API),
+    ("/shared/playlist/audio", RateLimitClass.API),
+    # ...but the genuine media route for a slug literally named "audio"
+    # still classifies as Media -- it has a filename segment after "audio/".
+    ("/shared/audio/audio/owner/file.mp3", RateLimitClass.MEDIA),
+])
+def test_classify_path(path: str, expected_class: RateLimitClass) -> None:
+    assert _classify_path(path) == expected_class
 
 
 # ── Rate limit classes (issue #257) ─────────────────────────────────
