@@ -320,3 +320,41 @@ export const RESOURCE_SYNC_FETCH_CONCURRENCY = 4;
 export const RESOURCE_SYNC_VISIBILITY_DEBOUNCE_MS = 250;
 export const JOB_TYPE_GENERATE = 'generate';
 export const JOB_TYPE_SCORE = 'score';
+
+// Shown once per throttling episode (issue #257) when the backend's IP rate
+// limiter (`middleware/rate_limit.py`) rejects a request with 429 — the
+// budget classes it enforces (API/Media/Stream) mean this is now rare
+// during ordinary use, but a burst can still happen, and a client that
+// silently stalls reads as broken. `auth.ts` already turns a 429 on
+// login/setup/session-check into its own inline copy; the API client skips
+// this toast on those paths so the two notices never stack.
+export const RATE_LIMITED_TOAST_MESSAGE =
+	'Too many requests — hang on, it will continue in a moment.';
+
+// SSE reconnection backoff (issue #257): jobs.ts (one EventSource per job)
+// and resourceSync.ts (the one live-sync stream) both own their `/api/*`
+// stream connection and must not lean on the browser's flat ~3s native
+// EventSource retry, which is what produced the operator's ERR_QUIC storm
+// (~80 opens/min across a handful of concurrently-reconnecting streams).
+// Both close the failed connection themselves and reopen it after
+// `nextReconnectDelayMs(attempt)` (see `lib/stores/sseReconnect.ts`):
+// doubling from a 1s floor up to a 30s ceiling, plus 0-20% jitter so
+// concurrently-failing streams don't all reopen in lockstep. Jitter only
+// adds to the delay, never subtracts, so it can only slow a stream down
+// relative to the math below, never speed it up.
+//
+// Budget math against the backend's Stream class (45 opens/min/IP,
+// `stream_rate_limit` in settings.py): once backoff has saturated at the
+// ceiling, a stream reopens at most 60_000 / SSE_RECONNECT_MAX_DELAY_MS = 2
+// times/min. The reported incident had 4 concurrently-failing job streams
+// (four `/api/jobs/{id}/stream` connections with `ERR_QUIC_PROTOCOL_ERROR`)
+// alongside the one resource-events stream = 5 streams, so worst case
+// 5 * 2 = 10 opens/min — well under the 45/min budget and under the 33/min
+// legitimate-use baseline the backend sized that budget against. Even the
+// theoretical ceiling of `max_user_active_jobs` (10) concurrent job streams
+// plus the resource stream (11 total) stays at 11 * 2 = 22/min in steady
+// state.
+export const SSE_RECONNECT_BASE_DELAY_MS = 1000;
+export const SSE_RECONNECT_BACKOFF_FACTOR = 2;
+export const SSE_RECONNECT_MAX_DELAY_MS = 30_000;
+export const SSE_RECONNECT_JITTER_RATIO = 0.2;

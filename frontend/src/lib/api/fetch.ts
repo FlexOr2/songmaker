@@ -1,4 +1,7 @@
+import { get } from 'svelte/store';
 import type { JobItem } from './types';
+import { RATE_LIMITED_TOAST_MESSAGE } from '$lib/constants';
+import { addToast, toasts } from '$lib/stores/toast';
 
 export const API_TIMEOUT_MS = 30_000;
 export const CHAT_TIMEOUT_MS = 600_000;
@@ -39,6 +42,26 @@ function getCsrfToken(): string {
 
 const AUTH_ENDPOINTS = ['/api/auth/login', '/api/auth/setup'];
 
+// `lib/stores/auth.ts` already turns a 429 on these into its own
+// user-visible copy (an inline "Too many attempts" under the login form,
+// or the full-page session-check retry banner for `/api/auth/me`) — the
+// global toast below would say the same thing a second time on top of it.
+const RATE_LIMIT_TOAST_EXEMPT_PATHS = new Set([...AUTH_ENDPOINTS, '/api/auth/me']);
+
+/**
+ * One toast per throttling episode, not one per rejected request: a 429
+ * burst calls this many times in a row, but a toast already on screen for
+ * the same message is left alone instead of being duplicated (issue #257).
+ * The toast auto-dismisses (`addToast`'s 'info' type), so once it clears a
+ * fresh burst raises a fresh one.
+ */
+function notifyIfRateLimited(status: number, path: string): void {
+	if (status !== 429 || RATE_LIMIT_TOAST_EXEMPT_PATHS.has(path)) return;
+	const alreadyShown = get(toasts).some((toast) => toast.message === RATE_LIMITED_TOAST_MESSAGE);
+	if (alreadyShown) return;
+	addToast(RATE_LIMITED_TOAST_MESSAGE, 'info');
+}
+
 function abortOnCallerOrTimeout(
 	callerSignal: AbortSignal | null | undefined,
 	timeoutSignal: AbortSignal
@@ -78,6 +101,7 @@ export async function apiFetch<T>(
 			} catch {
 				// response body not JSON — use empty detail
 			}
+			notifyIfRateLimited(resp.status, path);
 			if (resp.status === 401 && !AUTH_ENDPOINTS.includes(path)) {
 				const { clearAuth } = await import('$lib/stores/auth');
 				const { goto } = await import('$app/navigation');
@@ -130,6 +154,7 @@ export async function* sseFetch<T = unknown>(
 			} catch {
 				// non-JSON body on error
 			}
+			notifyIfRateLimited(resp.status, path);
 			if (resp.status === 401 && !AUTH_ENDPOINTS.includes(path)) {
 				const { clearAuth } = await import('$lib/stores/auth');
 				const { goto } = await import('$app/navigation');
