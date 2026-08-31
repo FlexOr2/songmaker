@@ -14,8 +14,10 @@
 	import { goto } from '$app/navigation';
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
+	import { LEGACY_TAKE_LINK_NOT_FOUND_TOAST } from '$lib/constants';
 	import { resolveLegacySongQueryAddress } from '$lib/stores/libraryContext';
 	import { libraryAddressOverlayActive } from '$lib/stores/libraryAddressOverlay';
+	import { addToast } from '$lib/stores/toast';
 
 	type AddressState = 'idle' | 'resolving' | 'unknown-song' | 'unreachable';
 
@@ -33,6 +35,15 @@
 	const songId = $derived(page.url.searchParams.get('song'));
 	const generationId = $derived(page.url.searchParams.get('gen'));
 
+	// A tab that already carries a LibraryHistoryState naming this exact
+	// legacy `?song=` entry (Back/Forward inside a session that opened one
+	// before this redirect existed) has `onPopstate` (navigation.ts) apply
+	// it instantly from `history.state` while this effect resolves the same
+	// address again over the network in parallel -- both converge on the same
+	// canonical address, so the only cost is one redundant fetch and a brief
+	// overlay flash, never a wrong landing. Known and self-healing; #265's S7
+	// (the router leading instead of hand-built history) removes the case
+	// entirely along with the hand-built history this page resolves against.
 	$effect(() => {
 		void redirectLegacyAddress(songId, generationId);
 	});
@@ -65,6 +76,10 @@
 			}
 			// eslint-disable-next-line svelte/no-navigation-without-resolve -- static SPA with no base path, and the path is already a resolved library address built by songRoutePath/takeRoutePath
 			await goto(resolved.path, { replaceState: true, noScroll: true, keepFocus: true });
+			// After the landing, not before: the toast reports the take is gone once
+			// the song's own address is already showing, never while the bar still
+			// reads the legacy form the person is leaving.
+			if (resolved.droppedUnknownTake) addToast(LEGACY_TAKE_LINK_NOT_FOUND_TOAST, 'error');
 		} catch (err) {
 			if (request !== openRequests) return;
 			failure = err instanceof Error ? err.message : UNREACHABLE_SONG_MESSAGE;

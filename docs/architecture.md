@@ -198,8 +198,20 @@ and redirects, `replaceState`, onto the canonical song or take address —
 issue #284 — so Back does not step back through the query form, and an
 unknown song id gets the same honest 404 treatment `openSongAddress`'s
 unknown-song case does rather than a silent landing on the wall. An unknown `?gen=` on an
-otherwise known song is dropped rather than reported — the song still
-exists — landing on its own address instead of the take's.
+otherwise known song is dropped rather than 404ed — the song still exists,
+and takes are pruned by ordinary cleanup, so a dead take is not the song's
+own failure — but not silently: dropping it without saying so would still
+hide a fact the surface knows, so the page toasts
+`LEGACY_TAKE_LINK_NOT_FOUND_TOAST` once the redirect has landed on the song
+address (never before — the bar must already read the new address when the
+toast explains why it isn't the take one). A tab whose `history.state`
+already names this exact legacy entry from before this redirect existed
+(Back/Forward onto it) has `onPopstate` apply that state instantly while
+this same resolution reruns over the network in parallel; both converge on
+the same address, so the only cost is one redundant fetch and a brief
+overlay flash — self-healing, and #265's S7 (removing the hand-built
+history this page resolves against, once every address goes through the
+router) removes the case entirely.
 `isLibraryWorkspacePath` still counts all four by pathname (it leans on
 `isAlbumRoutePath`, true for `/album/<slug>` and every segment deeper) rather
 than by the route group, since `routes/+layout.svelte` sits outside

@@ -800,7 +800,8 @@ describe('resolveLegacySongQueryAddress', () => {
 
 		await expect(resolveLegacySongQueryAddress('s9', null)).resolves.toEqual({
 			kind: 'found',
-			path: '/album/a9/tide'
+			path: '/album/a9/tide',
+			droppedUnknownTake: false
 		});
 	});
 
@@ -817,11 +818,12 @@ describe('resolveLegacySongQueryAddress', () => {
 
 		await expect(resolveLegacySongQueryAddress('s9', 'g1')).resolves.toEqual({
 			kind: 'found',
-			path: '/album/a9/tide/take/3'
+			path: '/album/a9/tide/take/3',
+			droppedUnknownTake: false
 		});
 	});
 
-	it('drops an unknown generation id and lands on the song address -- the song still exists', async () => {
+	it('drops an unknown generation id, lands on the song address, and flags the drop -- the song still exists', async () => {
 		fetchSong.mockResolvedValueOnce(
 			song({
 				id: 's9',
@@ -834,7 +836,8 @@ describe('resolveLegacySongQueryAddress', () => {
 
 		await expect(resolveLegacySongQueryAddress('s9', 'ghost-gen')).resolves.toEqual({
 			kind: 'found',
-			path: '/album/a9/tide'
+			path: '/album/a9/tide',
+			droppedUnknownTake: true
 		});
 	});
 

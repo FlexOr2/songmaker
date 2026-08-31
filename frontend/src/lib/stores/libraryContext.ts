@@ -478,7 +478,8 @@ export async function openTakeAddress(
 	return 'found';
 }
 
-export type LegacySongQueryAddress = { kind: 'found'; path: string } | { kind: 'unknown-song' };
+export type LegacySongQueryAddress =
+	{ kind: 'found'; path: string; droppedUnknownTake: boolean } | { kind: 'unknown-song' };
 
 // The legacy `/?song=<uuid>` and `/?song=<uuid>&gen=<uuid>` entry points
 // (issue #284): a bookmark or a link shared before S3/S4 (#275/#281) gave the
@@ -501,7 +502,10 @@ export type LegacySongQueryAddress = { kind: 'found'; path: string } | { kind: '
 // same honest verdict an unknown slug already gets; an unknown generation id
 // on an otherwise known song is not -- the song still exists -- so it is
 // dropped rather than reported, landing on the song's own address instead of
-// a 404 for a page that is there.
+// a 404 for a page that is there -- but silently, per the operator's own
+// standard, would hide a fact the surface knows: `droppedUnknownTake` tells
+// the caller a take was requested and not found, so it can say so (a toast,
+// after the redirect lands -- see (library)/+page.svelte).
 export async function resolveLegacySongQueryAddress(
 	songId: string,
 	generationId: string | null
@@ -522,7 +526,11 @@ export async function resolveLegacySongQueryAddress(
 		takeNumber !== undefined
 			? takeRoutePath(resolvedSong.album_id, resolvedSong.slug, takeNumber)
 			: songRoutePath(resolvedSong.album_id, resolvedSong.slug);
-	return { kind: 'found', path };
+	return {
+		kind: 'found',
+		path,
+		droppedUnknownTake: generationId !== null && takeNumber === undefined
+	};
 }
 
 // Checks the already-loaded songs of this album first -- the in-app route to
