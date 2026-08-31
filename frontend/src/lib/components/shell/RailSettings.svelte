@@ -47,11 +47,26 @@
 
 	let open = $state(readPersistedOpen());
 
-	// Landing directly on a /settings/* route (a fresh visit, a reload, a
-	// shared link) always finds the section it points at already expanded,
-	// regardless of what a previous session left in storage.
+	// A plain variable, not $state: it must not itself become a dependency
+	// this effect reruns for, only a value the effect reads once per actual
+	// run of *its own* trigger (onSettingsRoute) — the same "track the
+	// previous value in an untracked local" idiom syncSongAddressToRename
+	// uses in stores/navigation.ts. Landing directly on a /settings/* route
+	// (a fresh visit, a reload, a shared link, or arriving from outside
+	// Settings) always finds the section it points at already expanded,
+	// regardless of what a previous session left in storage — but only on
+	// that entry transition. Reading `open` here as well as writing it
+	// would make every click that closes the panel while already on a
+	// /settings/* route re-run this same effect, find `onSettingsRoute &&
+	// !open` true again, and snap it back open, so a viewer could never
+	// collapse it while browsing Settings. Moving between sections
+	// (Generation → Voices) keeps whatever the viewer left it at, since
+	// that is not an entry transition.
+	let previousOnSettingsRoute = false;
 	$effect(() => {
-		if (onSettingsRoute && !open) {
+		const enteredSettings = onSettingsRoute && !previousOnSettingsRoute;
+		previousOnSettingsRoute = onSettingsRoute;
+		if (enteredSettings) {
 			open = true;
 			persistOpen(true);
 		}

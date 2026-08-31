@@ -4,15 +4,24 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 import { RAIL_SETTINGS_OPEN_STORAGE_KEY } from '$lib/constants';
 import { currentUser } from '$lib/stores/auth';
 
-const { pageState } = vi.hoisted(() => ({
-	pageState: { url: new URL('https://songmaker.test/') }
-}));
+// A genuine `$state` proxy, not a plain object: Rail.svelte (and the real
+// root layout) never remounts across a route change, so the fix this file
+// pins — the disclosure staying closed while the viewer browses Settings —
+// only shows up if `page.url` actually notifies Svelte's reactivity when it
+// changes under an already-mounted instance, the same way SvelteKit's real
+// `$app/state` does. `stateProxy` lives in reactive-fixtures.svelte.ts
+// because runes only compile in a `.svelte.ts` module (see that file).
+vi.mock('$app/state', async () => {
+	const { stateProxy } = await import('../../../tests/reactive-fixtures.svelte');
+	return { page: stateProxy({ url: new URL('https://songmaker.test/') }) };
+});
 
-vi.mock('$app/state', () => ({
-	page: pageState
-}));
-
+import { page } from '$app/state';
 import RailSettings from './RailSettings.svelte';
+
+// SvelteKit's real `page.url` type brands `pathname` to a union of known
+// routes; the mock only needs a plain, freely-assignable URL.
+const pageState = page as unknown as { url: URL };
 
 const ADMIN = { id: 'u1', username: 'felix', role: 'admin' as const };
 const USER = { id: 'u2', username: 'jane', role: 'user' as const };
@@ -31,6 +40,14 @@ async function render(): Promise<HTMLElement> {
 	mounted = mount(RailSettings, { target, props: {} });
 	await tick();
 	return target;
+}
+
+/** Flushes a `page.url` mutation through to the component, the same way
+ * layout.test.ts flushes a state change that a mocked effect reacts to. */
+async function flush(): Promise<void> {
+	await tick();
+	await Promise.resolve();
+	await tick();
 }
 
 function itemLabels(target: HTMLElement): string[] {
@@ -124,5 +141,34 @@ describe('RailSettings', () => {
 
 		getItem.mockRestore();
 		setItem.mockRestore();
+	});
+
+	// Regression coverage for the reviewer's throwaway probe: the force-open
+	// effect used to read `open` as well as write it, so it re-ran on every
+	// close and immediately reopened itself — a viewer could never collapse
+	// the disclosure while browsing Settings.
+	it('stays closed after the viewer collapses it while already on a settings route', async () => {
+		pageState.url = new URL('https://songmaker.test/settings/generation');
+		const target = await render();
+		const toggle = requireElement<HTMLButtonElement>(target, 'button.disclose');
+		expect(toggle.getAttribute('aria-expanded')).toBe('true');
+
+		toggle.click();
+		await flush();
+
+		expect(toggle.getAttribute('aria-expanded')).toBe('false');
+		const panel = requireElement<HTMLDivElement>(target, '#rail-settings-group');
+		expect(panel.inert).toBe(true);
+	});
+
+	it('reopens on a genuine entry into Settings, not on every re-render while already inside it', async () => {
+		const target = await render();
+		const toggle = requireElement<HTMLButtonElement>(target, 'button.disclose');
+		expect(toggle.getAttribute('aria-expanded')).toBe('false');
+
+		pageState.url = new URL('https://songmaker.test/settings/voices');
+		await flush();
+
+		expect(toggle.getAttribute('aria-expanded')).toBe('true');
 	});
 });
