@@ -72,7 +72,7 @@ vi.mock('$lib/api/client', async (importOriginal) => ({
 	fetchActiveModels: api.fetchActiveModels
 }));
 
-import SongAddressPage from './+page.svelte';
+import SongAddressHarness from './harness.svelte';
 
 // The live stream the workspace bootstrap waits for. Emitting `hello` is all
 // it takes to make the real ResourceSyncController run its snapshot load, so
@@ -168,7 +168,7 @@ function requireElement(root: HTMLElement, selector: string): HTMLElement {
 function openAddress(): HTMLElement {
 	const target = document.createElement('div');
 	document.body.append(target);
-	mounted.push(mount(SongAddressPage, { target }));
+	mounted.push(mount(SongAddressHarness, { target }));
 	return target;
 }
 

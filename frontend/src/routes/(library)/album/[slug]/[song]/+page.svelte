@@ -3,11 +3,6 @@
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { albumRoutePath, openSongAddress } from '$lib/stores/libraryContext';
-	// A song address is a third entrance to the one library workspace (issue
-	// #275) — `/`, `/album/<slug>` and this one all mount it. The component is
-	// shared so a route swap between them neither rebuilds the workspace nor
-	// re-runs its bootstrap.
-	import LibraryWorkspace from '$lib/components/LibraryWorkspace.svelte';
 
 	type AddressState = 'resolving' | 'open' | 'unknown-song' | 'unknown-album' | 'unreachable';
 
@@ -49,22 +44,20 @@
 	}
 </script>
 
-{#if addressState === 'open'}
-	<LibraryWorkspace />
-{:else if addressState === 'unknown-song'}
-	<div class="address-state" role="alert">
+{#if addressState === 'unknown-song'}
+	<div class="address-overlay" role="alert">
 		<h1>{UNKNOWN_SONG_HEADING}</h1>
 		<p>{UNKNOWN_SONG_MESSAGE}</p>
 		<a class="address-action" href={albumRoutePath(albumSlug)}>{BACK_TO_ALBUM_LABEL}</a>
 	</div>
 {:else if addressState === 'unknown-album'}
-	<div class="address-state" role="alert">
+	<div class="address-overlay" role="alert">
 		<h1>{UNKNOWN_ALBUM_HEADING}</h1>
 		<p>{UNKNOWN_ALBUM_MESSAGE}</p>
 		<a class="address-action" href={resolve('/')}>{BACK_TO_LIBRARY_LABEL}</a>
 	</div>
 {:else if addressState === 'unreachable'}
-	<div class="address-state" role="alert">
+	<div class="address-overlay" role="alert">
 		<p>{failure ?? UNREACHABLE_SONG_MESSAGE}</p>
 		<button
 			class="address-action"
@@ -72,14 +65,16 @@
 			onclick={() => openAddress(albumSlug, songSlug, generationId)}>{RETRY_LABEL}</button
 		>
 	</div>
-{:else}
-	<div class="address-state">{RESOLVING_LABEL}</div>
+{:else if addressState === 'resolving'}
+	<div class="address-overlay">{RESOLVING_LABEL}</div>
 {/if}
 
 <style>
-	.address-state {
+	.address-overlay {
+		position: absolute;
+		inset: 0;
+		z-index: 1;
 		display: flex;
-		flex: 1;
 		flex-direction: column;
 		align-items: center;
 		justify-content: center;
@@ -87,16 +82,17 @@
 		padding: 0 24px;
 		text-align: center;
 		color: var(--text-muted);
+		background: var(--bg);
 	}
 
-	.address-state h1 {
+	.address-overlay h1 {
 		margin: 0;
 		font-family: var(--font-display);
 		font-size: 1.4rem;
 		color: var(--text);
 	}
 
-	.address-state p {
+	.address-overlay p {
 		margin: 0;
 	}
 
