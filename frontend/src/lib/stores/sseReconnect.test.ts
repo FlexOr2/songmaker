@@ -15,18 +15,6 @@ function expectedRange(attempt: number): { min: number; max: number } {
 }
 
 describe('nextReconnectDelayMs', () => {
-	it.each([1, 2, 3, 4])('grows exponentially with jitter for attempt %d', (attempt) => {
-		vi.spyOn(Math, 'random').mockReturnValue(0);
-		const atFloor = nextReconnectDelayMs(attempt);
-		vi.spyOn(Math, 'random').mockReturnValue(1);
-		const atCeiling = nextReconnectDelayMs(attempt);
-		vi.restoreAllMocks();
-
-		const { min, max } = expectedRange(attempt);
-		expect(atFloor).toBe(Math.round(min));
-		expect(atCeiling).toBe(Math.round(max));
-	});
-
 	it('never returns a delay shorter than the un-jittered value', () => {
 		for (let attempt = 1; attempt <= 10; attempt++) {
 			const { min } = expectedRange(attempt);

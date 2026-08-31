@@ -42,18 +42,31 @@ function getCsrfToken(): string {
 
 const AUTH_ENDPOINTS = ['/api/auth/login', '/api/auth/setup'];
 
-// `lib/stores/auth.ts` already turns a 429 on these into its own
-// user-visible copy (an inline "Too many attempts" under the login form,
-// or the full-page session-check retry banner for `/api/auth/me`) — the
-// global toast below would say the same thing a second time on top of it.
-const RATE_LIMIT_TOAST_EXEMPT_PATHS = new Set([...AUTH_ENDPOINTS, '/api/auth/me']);
+// A path whose own 429 is already visible some other way, so the generic
+// toast below would only repeat it. Kept as its own literal list, not
+// derived from `AUTH_ENDPOINTS` above (that one exists for the unrelated
+// 401-redirect suppression) -- a future path added there for its 401 reason
+// should not silently also lose this toast.
+//   - '/api/auth/login': `stores/auth.ts`'s `login()` turns a 429 into
+//     "Too many attempts. Try again later." under the login form.
+//   - '/api/auth/me': `stores/auth.ts`'s `checkAuth()` turns a 429 into the
+//     full-page session-check retry banner.
+//   - '/api/auth/setup': not auth.ts -- `routes/setup/+page.svelte`'s own
+//     catch block shows the error inline via `err.message`.
+const RATE_LIMIT_TOAST_EXEMPT_PATHS = new Set([
+	'/api/auth/login',
+	'/api/auth/me',
+	'/api/auth/setup'
+]);
 
 /**
- * One toast per throttling episode, not one per rejected request: a 429
- * burst calls this many times in a row, but a toast already on screen for
- * the same message is left alone instead of being duplicated (issue #257).
- * The toast auto-dismisses (`addToast`'s 'info' type), so once it clears a
- * fresh burst raises a fresh one.
+ * Never more than one throttle toast on screen at once, not one per
+ * rejected request: a 429 burst calls this many times in a row, but a
+ * toast already showing the same message is left alone instead of being
+ * duplicated (issue #257). The toast auto-dismisses after 5s (`addToast`'s
+ * 'info' type), so a burst that outlasts that raises a fresh toast every
+ * ~5s for as long as it's still being throttled -- which reads as "still
+ * throttled", not as a bug.
  */
 function notifyIfRateLimited(status: number, path: string): void {
 	if (status !== 429 || RATE_LIMIT_TOAST_EXEMPT_PATHS.has(path)) return;
