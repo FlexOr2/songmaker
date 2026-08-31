@@ -311,6 +311,10 @@ def test_exempt_paths_do_not_consume_api_budget(ip_limited_client: TestClient) -
     ("/shared/song/audio", RateLimitClass.API),
     ("/shared/gen/audio", RateLimitClass.API),
     ("/shared/playlist/audio", RateLimitClass.API),
+    # Blocker fix: the router resolves this to the playlist manifest POST
+    # (`/shared/playlist/{slug}/stream`, slug="audio"), a metadata handler
+    # -- not the bare-slug audio route ([^/]+="playlist", filename="stream").
+    ("/shared/playlist/audio/stream", RateLimitClass.API),
     # ...but the genuine media route for a slug literally named "audio"
     # still classifies as Media -- it has a filename segment after "audio/".
     ("/shared/audio/audio/owner/file.mp3", RateLimitClass.MEDIA),

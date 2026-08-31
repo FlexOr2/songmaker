@@ -132,8 +132,12 @@ class Settings(BaseSettings):
     #   `max_user_active_jobs` default (10) that is 11 opens/load; 3 loads
     #   within a minute (full queue, operator reloads) = 33.
     #   storm rate: the operator incident's reconnect storm ran at roughly
-    #   80 opens/min, and self-terminates via the frontend's
-    #   `MAX_POLL_ERRORS` backoff (`frontend/src/lib/stores/jobs.ts`).
+    #   80 opens/min. It self-terminates, but not via a backoff -- there
+    #   isn't one yet (that's the still-open #257 frontend slice).
+    #   `MAX_POLL_ERRORS` (`frontend/src/lib/stores/jobs.ts`) is a plain
+    #   error counter with no delay, closing the EventSource after 10
+    #   failures; a 429 to an EventSource is also fatal per spec (no
+    #   browser auto-reconnect), so the burst is short-lived either way.
     # 45 sits clearly above 33 and clearly below 80. This has no live
     # dependency on `max_user_active_jobs` -- raising that setting should
     # prompt re-checking this comment's math, not a settings cross-reference.
