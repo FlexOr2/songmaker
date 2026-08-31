@@ -343,6 +343,72 @@ def test_unknown_path_falls_back_to_api_class(class_limited_client: TestClient) 
     assert resp.status_code == 429
 
 
+# ── Shared audio is Media, shared metadata stays API (issue #257) ──
+
+
+def _seed_shared_album_data(session) -> None:
+    session.add(Album(id="shared_album", title="Shared Album", artist="Band"))
+    session.add(Song(id="ss1", title="Song", album_id="shared_album", track_number=1))
+    session.add(Version(
+        id="sv1", song_id="ss1", version_number=1, lyrics="hi", prompt="pop",
+    ))
+    session.add(Generation(
+        id="sg1", song_id="ss1", version_id="sv1", generation_number=1,
+        mp3_path="admin_user/g1.mp3", is_picked=True,
+    ))
+
+
+@pytest.fixture()
+def shared_slug_client(tmp_path: Path, monkeypatch) -> tuple[TestClient, str]:
+    # Setup itself spends 2 API-class calls (login + share), so the budget
+    # needs headroom above that before the test's own assertions run.
+    monkeypatch.setenv("IP_RATE_LIMIT", "5")
+    from songmaker_cli.settings import get_settings
+    get_settings.cache_clear()
+    client, _ = make_test_app(tmp_path, seed_db=_seed_shared_album_data)
+    admin_audio_dir = tmp_path / "audio" / "admin_user"
+    admin_audio_dir.mkdir(parents=True, exist_ok=True)
+    (admin_audio_dir / "g1.mp3").write_bytes(b"\xff\xfb\x90\x00" * 100)
+
+    factory = client.app.state.ctx.db
+    with factory() as session:
+        admin = create_user(session, "admin", hash_password("t3stP@ssw0rd"), role="admin")
+        album = session.query(Album).filter_by(id="shared_album").first()
+        album.created_by = admin.id
+        session.commit()
+    from conftest import login_and_csrf
+    login_and_csrf(client, "admin", "t3stP@ssw0rd")
+    slug = client.post("/api/albums/shared_album/share").json()["share_slug"]
+    client.cookies.clear()
+    yield client, slug
+    get_settings.cache_clear()
+
+
+def test_shared_audio_does_not_consume_api_budget(
+    shared_slug_client: tuple[TestClient, str],
+) -> None:
+    client, slug = shared_slug_client
+
+    for _ in range(5):
+        audio_resp = client.get(f"/shared/{slug}/audio/admin_user/g1.mp3")
+        assert audio_resp.status_code != 429
+
+    metadata_resp = client.get(f"/shared/{slug}")
+    assert metadata_resp.status_code != 429
+
+
+def test_shared_metadata_still_shares_the_api_budget(
+    shared_slug_client: tuple[TestClient, str],
+) -> None:
+    client, slug = shared_slug_client
+
+    for _ in range(6):
+        client.get(f"/shared/{slug}")
+
+    metadata_resp = client.get(f"/shared/{slug}")
+    assert metadata_resp.status_code == 429
+
+
 # ── Job gets user_id ────────────────────────────────────────────────
 
 

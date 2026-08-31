@@ -35,6 +35,25 @@ MEDIA_PATH_PREFIX = "/audio/"
 JOB_STREAM_PATH_PREFIX = "/api/jobs/"
 JOB_STREAM_PATH_SUFFIX = "/stream"
 
+# Audio bytes served outside `/audio/*`: authenticated queue-stream preview
+# audio (`/api/queue-streams/{id}/audio`) and every public share's audio
+# endpoint (`/shared/{slug}/audio/...`, `/shared/song/{slug}/audio/...`,
+# `/shared/gen/{slug}/audio/...`, `/shared/playlist/{slug}/audio/...`,
+# `/shared/queue-streams/{id}/audio`). All are `FileResponse`, which serves
+# Range requests -- the same seek/scrub traffic pattern as `/audio/*`, just
+# for a stranger listening to a public share instead of the owner. A public
+# share is the operator's public face: a listener range-requesting a shared
+# album must not be locked out by the same API budget that locked out the
+# operator's own player (issue #257). Metadata routes on the same slug
+# (`/shared/{slug}`, `/shared/{slug}/cover`, the `/stream` manifest POSTs)
+# are deliberately excluded -- only the audio bytes are Range-served, and
+# giving the metadata routes the same high budget would hand a share-page
+# abuser more room, not less.
+QUEUE_STREAM_AUDIO_PATH_PREFIX = "/api/queue-streams/"
+SHARED_PATH_PREFIX = "/shared/"
+AUDIO_PATH_INFIX = "/audio/"
+AUDIO_PATH_SUFFIX = "/audio"
+
 # Static PWA root assets are fetched by the browser and the service worker
 # outside of user-driven navigation, so they must not compete with `/api/*`
 # calls for any class's budget. No API path belongs in this allowlist.
@@ -65,13 +84,27 @@ def _is_job_stream_path(path: str) -> bool:
     return path.startswith(JOB_STREAM_PATH_PREFIX) and path.endswith(JOB_STREAM_PATH_SUFFIX)
 
 
+def _is_queue_stream_audio_path(path: str) -> bool:
+    return path.startswith(QUEUE_STREAM_AUDIO_PATH_PREFIX) and path.endswith(AUDIO_PATH_SUFFIX)
+
+
+def _is_shared_audio_path(path: str) -> bool:
+    if not path.startswith(SHARED_PATH_PREFIX):
+        return False
+    return AUDIO_PATH_INFIX in path or path.endswith(AUDIO_PATH_SUFFIX)
+
+
 def _classify_path(path: str) -> RateLimitClass:
     """Map a request path to its rate-limit budget class.
 
     Every path gets a class. An unrecognized path is API, not exempt --
     fail closed rather than let an unclassified route slip through unlimited.
     """
-    if path.startswith(MEDIA_PATH_PREFIX):
+    if (
+        path.startswith(MEDIA_PATH_PREFIX)
+        or _is_queue_stream_audio_path(path)
+        or _is_shared_audio_path(path)
+    ):
         return RateLimitClass.MEDIA
     if path == RESOURCE_EVENT_STREAM_PATH or _is_job_stream_path(path):
         return RateLimitClass.STREAM

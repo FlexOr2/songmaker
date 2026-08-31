@@ -91,14 +91,27 @@ its own key prefix, so exhausting one class's counter never touches another's.
 | Class  | Paths | Default | Why |
 |--------|-------|---------|-----|
 | API    | Everything not matched below (including `/health` and unrecognized paths) | 120/min | Unchanged from the original single budget. `/health` is deliberately **not** exempt: it is the most expensive anonymous endpoint (a DB query plus roughly six Redis round trips for worker/queue state) and the only caller is the browser's 15s poll (~4/min) — exempting it would let an anonymous caller hammer the priciest endpoint for free. |
-| Media  | `/audio/*` | 600/min | Range-request media playback is normal use, not abuse: a single MP3 played with normal seeking can take ~40 range requests, and comparing takes can move through several songs a minute (40 × 5 = 200/min in ordinary use). 600 leaves headroom for aggressive seeking while still bounding an IP's disk I/O — not unlimited. |
+| Media  | `/audio/*`; `/api/queue-streams/{id}/audio`; every `/shared/**/audio/*` and `/shared/queue-streams/{id}/audio` route | 600/min | Range-request media playback is normal use, not abuse: a single MP3 played with normal seeking can take ~40 range requests, and comparing takes can move through several songs a minute (40 × 5 = 200/min in ordinary use). 600 leaves headroom for aggressive seeking while still bounding an IP's disk I/O — not unlimited. All of these paths serve a `FileResponse` (Range-capable) — the public share audio routes carry the same seek/scrub pattern as the owner's own player, just from a stranger listening to a public share, so they get the same class. The metadata routes on the same slug (`/shared/{slug}`, `/shared/{slug}/cover`, the `/stream` manifest POSTs) are deliberately excluded and stay API — only the byte-serving routes are Range-served. |
 | Stream | `/api/resource-events/stream`, `/api/jobs/*/stream` | 30/min | SSE connection *opens*, not per-message traffic. A normal page load opens a handful of long-lived streams (one resource-events stream plus one per active job) and a reload doubles that; 30/min brakes a reconnect storm without touching that pattern. The resource-events endpoint additionally enforces its own tighter per-user open limit (`RESOURCE_EVENT_STREAM_OPEN_LIMIT`, see below). |
 
 Before this split, all three traffic patterns shared one 120/min bucket:
 a player streaming range requests plus a few reconnecting SSE streams could
 exhaust it in seconds, after which *every* request from that IP was rejected
 — including the audio that was already playing (issue #257: 5035 rejected
-responses in one operator session).
+responses in one operator session). The same bucket also gated a stranger
+listening to a public share: a share page is the operator's public face, so
+a listener range-requesting a shared album must not be locked out by
+unrelated API traffic from the same IP either.
+
+The public share audio routes are Media-classed at the *global* per-IP
+layer, but the dedicated shared-endpoint limiter described above
+(`SHARING_RATE_LIMIT`, 60/min) still runs *inside* the same endpoint handlers
+and is the one that fires in practice, since it is far tighter than the
+600/min Media budget. The two layers are not redundant: the global Media
+class exists so a share listener isn't punished for unrelated traffic
+sharing their IP (the regression this section fixes), while
+`SHARING_RATE_LIMIT` remains the actual anti-abuse ceiling on anonymous share
+traffic, unchanged by this split.
 
 Static `_app/` build assets and the static PWA root assets (`/manifest.webmanifest`, `/robots.txt`, `/favicon.svg`, `/icon-192.png`, `/icon-512.png`, `/service-worker.js`) are exempt from all three budgets — they're fetched by the browser and the service worker outside of user-driven navigation and would otherwise crowd out real calls from the same IP.
 
