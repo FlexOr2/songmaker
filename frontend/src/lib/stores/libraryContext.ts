@@ -335,6 +335,25 @@ export type HistoryWriteMode = 'push' | 'replace';
 // second write overtake the first, and must see the entry the first one is
 // going to install rather than the stale one it would still read from
 // `history.state` — which is what `currentLibraryHistoryState` answers.
+//
+// The same-shape raw write is a permanent design choice, not scaffolding a
+// later cleanup should finish by routing everything through `goto`: issue
+// #276 measured what a `goto` costs per write (a real SvelteKit navigation,
+// its own route resolution and reactive re-run) against how often the
+// same-shape case actually fires — filter/sort/search-cursor/scroll on
+// nearly every interaction with the wall, a song-to-song or take-to-take
+// move on every list click and Previous/Next — and going through the router
+// for all of it would turn the library's most frequent writes into its most
+// expensive ones for a distinction (which route *file* is mounted) that
+// same-shape churn never changes. `libraryRouteShape` is what makes "does
+// this write cross" a real question instead of "is this a write" — treating
+// every write as a crossing would be simpler code, but wrong on the
+// frequency this store actually sees; see the `LibraryRouteShape` note above
+// for what a wrongly-collapsed shape does when a crossing goes undetected
+// instead. Issue #265's S7 (which removed `ensureLibraryWorkspaceRoute`,
+// #264's now-redundant separate guard, once this shape-based check alone was
+// proven to cover everything it did) confirmed the choice rather than
+// revisiting it.
 export function writeLibraryHistory(
 	state: LibraryHistoryState,
 	url: string,
