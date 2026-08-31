@@ -155,6 +155,14 @@ function requireElement(root: HTMLElement, selector: string): HTMLElement {
 	return found;
 }
 
+// The workspace wrapper `(library)/+layout.svelte` marks `inert` while an
+// overlay is up (issue #276 review fix) -- `inert` itself, not tab order,
+// carries the contract here: jsdom has no `inert` IDL property, so a real
+// keyboard-navigation probe would only prove jsdom's gap, not the app's.
+function workspaceWrapper(root: HTMLElement): HTMLElement {
+	return requireElement(root, '.workspace-wrapper');
+}
+
 function openAddress(): HTMLElement {
 	const target = document.createElement('div');
 	document.body.append(target);
@@ -207,6 +215,7 @@ describe('/album/<slug> opened cold', () => {
 
 		await vi.waitFor(() => expect(target.textContent).toContain(ALBUM_TITLE));
 		expect(target.textContent).toContain(TRACK_TITLE);
+		expect(workspaceWrapper(target).hasAttribute('inert')).toBe(false);
 	});
 
 	it('keeps the address it was opened with', async () => {
@@ -261,6 +270,18 @@ describe('/album/<slug> whose album cannot be reached', () => {
 
 		await vi.waitFor(() => expect(target.textContent).toContain(ALBUM_TITLE));
 		expect(target.textContent).toContain(TRACK_TITLE);
+	});
+
+	it('marks the workspace behind it inert, and lifts that once Try again succeeds', async () => {
+		const target = openAddress();
+		await vi.waitFor(() => expect(target.textContent).toContain('Album service is down'));
+		expect(workspaceWrapper(target).hasAttribute('inert')).toBe(true);
+
+		api.fetchAlbum.mockResolvedValue(album());
+		requireElement(target, 'button.address-action').click();
+
+		await vi.waitFor(() => expect(target.textContent).toContain(ALBUM_TITLE));
+		expect(workspaceWrapper(target).hasAttribute('inert')).toBe(false);
 	});
 });
 

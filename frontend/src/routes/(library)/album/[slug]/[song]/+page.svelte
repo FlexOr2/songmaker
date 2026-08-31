@@ -3,6 +3,7 @@
 	import { page } from '$app/state';
 	import { resolve } from '$app/paths';
 	import { albumRoutePath, openSongAddress } from '$lib/stores/libraryContext';
+	import { libraryAddressOverlayActive } from '$lib/stores/libraryAddressOverlay';
 
 	type AddressState = 'resolving' | 'open' | 'unknown-song' | 'unknown-album' | 'unreachable';
 
@@ -26,6 +27,18 @@
 
 	$effect(() => {
 		void openAddress(albumSlug, songSlug, generationId);
+	});
+
+	// The overlay above hides a stale workspace visually (`position: absolute`)
+	// but not from the accessibility tree or the tab order -- `inert` on the
+	// workspace wrapper is what actually does that, and it lives one level up
+	// in `(library)/+layout.svelte`, so this bridges the address state across
+	// with a store. Active whenever this page isn't showing the open workspace,
+	// including the (route-change-only) unmount below: leaving this page for
+	// `/` or another address must not leave the workspace inert behind it.
+	$effect(() => {
+		libraryAddressOverlayActive.set(addressState !== 'open');
+		return () => libraryAddressOverlayActive.set(false);
 	});
 
 	async function openAddress(albumId: string, slug: string, genId: string | null): Promise<void> {
