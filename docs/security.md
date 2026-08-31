@@ -79,11 +79,32 @@ Album and song shares serve the picked unarchived generation when one exists, ot
 
 ### Per-IP (global middleware)
 
-All requests are subject to a global per-IP rate limit (default: 120 requests/minute). This prevents multi-account abuse and unauthenticated request floods. The rate limiter is memory-bounded (max 10k tracked IPs with automatic eviction of stale entries). Configurable via `IP_RATE_LIMIT` env var. When `TRUSTED_PROXIES` is configured, the rate limiter uses the real client IP from `X-Forwarded-For` (rightmost untrusted entry), matching the login rate limiter's behavior. If Redis is unavailable, the rate limiter fails closed (returns 503 with `Retry-After: 5`) rather than allowing all requests through.
+Every request is subject to a global per-IP rate limit, split into three budget
+classes (issue #257) so that one traffic pattern cannot exhaust the budget
+another pattern from the same IP needs. `_classify_path` in
+`middleware/rate_limit.py` is the single place that maps a path to a class;
+every request gets exactly one class, and an unrecognized path falls back to
+the API class — fail closed, not fail open. Each class is a Redis
+sliding-window counter (`RedisRateLimiter`) over its own 60-second window and
+its own key prefix, so exhausting one class's counter never touches another's.
 
-Static `_app/` build assets and the static PWA root assets (`/manifest.webmanifest`, `/robots.txt`, `/favicon.svg`, `/icon-192.png`, `/icon-512.png`, `/service-worker.js`) are exempt from this budget — they're fetched by the browser and the service worker outside of user-driven navigation and would otherwise crowd out real `/api/*` calls from the same IP. `/health` is deliberately **not** exempt: it is the most expensive anonymous endpoint (a DB query plus roughly six Redis round trips for worker/queue state) and the only caller is the browser's 15s poll (~4/min) — exempting it would let an anonymous caller hammer the priciest endpoint for free. No `/api/*` path is exempt.
+| Class  | Paths | Default | Why |
+|--------|-------|---------|-----|
+| API    | Everything not matched below (including `/health` and unrecognized paths) | 120/min | Unchanged from the original single budget. `/health` is deliberately **not** exempt: it is the most expensive anonymous endpoint (a DB query plus roughly six Redis round trips for worker/queue state) and the only caller is the browser's 15s poll (~4/min) — exempting it would let an anonymous caller hammer the priciest endpoint for free. |
+| Media  | `/audio/*` | 600/min | Range-request media playback is normal use, not abuse: a single MP3 played with normal seeking can take ~40 range requests, and comparing takes can move through several songs a minute (40 × 5 = 200/min in ordinary use). 600 leaves headroom for aggressive seeking while still bounding an IP's disk I/O — not unlimited. |
+| Stream | `/api/resource-events/stream`, `/api/jobs/*/stream` | 30/min | SSE connection *opens*, not per-message traffic. A normal page load opens a handful of long-lived streams (one resource-events stream plus one per active job) and a reload doubles that; 30/min brakes a reconnect storm without touching that pattern. The resource-events endpoint additionally enforces its own tighter per-user open limit (`RESOURCE_EVENT_STREAM_OPEN_LIMIT`, see below). |
 
-Configure via env vars: `LOGIN_RATE_LIMIT`, `LOGIN_LOCKOUT_THRESHOLD`, `LOGIN_LOCKOUT_WINDOW`, `GENERATION_RATE_LIMIT_USER`, `GENERATION_RATE_LIMIT_ADMIN`, `SCORING_RATE_LIMIT_USER`, `SCORING_RATE_LIMIT_ADMIN`, `CHAT_RATE_LIMIT_USER`, `CHAT_RATE_LIMIT_ADMIN`, `MAX_QUEUE_DEPTH`, `IP_RATE_LIMIT`.
+Before this split, all three traffic patterns shared one 120/min bucket:
+a player streaming range requests plus a few reconnecting SSE streams could
+exhaust it in seconds, after which *every* request from that IP was rejected
+— including the audio that was already playing (issue #257: 5035 rejected
+responses in one operator session).
+
+Static `_app/` build assets and the static PWA root assets (`/manifest.webmanifest`, `/robots.txt`, `/favicon.svg`, `/icon-192.png`, `/icon-512.png`, `/service-worker.js`) are exempt from all three budgets — they're fetched by the browser and the service worker outside of user-driven navigation and would otherwise crowd out real calls from the same IP.
+
+When `TRUSTED_PROXIES` is configured, the rate limiter uses the real client IP from `X-Forwarded-For` (rightmost untrusted entry), matching the login rate limiter's behavior. If Redis is unavailable, the rate limiter fails closed (returns 503 with `Retry-After: 5`) rather than allowing all requests through.
+
+Configure via env vars: `LOGIN_RATE_LIMIT`, `LOGIN_LOCKOUT_THRESHOLD`, `LOGIN_LOCKOUT_WINDOW`, `GENERATION_RATE_LIMIT_USER`, `GENERATION_RATE_LIMIT_ADMIN`, `SCORING_RATE_LIMIT_USER`, `SCORING_RATE_LIMIT_ADMIN`, `CHAT_RATE_LIMIT_USER`, `CHAT_RATE_LIMIT_ADMIN`, `MAX_QUEUE_DEPTH`, `IP_RATE_LIMIT`, `MEDIA_RATE_LIMIT`, `STREAM_RATE_LIMIT`.
 
 ### Resource-event streams
 
@@ -343,7 +364,7 @@ All mutating operations are logged to the `audit_log` table:
 | Host binding | Default is `127.0.0.1` (localhost only). Set `HOST=0.0.0.0` to listen on all interfaces (only behind a reverse proxy). |
 | Workers | Production runs in Docker only. The web container uses a single uvicorn process; concurrency comes from arq worker containers (`MUSIC_MAX_JOBS`, `SCORING_MAX_JOBS`). PostgreSQL is the only supported production DB — SQLite is test-only. |
 | Request body limit | App-level: `MAX_REQUEST_BODY_BYTES` (default 1 MB). Also set in reverse proxy for defense-in-depth. |
-| IP rate limit | `IP_RATE_LIMIT` (default 120/min). Adjust based on expected traffic. |
+| IP rate limit | `IP_RATE_LIMIT` (API class, default 120/min), `MEDIA_RATE_LIMIT` (`/audio/*`, default 600/min), `STREAM_RATE_LIMIT` (SSE opens, default 30/min). Adjust based on expected traffic — see "Per-IP (global middleware)" above. |
 | Request timeout | `REQUEST_TIMEOUT` (default 30s). Increase if generation/scoring endpoints are called synchronously. |
 
 ### Secrets

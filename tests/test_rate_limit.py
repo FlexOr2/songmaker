@@ -269,6 +269,80 @@ def test_exempt_paths_do_not_consume_api_budget(ip_limited_client: TestClient) -
     assert resp.status_code != 429
 
 
+# ── Rate limit classes (issue #257) ─────────────────────────────────
+
+
+@pytest.fixture()
+def class_limited_client(tmp_path: Path, monkeypatch) -> TestClient:
+    monkeypatch.setenv("IP_RATE_LIMIT", "2")
+    monkeypatch.setenv("MEDIA_RATE_LIMIT", "2")
+    monkeypatch.setenv("STREAM_RATE_LIMIT", "2")
+    from songmaker_cli.settings import get_settings
+    get_settings.cache_clear()
+    client, _ = make_test_app(tmp_path, seed_db=_seed_rate_limit_data)
+    yield client
+    get_settings.cache_clear()
+
+
+def test_media_budget_exhausted_does_not_block_api_class(
+    class_limited_client: TestClient,
+) -> None:
+    for _ in range(3):
+        class_limited_client.get("/audio/someone/missing.mp3")
+
+    resp = class_limited_client.get("/audio/someone/missing.mp3")
+    assert resp.status_code == 429
+
+    api_resp = class_limited_client.get("/api/auth/check")
+    assert api_resp.status_code != 429
+
+
+def test_api_budget_exhausted_does_not_block_media_class(
+    class_limited_client: TestClient,
+) -> None:
+    for _ in range(3):
+        class_limited_client.get("/api/auth/check")
+
+    api_resp = class_limited_client.get("/api/auth/check")
+    assert api_resp.status_code == 429
+
+    media_resp = class_limited_client.get("/audio/someone/missing.mp3")
+    assert media_resp.status_code != 429
+
+
+def test_stream_budget_exhausted_does_not_block_api_class(
+    class_limited_client: TestClient,
+) -> None:
+    for _ in range(3):
+        class_limited_client.get("/api/resource-events/stream")
+
+    stream_resp = class_limited_client.get("/api/resource-events/stream")
+    assert stream_resp.status_code == 429
+
+    api_resp = class_limited_client.get("/api/auth/check")
+    assert api_resp.status_code != 429
+
+
+def test_job_stream_path_is_in_stream_class(class_limited_client: TestClient) -> None:
+    for _ in range(3):
+        class_limited_client.get("/api/jobs/some-job-id/stream")
+
+    resp = class_limited_client.get("/api/jobs/some-job-id/stream")
+    assert resp.status_code == 429
+
+    api_resp = class_limited_client.get("/api/auth/check")
+    assert api_resp.status_code != 429
+
+
+def test_unknown_path_falls_back_to_api_class(class_limited_client: TestClient) -> None:
+    for _ in range(2):
+        class_limited_client.get("/this-path-does-not-exist")
+
+    resp = class_limited_client.get("/api/auth/check")
+
+    assert resp.status_code == 429
+
+
 # ── Job gets user_id ────────────────────────────────────────────────
 
 

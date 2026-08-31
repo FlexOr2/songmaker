@@ -114,6 +114,21 @@ class Settings(BaseSettings):
     max_queue_depth: int = 100
     max_user_active_jobs: int = 10
     ip_rate_limit: int = 120
+    # Range-request media (`/audio/*`) is a distinct budget class from plain
+    # API calls (issue #257): a single MP3 played with normal scrubbing can
+    # take ~40 range requests, and a user comparing takes can move through
+    # several songs within a minute -- 40 * 5 songs = 200 requests/min in
+    # ordinary use. 600 leaves 3x headroom for aggressive seeking while still
+    # bounding disk I/O per IP (not unlimited).
+    media_rate_limit: int = 600
+    # SSE connection *opens* (issue #257): a normal page load opens a
+    # handful of long-lived streams (one resource-events stream plus one per
+    # active job -- the operator incident that exposed this had 4 job
+    # streams open at once) and a reload doubles that. 30/min brakes a
+    # reconnect storm without touching that normal pattern; the
+    # resource-events endpoint additionally enforces its own tighter
+    # per-user open limit (`RESOURCE_EVENT_STREAM_OPEN_LIMIT`).
+    stream_rate_limit: int = 30
 
     # ── arq workers ───────────────────────────────────────────────────
     arq_job_timeout: int = 1000
