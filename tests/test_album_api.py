@@ -14,7 +14,9 @@ import pytest
 from conftest import login_and_csrf, make_test_app
 from sqlalchemy import event
 
+from songmaker_cli.api_helpers import _ALBUM_SLUG_BASE_MAX_LENGTH
 from songmaker_cli.auth import hash_password
+from songmaker_cli.constants import ALBUM_SLUG_MAX_LENGTH
 from songmaker_cli.db.models import Album, AuditLog, Generation, Song, User, Version
 
 _ADMIN_USER = "admin"
@@ -370,3 +372,59 @@ def test_archived_albums_share_link_stays_functional(archive_client) -> None:
 
     public_resp = client.get(f"/shared/{slug}")
     assert public_resp.status_code == 200
+
+
+# ── Slug overflow (#271) ─────────────────────────────────────────────────
+
+
+@pytest.fixture()
+def creation_client(tmp_path: Path):
+    def _seed(session) -> None:
+        session.add(User(
+            username=_ADMIN_USER, password_hash=hash_password(_ADMIN_PASSWORD), role="admin",
+        ))
+
+    client, factory = make_test_app(tmp_path, seed_db=_seed)
+    login_and_csrf(client, _ADMIN_USER, _ADMIN_PASSWORD)
+    return client, factory
+
+
+def test_create_album_with_200_char_title_succeeds(creation_client) -> None:
+    client, _ = creation_client
+    title = "A" * 200
+    resp = client.post("/api/albums", json={"title": title})
+    assert resp.status_code == 200
+    album_id = resp.json()["id"]
+    assert len(album_id) <= ALBUM_SLUG_MAX_LENGTH
+
+
+def test_create_album_with_cjk_title_succeeds(creation_client) -> None:
+    client, _ = creation_client
+    title = "音" * 200
+    resp = client.post("/api/albums", json={"title": title})
+    assert resp.status_code == 200
+    album_id = resp.json()["id"]
+    assert len(album_id) <= ALBUM_SLUG_MAX_LENGTH
+
+
+def test_create_album_slug_collision_at_budget_edge_appends_suffix(
+    creation_client,
+) -> None:
+    """Two 200-char titles that only differ after the slug truncation point
+    collide on their base slug — the second must still fit within
+    ALBUM_SLUG_MAX_LENGTH once the "-2" counter suffix is appended."""
+    client, _ = creation_client
+    prefix = "x" * _ALBUM_SLUG_BASE_MAX_LENGTH
+    title_a = prefix + "A" + "z" * (200 - len(prefix) - 1)
+    title_b = prefix + "B" + "z" * (200 - len(prefix) - 1)
+
+    first = client.post("/api/albums", json={"title": title_a})
+    assert first.status_code == 200
+    first_id = first.json()["id"]
+    assert len(first_id) <= ALBUM_SLUG_MAX_LENGTH
+
+    second = client.post("/api/albums", json={"title": title_b})
+    assert second.status_code == 200
+    second_id = second.json()["id"]
+    assert second_id == f"{first_id}-2"
+    assert len(second_id) <= ALBUM_SLUG_MAX_LENGTH

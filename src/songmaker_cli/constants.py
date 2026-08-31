@@ -28,6 +28,13 @@ MODEL_DEFAULT_MODE: Final[str] = "sft"
 
 DEFAULT_ARTIST = "Flex0r"
 
+# Slug length ceilings mirroring their owning DB column, since the column
+# (not the source title) is what a too-long slug overflows: Album.id is
+# String(64) and UserLora.slug is String(120) (db/models.py). Keep these in
+# sync with those columns if either grows.
+ALBUM_SLUG_MAX_LENGTH: Final = 64
+LORA_SLUG_MAX_LENGTH: Final = 120
+
 # Pagination defaults and limits
 PAGE_DEFAULT_LIMIT = 50
 PAGE_MAX_LIMIT = 200
