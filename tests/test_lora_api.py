@@ -12,17 +12,15 @@ from fastapi import FastAPI
 from fastapi.testclient import TestClient
 from sqlalchemy.orm import Session
 
-from songmaker_cli.api_helpers import _LORA_SLUG_BASE_MAX_LENGTH
 from songmaker_cli.app_context import AppContext
 from songmaker_cli.constants import (
-    LORA_SLUG_MAX_LENGTH,
     USER_LORA_MAX_SAMPLES,
     USER_LORA_SAMPLE_MAX_BYTES,
     JobStatus,
     LoraStatus,
 )
 from songmaker_cli.db.engine import init_test_db
-from songmaker_cli.db.models import Job, User, UserLora, UserLoraSample
+from songmaker_cli.db.models import LORA_SLUG_MAX_LENGTH, Job, User, UserLora, UserLoraSample
 from songmaker_cli.db.queries import (
     add_user_lora_sample,
     create_user_lora,
@@ -136,15 +134,14 @@ def test_create_lora_with_cjk_name_succeeds(client_a: TestClient) -> None:
 def test_create_lora_slug_collision_at_budget_edge_appends_suffix(
     client_a: TestClient,
 ) -> None:
-    """Two CJK names that only differ after the slug truncation point
-    collide on their base slug — the second must still fit within
-    LORA_SLUG_MAX_LENGTH once the "-2" counter suffix is appended."""
-    assert _LORA_SLUG_BASE_MAX_LENGTH <= 100, (
-        "test needs the slug's truncation budget to fit inside one request name"
-    )
-    prefix = "音" * (_LORA_SLUG_BASE_MAX_LENGTH - 1)
-    name_a = prefix + "A"
-    name_b = prefix + "B"
+    """Two CJK names that only differ in their last character collide on
+    the same base slug: 99 CJK characters transliterate to far more than
+    LORA_SLUG_MAX_LENGTH characters, so truncation always lands inside the
+    shared 99-character prefix regardless of the exact budget — the second
+    create must still fit within LORA_SLUG_MAX_LENGTH once the "-2" counter
+    suffix is appended."""
+    name_a = "音" * 99 + "A"
+    name_b = "音" * 99 + "B"
 
     first = client_a.post("/api/loras", json={"name": name_a})
     assert first.status_code == 200

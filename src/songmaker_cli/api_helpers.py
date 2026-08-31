@@ -19,9 +19,7 @@ from songmaker_cli.auth import (
     ROLE_ADMIN,
 )
 from songmaker_cli.constants import (
-    ALBUM_SLUG_MAX_LENGTH,
     LIBRARY_QUERY_REQUIRED,
-    LORA_SLUG_MAX_LENGTH,
     PAGE_ADMIN_DEFAULT_LIMIT,
     PAGE_ADMIN_MAX_LIMIT,
     PAGE_DEFAULT_LIMIT,
@@ -35,6 +33,8 @@ from songmaker_cli.constants import (
     LimiterFailurePolicy,
 )
 from songmaker_cli.db.models import (
+    ALBUM_SLUG_MAX_LENGTH,
+    LORA_SLUG_MAX_LENGTH,
     PLAYLIST_SLUG_MAX_LENGTH,
     SONG_SLUG_MAX_LENGTH,
     Album,
