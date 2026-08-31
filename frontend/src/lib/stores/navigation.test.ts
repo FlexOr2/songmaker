@@ -91,6 +91,7 @@ import {
 	persistLibraryHistory,
 	resetNavigationForTests,
 	revealPlayingSong,
+	revealSharedTake,
 	selectLibraryFilter,
 	selectNeighborSong,
 	selectSong
@@ -894,6 +895,47 @@ describe('a dirty draft guards song switch / leave', () => {
 		setDraftLyrics('unsaved edit');
 
 		await revealPlayingSong(song({ id: 's2', album_id: 'a1' }), 'g2');
+
+		expect(get(selectedSongId)).toBe('s1');
+		expect(get(selectedGenerationId)).toBeNull();
+		expect(get(pendingDirtyNavigation)).not.toBeNull();
+	});
+
+	// Issue #265's S7 (review of #264): revealPlayingSong used to navigate to
+	// the library workspace via ensureLibraryWorkspaceRoute *before*
+	// guardDirtyNavigation ran, so Cancel on the confirm still left the person
+	// pushed off whatever route they were on -- e.g. "Use as reference" from
+	// Now Playing while Settings is open (the draft and the playing take are
+	// independent of the current route). The guard must run first, so parking
+	// leaves the route untouched.
+	it('does not navigate off the current route before the dirty-draft confirm resolves', async () => {
+		history.replaceState(null, '', '/');
+		await openAlbum('a1');
+		await selectSong('s1');
+		loadSongData(song({ id: 's1' }));
+		setDraftLyrics('unsaved edit');
+		history.replaceState(null, '', '/settings/voices');
+		vi.mocked(goto).mockClear();
+
+		await revealPlayingSong(song({ id: 's2', album_id: 'a1' }), 'g2');
+
+		expect(window.location.pathname).toBe('/settings/voices');
+		expect(vi.mocked(goto)).not.toHaveBeenCalled();
+		expect(get(pendingDirtyNavigation)).not.toBeNull();
+	});
+
+	// Issue #265 review of #264: onOpenShare's shared-take branch used to
+	// await selectSong and then set selectedGenerationId as a follow-up step
+	// -- guardDirtyNavigation resolves that promise the instant it parks a
+	// dirty draft, so the pin ran against the still-open old song a microtask
+	// later. revealSharedTake folds both into one guarded action instead.
+	it('defers revealSharedTake the same way, without pinning the take against the old song', async () => {
+		await openAlbum('a1');
+		await selectSong('s1');
+		loadSongData(song({ id: 's1' }));
+		setDraftLyrics('unsaved edit');
+
+		await revealSharedTake('s2', 'g2');
 
 		expect(get(selectedSongId)).toBe('s1');
 		expect(get(selectedGenerationId)).toBeNull();

@@ -392,6 +392,14 @@ function selectSongHistoryMode(
 	return song?.album_id === collection.id ? 'replace' : 'stack';
 }
 
+// Returns a promise, though every current caller (rail/list clicks) is
+// fire-and-forget: a caller that needs follow-up state set once the song is
+// actually current must not await this and add the follow-up after it —
+// guardDirtyNavigation resolves immediately once it parks a dirty draft,
+// before applySelectedSong ever runs, so that follow-up would land against
+// whichever song was open before (issue #265 review of #264, fixed for its
+// one real caller by folding the follow-up into a single guarded action —
+// see revealSharedTake below). A future such caller belongs the same way.
 export function selectSong(songId: string, knownSong?: SongItem): Promise<void> {
 	// Evaluated before the guard's own possible park: a dirty draft defers
 	// `applySelectedSong` until the confirm resolves, so historyMode must read
@@ -406,6 +414,24 @@ export function selectSong(songId: string, knownSong?: SongItem): Promise<void> 
 export function selectNeighborSong(song: SongItem): Promise<void> {
 	return guardDirtyNavigation(async () => {
 		await applySelectedSong(song.id, song, 'replace', 'keep');
+	});
+}
+
+// LibraryWall's share-inventory row for a shared take (a song_id plus a
+// generation id, not a full playable share of the song itself) needs the
+// song switch and the generation pin to land as one guarded action, exactly
+// like revealPlayingSong below: pinning the take is follow-up state that
+// must run once the song is actually current, not once selectSong's promise
+// resolves, since a dirty draft resolves that promise the moment it parks
+// the switch (see the note on selectSong above). Unlike revealPlayingSong,
+// the row carries only the song's id, not a hydrated SongItem, matching
+// selectSong's own knownSong-optional shape.
+export function revealSharedTake(songId: string, generationId: string): Promise<void> {
+	const historyMode = selectSongHistoryMode(songId, undefined);
+	return guardDirtyNavigation(async () => {
+		await applySelectedSong(songId, undefined, historyMode, 'write');
+		selectedGenerationId.set(generationId);
+		persistLibraryHistory();
 	});
 }
 
