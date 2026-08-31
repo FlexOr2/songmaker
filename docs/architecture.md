@@ -228,8 +228,17 @@ router) removes the case entirely.
 `isAlbumRoutePath`, true for `/album/<slug>` and every segment deeper, plus
 `isPlaylistRoutePath`) rather than by the route group, since
 `routes/+layout.svelte` sits outside `(library)` and needs the same five
-addresses for its own, separate reach decision; `ensureLibraryWorkspaceRoute`
-never pushes anything off any of them. A cold tab opened on an album, song,
+addresses for its own, separate reach decision (starting the live event
+stream) — the only remaining reader of it: #264's own guard,
+`ensureLibraryWorkspaceRoute`, forced every collection/song open onto one of
+these five paths before writing its history entry, which S7 proved
+redundant and removed once `writeLibraryHistory`'s own crossing check
+(`libraryRouteShape`, below) covered leaving *any* non-library route,
+Settings included, not just crossing between two of the five — see the note
+on `LibraryRouteShape`'s `'external'` shape in `stores/libraryContext.ts` for
+why that shape has to exist for the guard's removal to be safe, and
+`navigation.test.ts`'s "opening a collection from off the library route"
+suite for the per-entry-point proof. A cold tab opened on an album, song,
 take or playlist address resolves it against the API first (`openAlbumAddress`
 / `openSongAddress` / `openTakeAddress` / `openPlaylistAddress`): an unknown
 album slug, an unknown song slug within a known album, an unknown take number
@@ -255,20 +264,34 @@ filter, sort, scroll, search cursor, moving to another song within the same
 open album since #275, moving to another take of the same open song since
 #281, and moving to another open playlist since #286 — keeps the cheap
 synchronous write; `libraryRouteShape` (root / album / album-song /
-album-song-take / playlist) is what the crossing check compares, not the
-plain `isAlbumRoutePath` boolean, since that boolean alone cannot tell an
-album address from a song or take address one or two segments under it — a
-song-to-song move across album boundaries, or a take-to-take move across song
-boundaries, stays the same shape and the cheap write, since only the route.id
-depth decides a crossing, never which resource the address names; a
-playlist-to-playlist move is the one pair the matrix never crosses for the
-same reason, since `/playlist/[slug]` is a single route file regardless of
-which playlist it names — every other pairing (album, album-song,
-album-song-take, root) crosses against a playlist address and vice versa,
-since it is a sibling route, not one of theirs. Turning one of those crossing
-writes back into a bare `history.pushState` would leave the router mounting
-the route it last saw and let the next Back/Forward tear the workspace down
-mid-edit. Crossing writes are asynchronous and therefore serialized, and
+album-song-take / playlist / external) is what the crossing check compares,
+not the plain `isAlbumRoutePath` boolean, since that boolean alone cannot
+tell an album address from a song or take address one or two segments under
+it — a song-to-song move across album boundaries, or a take-to-take move
+across song boundaries, stays the same shape and the cheap write, since only
+the route-file depth decides a crossing, never which resource the address
+names; a playlist-to-playlist move is the one pair the matrix never crosses
+for the same reason, since `/playlist/[slug]` is a single route file
+regardless of which playlist it names — every other pairing (album,
+album-song, album-song-take, root) crosses against a playlist address and
+vice versa, since it is a sibling route, not one of theirs. The sixth shape,
+`external`, is everything outside the five library addresses — Settings,
+login, a share page — and exists so that leaving one always crosses too: it
+is what let issue #265's S7 delete `ensureLibraryWorkspaceRoute` (#264's
+separate guard, which used to force the browser onto a library path *before*
+any history write ran, so `writeLibraryHistory` never had to consider a
+non-library `from` at all) without a silent regression on the one pairing
+that could not tell the difference on its own — a write landing on `/`
+(`openLibraryWall`, or `openPlaylist` before its slug is known) computed
+`root` for both a genuine `/` and a `/settings/...` `from` before `external`
+existed as its own shape, which would have taken the cheap same-shape branch
+and left the router mounted on Settings' route file while the bar already
+read `/`. Turning one of the crossing writes back into a bare
+`history.pushState` would leave the router mounting the route it last saw
+and let the next Back/Forward tear the workspace down mid-edit — collapsing
+`external` back into `root` is the same mistake one level up: still a raw
+write, just for a `from` no caller used to reach. Crossing writes are
+asynchronous and therefore serialized, and
 `currentLibraryHistoryState()` — not `history.state` — answers what the entry
 will be, so a caller that writes twice in a row (open a song, then pin its
 take — now itself a second crossing, queued behind the first) is not read
