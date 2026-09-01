@@ -50,7 +50,10 @@ startup, and a peer is trusted when its address falls inside one of them — so
 `172.16.0.0/12` covers the gateway address `172.18.0.1`, and a bare
 `10.0.0.1` covers only itself. An entry that is not a valid address or
 network (including one with host bits set, like `10.0.0.1/24`) raises at
-startup rather than being carried along as a rule that can never match.
+startup rather than being carried along as a rule that can never match. An
+entry carrying an interface zone (`fe80::1%eth0`) is rejected too: a zone is
+local to one host and is dropped when an address is matched against a network,
+so the entry would silently widen to every interface.
 
 Three behaviours hang off that decision, and all three are off when the peer
 is not trusted:
@@ -62,6 +65,36 @@ is not trusted:
 - `X-Forwarded-Proto: https` marks the request as HTTPS, which is what sets
   `Secure` on the session and CSRF cookies.
 - The same signal emits `Strict-Transport-Security`.
+
+`auth.resolve_client_ip()` and `auth.request_is_https()` own both decisions;
+no endpoint or middleware reads those headers itself. The chain is validated
+before any part of it becomes an identity:
+
+- All `X-Forwarded-For` header fields are joined in order — a chain split
+  across several fields is one list, and reading only the first would let a
+  client hide hops in a second field.
+- The joined chain is bounded by `MAX_FORWARDED_FOR_CHARS` (1024) and
+  `MAX_FORWARDED_FOR_HOPS` (16), so a forged header cannot make the server
+  materialize an unbounded list. A real chain here is three hops.
+- Every hop must parse as a plain IP address. One empty, whitespace-only or
+  unparsable entry makes the whole chain malformed and the request keys on the
+  direct peer instead — an empty string or a word like `garbage` can never
+  become a client identity, which would otherwise pool unrelated visitors into
+  one rate-limit budget and one session binding.
+- Addresses are canonicalized: `::ffff:203.0.113.9` and `203.0.113.9` are one
+  identity, so nobody multiplies a budget by switching notation. An address
+  carrying an interface zone is treated as no address at all.
+- `X-Forwarded-Proto` follows the same rule: only the rightmost value counts,
+  so a client that prepends its own cannot outvote the proxy behind it.
+
+`run_server()` passes `proxy_headers=False` to uvicorn. Uvicorn's own
+forwarded-header handling would rewrite the peer address and the scheme before
+any application code runs, from any peer unless its separate
+`forwarded_allow_ips` is kept in sync with `TRUSTED_PROXIES` — two sources of
+truth for one decision. `TrustedProxies` is the only owner. Uvicorn's default
+`forwarded_allow_ips` is `127.0.0.1`, so this changes nothing for the Docker
+deployment (the peer is the bridge gateway, `172.18.0.1`); a proxy that ever
+reaches the server over loopback must be named in `TRUSTED_PROXIES` instead.
 
 ## CSRF Protection
 
@@ -246,7 +279,7 @@ closes the owner before the logout request.
 
 ## Child Process Secret Scrubbing
 
-Two packages spawn *external* child processes that must not inherit every secret in the parent's environment: `songmaker_cli.claude.provider` (the Claude CLI, for chat) and `acestep_worker.subprocess_runner` (the ACE-Step HTTP subprocess). Both packages scrub `os.environ.copy()` with a `SECRET_ENV_KEYS` tuple before passing `env=` to the child, covering `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `OPENAI_API_KEY`, `SESSION_SECRET`, `SONGMAKER_INTERNAL_TOKEN`, `DATABASE_URL`, `REDIS_URL`, `POSTGRES_PASSWORD`, `HF_TOKEN`, `ADMIN_USERNAME`, and `ADMIN_PASSWORD`.
+Two packages spawn *external* child processes that must not inherit every secret in the parent's environment: `songmaker_cli.claude.provider` (the Claude CLI, for chat) and `acestep_worker.subprocess_runner` (the ACE-Step HTTP subprocess). Both packages scrub `os.environ.copy()` with a `SECRET_ENV_KEYS` tuple before passing `env=` to the child, covering `ANTHROPIC_API_KEY`, `XAI_API_KEY`, `OPENAI_API_KEY`, `SESSION_SECRET`, `SONGMAKER_INTERNAL_TOKEN`, `DATABASE_URL`, `REDIS_URL`, `POSTGRES_USER`, `POSTGRES_PASSWORD`, `HF_TOKEN`, `ADMIN_USERNAME`, `ADMIN_PASSWORD`, `GRAFANA_USER`, and `GRAFANA_PASSWORD`. A login is scrubbed as a pair — the name half is no secret on its own, but handing a child process one half of a credential buys nothing.
 
 The bootstrap admin credentials are on that list because compose sets them on the long-running web container, not on a one-shot setup job: `lifecycle.auto_setup_admin` re-reads `ADMIN_USERNAME`/`ADMIN_PASSWORD` at every startup so a database restored from empty gets its admin back. They therefore sit in the parent environment for the container's whole life, and this scrub is what keeps them out of every child it spawns.
 
@@ -402,7 +435,7 @@ All mutating operations are logged to the `audit_log` table:
 | HTTPS termination | Reverse proxy (nginx/caddy) with TLS. Set `X-Forwarded-Proto: https` so `Secure` cookie flag and HSTS header activate. |
 | Session secret | Set `SESSION_SECRET` env var (min 32 chars). Required — startup fails with `ValidationError` if missing. Stable across restarts. Generate with `python3 -c "import secrets; print(secrets.token_hex(32))"`. |
 | CORS origin | Set `CORS_ORIGIN=https://yourdomain.com` or `CORS_ORIGIN=*.yourdomain.com`. Wildcard must include a registrable domain (e.g., `*.trycloudflare.com`). Bare TLDs rejected. |
-| Trusted proxies | Set `TRUSTED_PROXIES=10.0.0.1,172.16.0.0/12` (comma-separated addresses and/or CIDR networks). Only peers inside these networks are trusted for `X-Forwarded-For` and `X-Forwarded-Proto`; the rightmost untrusted `X-Forwarded-For` entry is used to prevent spoofing. An unparsable entry fails startup. Without this, the client's direct IP is always used for rate limiting and no forwarded HTTPS signal is honored — see "Proxy trust". |
+| Trusted proxies | Set `TRUSTED_PROXIES=10.0.0.1,172.16.0.0/12` (comma-separated addresses and/or CIDR networks). Only peers inside these networks are trusted for `X-Forwarded-For` and `X-Forwarded-Proto`; the rightmost untrusted `X-Forwarded-For` entry is used to prevent spoofing. An unparsable or zone-scoped entry fails startup, and a malformed forwarded chain falls back to the direct peer. Without this, the client's direct IP is always used for rate limiting and no forwarded HTTPS signal is honored — see "Proxy trust". |
 | Allowed hosts | Set `ALLOWED_HOSTS=yourdomain.com,yourdomain.com:443` (comma-separated). Used by CSRF origin verification. Defaults to `localhost`/`127.0.0.1` regex for dev. |
 | Host binding | Default is `127.0.0.1` (localhost only). Set `HOST=0.0.0.0` to listen on all interfaces (only behind a reverse proxy). The Docker deployment does set `HOST=0.0.0.0` — that binding is *inside* the container, where the compose network needs it. |
 | Published ports | `docker-compose.yml` publishes `songmaker-web` and Grafana as `127.0.0.1:8080:8080` / `127.0.0.1:3000:3000`. Do not drop the `127.0.0.1:` prefix: Docker's NAT chain bypasses the host INPUT chain, so a plain `8080:8080` reaches the whole LAN no matter what UFW says. The tunnel (`cloudflared`), the Vite dev proxy, and the CLI all run host-local; in-cluster callers use `songmaker-web:8080` on the compose network. |

@@ -5,6 +5,7 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+from collections.abc import Sequence
 from dataclasses import dataclass
 from ipaddress import (
     IPv4Address,
@@ -14,15 +15,46 @@ from ipaddress import (
     ip_address,
     ip_network,
 )
+from typing import TYPE_CHECKING, Final
 
 import bcrypt
 
 from songmaker_cli.settings import get_settings
 
+if TYPE_CHECKING:
+    from starlette.requests import Request
+
+    from songmaker_cli.app_context import AppContext
+
 BCRYPT_ROUNDS = 12
 
 IpAddress = IPv4Address | IPv6Address
 IpNetwork = IPv4Network | IPv6Network
+
+FORWARDED_FOR_HEADER: Final[str] = "x-forwarded-for"
+FORWARDED_PROTO_HEADER: Final[str] = "x-forwarded-proto"
+HTTPS_SCHEME: Final[str] = "https"
+
+# The identity used when the connection has no address at all (an ASGI
+# transport without a client, as in tests). It is not an IP, so it is never
+# trusted and never matches a configured network.
+UNKNOWN_CLIENT_IP: Final[str] = "unknown"
+
+# A zone identifier ("fe80::1%eth0") is meaningful only on the host that owns
+# the interface, and Python compares a scoped address against a network by its
+# numeric value alone -- the zone silently disappears from the decision. So no
+# address carrying one is ever matched or used as an identity here.
+ZONE_SEPARATOR: Final[str] = "%"
+
+# A real chain is short: the CDN edge appends one hop, the tunnel another, the
+# container gateway a third. 16 leaves room for a stacked proxy setup while
+# keeping a forged header from making the server parse an unbounded list.
+MAX_FORWARDED_FOR_HOPS: Final[int] = 16
+# 16 hops in the longest textual IPv6 form (45 characters) plus their 15 ", "
+# separators need 750 characters. 1024 is the next round number above that, so
+# this bound rejects only chains the hop bound rejects anyway -- it exists to
+# cap the work done *before* the chain is split.
+MAX_FORWARDED_FOR_CHARS: Final[int] = 1024
 
 
 @dataclass(frozen=True)
@@ -43,17 +75,25 @@ class TrustedProxies:
         entries = (entry.strip() for entry in raw.split(","))
         return cls(tuple(_proxy_network(entry) for entry in entries if entry))
 
-    def __contains__(self, host: str) -> bool:
-        address = _peer_address(host)
-        if address is None:
-            return False
+    def trusts(self, address: IpAddress) -> bool:
         return any(address in network for network in self.networks)
+
+    def __contains__(self, host: str) -> bool:
+        address = _canonical_address(host)
+        return address is not None and self.trusts(address)
 
     def __bool__(self) -> bool:
         return bool(self.networks)
 
 
 def _proxy_network(entry: str) -> IpNetwork:
+    if ZONE_SEPARATOR in entry:
+        raise ValueError(
+            f"TRUSTED_PROXIES entry {entry!r} carries an interface zone: a zone is "
+            "local to one host and is ignored when an address is matched against a "
+            "network, so it would widen the entry to every interface. Configure the "
+            "address or network without it.",
+        )
     try:
         return ip_network(entry)
     except ValueError as exc:
@@ -62,7 +102,14 @@ def _proxy_network(entry: str) -> IpNetwork:
         ) from exc
 
 
-def _peer_address(host: str) -> IpAddress | None:
+def _canonical_address(host: str) -> IpAddress | None:
+    """The one form of ``host`` every decision keys on, or None if it is not an IP.
+
+    An IPv4-mapped IPv6 address collapses to its IPv4 form, so a client cannot
+    hold two per-IP budgets by switching notation.
+    """
+    if ZONE_SEPARATOR in host:
+        return None
     try:
         address = ip_address(host)
     except ValueError:
@@ -72,21 +119,90 @@ def _peer_address(host: str) -> IpAddress | None:
     return address
 
 
+def _canonical_host(host: str) -> str:
+    address = _canonical_address(host)
+    return host if address is None else str(address)
+
+
+def _forwarded_chain(header_values: Sequence[str]) -> tuple[IpAddress, ...] | None:
+    """The merged X-Forwarded-For chain, or None when it cannot be believed.
+
+    A chain may arrive split across several header fields; they are one ordered
+    list, so all of them are joined before parsing -- reading only the first
+    would let a client hide hops in a second field. A chain that is too long,
+    or that carries one entry which is not a plain IP address, is malformed as
+    a whole: no part of it identifies anybody.
+    """
+    joined = ",".join(header_values)
+    if not joined or len(joined) > MAX_FORWARDED_FOR_CHARS:
+        return None
+    entries = joined.split(",")
+    if len(entries) > MAX_FORWARDED_FOR_HOPS:
+        return None
+    hops: list[IpAddress] = []
+    for entry in entries:
+        hop = _canonical_address(entry.strip())
+        if hop is None:
+            return None
+        hops.append(hop)
+    return tuple(hops)
+
+
 def parse_trusted_proxies() -> TrustedProxies:
     """Read TRUSTED_PROXIES from Settings. Raises at startup on an unparsable entry."""
     return TrustedProxies.parse(get_settings().trusted_proxies)
 
 
 def get_client_ip(
-    client_host: str, forwarded_for: str | None, trusted_proxies: TrustedProxies,
+    peer: str, forwarded_for_fields: Sequence[str], trusted_proxies: TrustedProxies,
 ) -> str:
-    """Extract the real client IP, using rightmost untrusted XFF entry."""
-    if client_host in trusted_proxies and forwarded_for:
-        ips = [ip.strip() for ip in forwarded_for.split(",")]
-        for ip in reversed(ips):
-            if ip not in trusted_proxies:
-                return ip
-    return client_host
+    """The client's identity: the rightmost hop no trusted proxy vouches for.
+
+    Only a request arriving from a trusted peer may name a client other than
+    the peer itself, and only through a chain whose every hop is a parsable
+    address. Anything else keys on the peer -- a forged, truncated or empty
+    header must never become somebody's identity, because that identity binds
+    a session and buys a rate-limit budget.
+    """
+    if peer not in trusted_proxies:
+        return _canonical_host(peer)
+    chain = _forwarded_chain(forwarded_for_fields)
+    if chain is None:
+        return _canonical_host(peer)
+    for hop in reversed(chain):
+        if not trusted_proxies.trusts(hop):
+            return str(hop)
+    return _canonical_host(peer)
+
+
+def _peer_host(request: Request) -> str:
+    return request.client.host if request.client else UNKNOWN_CLIENT_IP
+
+
+def resolve_client_ip(request: Request) -> str:
+    """The client identity of ``request`` -- the one owner of that decision."""
+    ctx: AppContext = request.app.state.ctx
+    return get_client_ip(
+        _peer_host(request),
+        request.headers.getlist(FORWARDED_FOR_HEADER),
+        ctx.trusted_proxies,
+    )
+
+
+def request_is_https(request: Request) -> bool:
+    """Whether the client's own connection is HTTPS, forwarding included.
+
+    Like the client address, a forwarded protocol counts only from a trusted
+    peer and only in its rightmost value -- the one the closest proxy appended.
+    A client that prepends its own ``X-Forwarded-Proto`` cannot outvote it.
+    """
+    if request.url.scheme == HTTPS_SCHEME:
+        return True
+    ctx: AppContext = request.app.state.ctx
+    if _peer_host(request) not in ctx.trusted_proxies:
+        return False
+    forwarded = ",".join(request.headers.getlist(FORWARDED_PROTO_HEADER))
+    return forwarded.split(",")[-1].strip().lower() == HTTPS_SCHEME
 
 
 LOGIN_RATE_WINDOW_SECONDS = 300

@@ -526,6 +526,12 @@ class LimiterFailurePolicy(StrEnum):
 # a restored-from-empty database gets its admin back. They therefore sit in
 # the parent environment for the container's whole life, and this scrub is
 # the only thing keeping them out of every child process it spawns.
+#
+# A login is scrubbed as a pair. The name half is no secret on its own, but
+# handing a child process one half of a credential is pointless generosity —
+# hence POSTGRES_USER and GRAFANA_USER beside their passwords. Every key here
+# is a declared Settings field, so a process started from an exported .env
+# really does carry it in os.environ.
 SECRET_ENV_KEYS: Final[tuple[str, ...]] = (
     "ANTHROPIC_API_KEY",
     "XAI_API_KEY",
@@ -534,8 +540,11 @@ SECRET_ENV_KEYS: Final[tuple[str, ...]] = (
     "SONGMAKER_INTERNAL_TOKEN",
     "DATABASE_URL",
     "REDIS_URL",
+    "POSTGRES_USER",
     "POSTGRES_PASSWORD",
     "HF_TOKEN",
     "ADMIN_USERNAME",
     "ADMIN_PASSWORD",
+    "GRAFANA_USER",
+    "GRAFANA_PASSWORD",
 )

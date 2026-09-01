@@ -8,6 +8,8 @@ import pytest
 
 from songmaker_cli.auth import (
     BCRYPT_ROUNDS,
+    MAX_FORWARDED_FOR_CHARS,
+    MAX_FORWARDED_FOR_HOPS,
     MIN_PASSWORD_LENGTH,
     RATE_LIMIT_WINDOW_SECONDS,
     ROLE_ADMIN,
@@ -209,37 +211,90 @@ def test_parse_trusted_proxies_rejects_unparsable_entry(
         parse_trusted_proxies()
 
 
+def test_parse_trusted_proxies_rejects_a_zone_scoped_entry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A zone is local to one host and vanishes when an address is matched
+    against a network, so the entry would silently widen to every interface."""
+    monkeypatch.setenv("TRUSTED_PROXIES", "fe80::1%eth0")
+    with pytest.raises(ValueError, match="zone"):
+        parse_trusted_proxies()
+
+
 # -- get_client_ip -----------------------------------------------------------
 
-
-def test_get_client_ip_no_trusted_proxies() -> None:
-    assert get_client_ip("1.2.3.4", "5.6.7.8, 9.10.11.12", TrustedProxies()) == "1.2.3.4"
-
-
-def test_get_client_ip_ignores_forwarded_for_from_untrusted_peer() -> None:
-    proxies = TrustedProxies.parse("172.16.0.0/12")
-    assert get_client_ip("203.0.113.9", "1.2.3.4", proxies) == "203.0.113.9"
+_PROXY_NETWORK = "172.16.0.0/12"
+_TRUSTED_PEER = "172.18.0.1"
+_MAX_CHAIN = ", ".join(["203.0.113.9"] * MAX_FORWARDED_FOR_HOPS)
+_ONE_HOP_TOO_MANY = ", ".join(["203.0.113.9"] * (MAX_FORWARDED_FOR_HOPS + 1))
+_PADDED_PAST_THE_LENGTH_BOUND = "203.0.113.9" + " " * MAX_FORWARDED_FOR_CHARS
 
 
-def test_get_client_ip_rightmost_untrusted() -> None:
-    proxies = TrustedProxies.parse("10.0.0.1")
-    result = get_client_ip("10.0.0.1", "1.2.3.4, 5.6.7.8, 10.0.0.1", proxies)
-    assert result == "5.6.7.8"
+@pytest.mark.parametrize(
+    ("forwarded_for", "expected"),
+    [
+        pytest.param([], _TRUSTED_PEER, id="no header at all"),
+        pytest.param(["203.0.113.7"], "203.0.113.7", id="single hop"),
+        pytest.param(
+            ["203.0.113.7, 172.18.0.9"], "203.0.113.7", id="rightmost untrusted hop",
+        ),
+        pytest.param(
+            ["203.0.113.7", "172.18.0.9"], "203.0.113.7", id="chain split across fields",
+        ),
+        pytest.param(
+            ["10.9.9.9", "203.0.113.7"], "203.0.113.7",
+            id="a later field is not hidden by the first",
+        ),
+        pytest.param(
+            ["172.18.0.9, 172.18.0.8"], _TRUSTED_PEER, id="every hop trusted",
+        ),
+        pytest.param(["   "], _TRUSTED_PEER, id="whitespace only"),
+        pytest.param([""], _TRUSTED_PEER, id="empty header"),
+        pytest.param(["203.0.113.9, "], _TRUSTED_PEER, id="trailing empty entry"),
+        pytest.param([", 203.0.113.9"], _TRUSTED_PEER, id="leading empty entry"),
+        pytest.param(["garbage"], _TRUSTED_PEER, id="not an address"),
+        pytest.param(
+            ["203.0.113.9, garbage"], _TRUSTED_PEER, id="one bad hop voids the chain",
+        ),
+        pytest.param(["203.0.113.9:443"], _TRUSTED_PEER, id="address with a port"),
+        pytest.param(["fe80::1%eth0"], _TRUSTED_PEER, id="zone-scoped hop"),
+        pytest.param(["::ffff:203.0.113.9"], "203.0.113.9", id="IPv4-mapped hop"),
+        pytest.param(["2001:0DB8:0000::0001"], "2001:db8::1", id="uncompressed IPv6 hop"),
+        pytest.param([_MAX_CHAIN], "203.0.113.9", id="chain at the hop bound"),
+        pytest.param([_ONE_HOP_TOO_MANY], _TRUSTED_PEER, id="one hop past the bound"),
+        pytest.param(
+            [_PADDED_PAST_THE_LENGTH_BOUND], _TRUSTED_PEER, id="padded past the length bound",
+        ),
+    ],
+)
+def test_client_ip_behind_a_trusted_proxy(
+    forwarded_for: list[str], expected: str,
+) -> None:
+    """A forwarded chain names the client only when every hop is an address.
+
+    Anything else keys on the peer: a malformed chain must never hand its
+    empty or nonsense entry out as an identity, because that identity binds a
+    session and buys a rate-limit budget.
+    """
+    proxies = TrustedProxies.parse(_PROXY_NETWORK)
+    assert get_client_ip(_TRUSTED_PEER, forwarded_for, proxies) == expected
 
 
-def test_get_client_ip_rightmost_untrusted_behind_proxy_network() -> None:
-    proxies = TrustedProxies.parse("172.16.0.0/12")
-    result = get_client_ip("172.18.0.1", "203.0.113.7, 172.18.0.9", proxies)
-    assert result == "203.0.113.7"
+def test_client_ip_ignores_a_chain_from_an_untrusted_peer() -> None:
+    proxies = TrustedProxies.parse(_PROXY_NETWORK)
+    assert get_client_ip("203.0.113.50", ["10.9.9.9"], proxies) == "203.0.113.50"
 
 
-def test_get_client_ip_all_trusted_falls_back() -> None:
-    proxies = TrustedProxies.parse("10.0.0.1, 10.0.0.2")
-    result = get_client_ip("10.0.0.1", "10.0.0.2, 10.0.0.1", proxies)
-    assert result == "10.0.0.1"
+def test_client_ip_ignores_a_chain_when_no_proxy_is_configured() -> None:
+    assert get_client_ip("1.2.3.4", ["5.6.7.8", "9.10.11.12"], TrustedProxies()) == "1.2.3.4"
 
 
-def test_get_client_ip_no_xff() -> None:
-    proxies = TrustedProxies.parse("10.0.0.1")
-    result = get_client_ip("10.0.0.1", None, proxies)
-    assert result == "10.0.0.1"
+def test_client_ip_canonicalizes_an_ipv4_mapped_peer() -> None:
+    """Same client, one identity — otherwise a form switch doubles the budget."""
+    proxies = TrustedProxies.parse(_PROXY_NETWORK)
+    assert get_client_ip("::ffff:203.0.113.50", [], proxies) == "203.0.113.50"
+
+
+def test_client_ip_of_a_peer_that_is_not_an_address() -> None:
+    proxies = TrustedProxies.parse(_PROXY_NETWORK)
+    assert get_client_ip("testclient", ["203.0.113.7"], proxies) == "testclient"

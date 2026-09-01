@@ -481,7 +481,7 @@ def test_body_size_limit_rejects_large_content_length(server_app: TestClient) ->
 
 
 def _get_through_peer(
-    server_app: TestClient, peer_ip: str, headers: dict[str, str],
+    server_app: TestClient, peer_ip: str, headers: dict[str, str] | list[tuple[str, str]],
 ) -> httpx.Response:
     peer_client = TestClient(server_app.app, client=(peer_ip, 55000))
     return peer_client.get("/", headers=headers)
@@ -513,6 +513,62 @@ def test_hsts_header_not_set_for_peer_outside_the_trusted_network(
     assert "Strict-Transport-Security" not in resp.headers
 
 
+def _access_log_messages(caplog: pytest.LogCaptureFixture) -> list[str]:
+    return [
+        record.getMessage() for record in caplog.records
+        if record.name == "songmaker_cli.middleware.access_log"
+    ]
+
+
+def test_access_log_names_the_forwarded_client(
+    server_app: TestClient, caplog: pytest.LogCaptureFixture,
+) -> None:
+    """The log is what an operator reads after an incident — it must name the
+    visitor, not the one gateway address every visitor arrives through."""
+    server_app.app.state.ctx.trusted_proxies = TrustedProxies.parse(_PROXY_NETWORK)
+    try:
+        with caplog.at_level("INFO"):
+            _get_through_peer(
+                server_app, _TRUSTED_PEER, {"x-forwarded-for": "203.0.113.1, 172.18.0.9"},
+            )
+    finally:
+        server_app.app.state.ctx.trusted_proxies = TrustedProxies()
+
+    messages = _access_log_messages(caplog)
+    assert messages
+    assert all("203.0.113.1" in message for message in messages)
+
+
+def test_access_log_names_the_peer_when_the_chain_is_malformed(
+    server_app: TestClient, caplog: pytest.LogCaptureFixture,
+) -> None:
+    server_app.app.state.ctx.trusted_proxies = TrustedProxies.parse(_PROXY_NETWORK)
+    try:
+        with caplog.at_level("INFO"):
+            _get_through_peer(server_app, _TRUSTED_PEER, {"x-forwarded-for": "garbage"})
+    finally:
+        server_app.app.state.ctx.trusted_proxies = TrustedProxies()
+
+    messages = _access_log_messages(caplog)
+    assert messages
+    assert all(f"ACCESS {_TRUSTED_PEER} " in message for message in messages)
+
+
+def test_hsts_follows_the_rightmost_forwarded_proto(server_app: TestClient) -> None:
+    """A client that prepends its own X-Forwarded-Proto: https cannot make the
+    server claim HTTPS — only the value the closest proxy appended counts."""
+    server_app.app.state.ctx.trusted_proxies = TrustedProxies.parse(_PROXY_NETWORK)
+    try:
+        resp = _get_through_peer(
+            server_app,
+            _TRUSTED_PEER,
+            [("x-forwarded-proto", "https"), ("x-forwarded-proto", "http")],
+        )
+    finally:
+        server_app.app.state.ctx.trusted_proxies = TrustedProxies()
+    assert "Strict-Transport-Security" not in resp.headers
+
+
 def test_run_server_infers_project_root(tmp_path: Path) -> None:
     mock_app = MagicMock()
 
@@ -522,6 +578,19 @@ def test_run_server_infers_project_root(tmp_path: Path) -> None:
         patch("songmaker_cli.server.find_project_root", return_value=None),
     ):
         run_server(project_root=None)
+
+
+def test_run_server_leaves_forwarded_headers_to_the_application() -> None:
+    """Uvicorn's own proxy-header handling would rewrite the peer address and
+    the scheme from any peer, ahead of the TrustedProxies decision."""
+    with (
+        patch("uvicorn.run") as mock_run,
+        patch("songmaker_cli.server.create_app", return_value=MagicMock()),
+        patch("songmaker_cli.server.find_project_root", return_value=None),
+    ):
+        run_server(project_root=None)
+
+    assert mock_run.call_args.kwargs["proxy_headers"] is False
 
 
 def test_lifespan_connects_arq_pool(tmp_path: Path) -> None:
