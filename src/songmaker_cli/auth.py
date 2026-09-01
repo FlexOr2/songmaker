@@ -51,11 +51,20 @@ UNKNOWN_CLIENT_IP: Final[str] = "unknown"
 # address carrying one is ever matched or used as an identity here.
 ZONE_SEPARATOR: Final[str] = "%"
 
+# The longest an address can be written is an IPv6 with an embedded IPv4 tail:
+# "0000:0000:0000:0000:0000:0000:255.255.255.255", 45 characters. Longer text
+# is not an address, and saying so without parsing keeps a header field full of
+# dots or colons from being cut into thousands of pieces inside ipaddress. This
+# is not a limit on what may be an identity -- nothing it rejects could parse.
+MAX_ADDRESS_CHARS: Final[int] = 45
+
 # How many hops of a chain are ever read. Only the entries our own proxies
 # appended decide the identity, and a real deployment appends three: the CDN
 # edge, the tunnel, the container gateway. Reaching 16 means the server sits
-# behind more trusted proxies than anyone configured -- a client cannot cause
-# it, because everything a client writes lands left of the hop that decides.
+# behind more trusted proxies than anyone configured -- the public client
+# cannot cause it, because everything it writes lands left of the hop that
+# decides; a caller on the host itself reaches the server through the bridge
+# gateway, a trusted pass-through hop, and therefore can.
 MAX_FORWARDED_FOR_HOPS: Final[int] = 16
 
 
@@ -110,7 +119,7 @@ def _canonical_address(host: str) -> IpAddress | None:
     An IPv4-mapped IPv6 address collapses to its IPv4 form, so a client cannot
     hold two per-IP budgets by switching notation.
     """
-    if ZONE_SEPARATOR in host:
+    if len(host) > MAX_ADDRESS_CHARS or ZONE_SEPARATOR in host:
         return None
     try:
         address = ip_address(host)
@@ -127,15 +136,24 @@ def _canonical_host(host: str) -> str:
 
 
 def _forwarded_entries(header_values: Sequence[str]) -> Iterator[str]:
-    """The X-Forwarded-For entries from right to left, newest hop first.
+    """The entries of a forwarded header from right to left, newest hop first.
 
     A chain may arrive split across several header fields; together they are
     one ordered list, so the fields are walked back to front as well -- reading
     only one of them would let a client hide hops in another.
+
+    Each entry is cut out by index from the right rather than by splitting the
+    field, so a header carrying thousands of separators costs only the handful
+    of entries the caller actually reads.
     """
     for header_value in reversed(header_values):
-        for entry in reversed(header_value.split(",")):
-            yield entry.strip()
+        end = len(header_value)
+        while True:
+            separator = header_value.rfind(",", 0, end)
+            yield header_value[separator + 1:end].strip()
+            if separator < 0:
+                break
+            end = separator
 
 
 def _client_from_chain(
@@ -148,14 +166,17 @@ def _client_from_chain(
     Whatever a client writes into the header itself ends up left of the entry
     its proxy appended for it, so it is never read -- a poisoned prefix cannot
     change this answer. An entry that is not an address, or a chain of trusted
-    hops deeper than the deployment can plausibly be, names nobody.
+    hops deeper than the deployment can plausibly be, names nobody; the entry
+    is logged only as far as an address could reach, so a huge one identifies
+    the fault without filling the log.
     """
     for entry in islice(entries, MAX_FORWARDED_FOR_HOPS):
         hop = _canonical_address(entry)
         if hop is None:
             log.warning(
                 "X-Forwarded-For carries %r where the nearest proxy should have "
-                "appended an address; keying this request on the direct peer.", entry,
+                "appended an address; keying this request on the direct peer.",
+                entry[:MAX_ADDRESS_CHARS],
             )
             return None
         if not trusted_proxies.trusts(hop):
@@ -210,16 +231,17 @@ def request_is_https(request: Request) -> bool:
     """Whether the client's own connection is HTTPS, forwarding included.
 
     Like the client address, a forwarded protocol counts only from a trusted
-    peer and only in its rightmost value -- the one the closest proxy appended.
-    A client that prepends its own ``X-Forwarded-Proto`` cannot outvote it.
+    peer and only in its rightmost value -- the one the closest proxy appended,
+    cut out the same bounded way. A client that prepends its own
+    ``X-Forwarded-Proto`` cannot outvote it.
     """
     if request.url.scheme == HTTPS_SCHEME:
         return True
     ctx: AppContext = request.app.state.ctx
     if _peer_host(request) not in ctx.trusted_proxies:
         return False
-    forwarded = ",".join(request.headers.getlist(FORWARDED_PROTO_HEADER))
-    return forwarded.split(",")[-1].strip().lower() == HTTPS_SCHEME
+    newest = next(_forwarded_entries(request.headers.getlist(FORWARDED_PROTO_HEADER)), "")
+    return newest.lower() == HTTPS_SCHEME
 
 
 LOGIN_RATE_WINDOW_SECONDS = 300

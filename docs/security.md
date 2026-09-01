@@ -86,19 +86,31 @@ become an identity:
   word like `garbage` must never become an identity that binds a session and
   buys a rate-limit budget.
 - At most `MAX_FORWARDED_FOR_HOPS` (16) entries are read; a real chain here is
-  three. Only the hops our own proxies appended are ever examined, so a client
-  cannot reach that bound — hitting it means the deployment stacks more
-  trusted proxies than anyone configured. There is no bound on the chain's
-  total length, because rejecting a long chain would hand a client exactly the
-  peer-key escape that reading from the right removes.
+  three. Only the hops our own proxies appended are ever examined, so the
+  public client cannot reach that bound — everything it writes lands left of
+  the hop that decides. There is no bound on the chain's total length, because
+  rejecting a long chain would hand a client exactly the peer-key escape that
+  reading from the right removes.
+- A long chain is cheap rather than forbidden: entries are cut out of the
+  header field by index from the right, so a field carrying thousands of
+  separators costs only the entries actually read, and text longer than
+  `MAX_ADDRESS_CHARS` (45, the longest an address can be written) is refused
+  without being handed to the address parser. Neither rule can change an
+  identity — nothing they skip could have parsed as an address.
 - Both fallbacks to the peer are logged at `WARNING`. They pool unrelated
   visitors into one budget, so they are a proxy misconfiguration to see rather
-  than a silent default.
+  than a silent default. The public client cannot trigger either one: behind
+  Cloudflare → cloudflared → Docker the rightmost entry is always the one our
+  own tunnel appended. A caller on the host itself can, because it reaches the
+  server through the bridge gateway, which is a trusted pass-through hop and
+  forwards the caller's own chain unchanged — so a line there means either a
+  misconfigured proxy or a local caller, not a visitor from the internet.
 - Addresses are canonicalized: `::ffff:203.0.113.9` and `203.0.113.9` are one
   identity, so nobody multiplies a budget by switching notation. An address
   carrying an interface zone is treated as no address at all.
-- `X-Forwarded-Proto` follows the same rule: only the rightmost value counts,
-  so a client that prepends its own cannot outvote the proxy behind it.
+- `X-Forwarded-Proto` is read by the same scan: only the rightmost value
+  counts, so a client that prepends its own cannot outvote the proxy behind it,
+  and a huge field costs no more than that one value.
 
 `run_server()` passes `proxy_headers=False` to uvicorn. Uvicorn's own
 forwarded-header handling would rewrite the peer address and the scheme before

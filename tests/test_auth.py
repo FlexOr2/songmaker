@@ -7,8 +7,10 @@ from pathlib import Path
 
 import pytest
 
+from songmaker_cli import auth
 from songmaker_cli.auth import (
     BCRYPT_ROUNDS,
+    MAX_ADDRESS_CHARS,
     MAX_FORWARDED_FOR_HOPS,
     MIN_PASSWORD_LENGTH,
     RATE_LIMIT_WINDOW_SECONDS,
@@ -300,6 +302,82 @@ def test_a_poisoned_prefix_cannot_move_a_client_onto_the_gateway_identity() -> N
     proxies = TrustedProxies.parse(_PROXY_NETWORK)
     assert get_client_ip(_TRUSTED_PEER, [f"garbage, {_CLIENT}"], proxies) == _CLIENT
     assert get_client_ip(_TRUSTED_PEER, [f"{_CLIENT}, garbage"], proxies) == _TRUSTED_PEER
+
+
+class _CountedChain(str):
+    """A header field that records every piece ever cut out of it.
+
+    A chain is read from the right and only as far as the answer needs, so the
+    pieces it hands out are what a huge header actually costs.
+    """
+
+    pieces: list[str]
+
+    def __new__(cls, value: str) -> _CountedChain:
+        chain = super().__new__(cls, value)
+        chain.pieces = []
+        return chain
+
+    def split(self, sep: str | None = None, maxsplit: int = -1) -> list[str]:
+        pieces = super().split(sep, maxsplit)
+        self.pieces.extend(pieces)
+        return pieces
+
+    def __getitem__(self, key: int | slice) -> str:
+        piece = super().__getitem__(key)
+        self.pieces.append(piece)
+        return piece
+
+
+_HOPS_BEYOND_ANY_DEPLOYMENT = 10_000
+
+
+@pytest.mark.parametrize(
+    ("chain", "expected"),
+    [
+        pytest.param(
+            [*[_TRUSTED_HOP] * _HOPS_BEYOND_ANY_DEPLOYMENT, _CLIENT], _CLIENT,
+            id="the client sits at the right end",
+        ),
+        pytest.param(
+            [_TRUSTED_HOP] * _HOPS_BEYOND_ANY_DEPLOYMENT, _TRUSTED_PEER,
+            id="every read hop is trusted",
+        ),
+    ],
+)
+def test_a_huge_chain_costs_only_the_entries_it_reads(
+    chain: list[str], expected: str,
+) -> None:
+    """A client may send as many entries as the header size allows, and the
+    hop bound must limit the work rather than only the parsing: the entries
+    left of the answer are never cut out of the field at all."""
+    header_field = _CountedChain(", ".join(chain))
+    proxies = TrustedProxies.parse(_PROXY_NETWORK)
+    assert get_client_ip(_TRUSTED_PEER, [header_field], proxies) == expected
+    assert len(header_field.pieces) <= MAX_FORWARDED_FOR_HOPS + 1
+
+
+def test_an_entry_too_long_to_be_an_address_is_never_parsed(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """No address is written in more than 45 characters, so longer text names
+    nobody either way — but handing it to ipaddress would cut it into thousands
+    of pieces along its dots, the very cost the bounded scan avoids."""
+    parsed_hosts: list[str] = []
+    parse_address = auth.ip_address
+
+    def record_parse(host: str) -> auth.IpAddress:
+        parsed_hosts.append(host)
+        return parse_address(host)
+
+    monkeypatch.setattr(auth, "ip_address", record_parse)
+    proxies = TrustedProxies.parse(_PROXY_NETWORK)
+    entry_of_nothing_but_separators = "1." * _HOPS_BEYOND_ANY_DEPLOYMENT
+
+    assert get_client_ip(
+        _TRUSTED_PEER, [entry_of_nothing_but_separators], proxies,
+    ) == _TRUSTED_PEER
+    assert all(len(host) <= MAX_ADDRESS_CHARS for host in parsed_hosts)
 
 
 @pytest.mark.parametrize(
