@@ -1,0 +1,115 @@
+"""Song list API tests — generation_count on SongSummaryResponse (#340).
+
+The song list previously touched each song's (unloaded) generations
+relationship just to count it, costing one lazy-load query per row.
+generation_count is now computed server-side in one aggregate query.
+"""
+
+from __future__ import annotations
+
+from collections.abc import Callable
+from pathlib import Path
+
+import pytest
+from conftest import login_and_csrf, make_test_app
+from sqlalchemy import event
+
+from songmaker_cli.auth import hash_password
+from songmaker_cli.db.models import Album, Generation, Song, User, Version
+
+_ADMIN_USER = "admin"
+_ADMIN_PASSWORD = "admin12345"
+
+
+def _count_queries(engine, *substrings: str) -> tuple[list[str], Callable]:
+    """Register a query-count probe; caller removes it via the returned handle."""
+    queries: list[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany) -> None:
+        lowered = statement.lower()
+        if all(s.lower() in lowered for s in substrings):
+            queries.append(statement)
+
+    event.listen(engine, "before_cursor_execute", _record)
+    return queries, _record
+
+
+def _add_song_with_generations(
+    session, *, song_id: str, album_id: str, track_number: int, generation_count: int,
+) -> None:
+    session.add(Song(
+        id=song_id, title=song_id, album_id=album_id,
+        track_number=track_number, slug=song_id,
+    ))
+    session.add(Version(id=f"v-{song_id}", song_id=song_id, version_number=1, lyrics="l"))
+    for i in range(generation_count):
+        session.add(Generation(
+            id=f"g-{song_id}-{i}", song_id=song_id, version_id=f"v-{song_id}",
+            generation_number=i + 1, mp3_path=f"{_ADMIN_USER}/{song_id}-{i}.mp3", seed=1,
+        ))
+
+
+def _seed_generation_count_scenarios(session) -> None:
+    session.add(User(
+        username=_ADMIN_USER, password_hash=hash_password(_ADMIN_PASSWORD), role="admin",
+    ))
+    session.add(Album(id="alb", title="Album", artist="A"))
+    _add_song_with_generations(
+        session, song_id="no-takes", album_id="alb", track_number=1, generation_count=0,
+    )
+    _add_song_with_generations(
+        session, song_id="one-take", album_id="alb", track_number=2, generation_count=1,
+    )
+    _add_song_with_generations(
+        session, song_id="many-takes", album_id="alb", track_number=3, generation_count=5,
+    )
+
+
+@pytest.fixture()
+def generation_count_client(tmp_path: Path):
+    client, factory = make_test_app(tmp_path, seed_db=_seed_generation_count_scenarios)
+    login_and_csrf(client, _ADMIN_USER, _ADMIN_PASSWORD)
+    return client, factory
+
+
+def test_list_songs_generation_count_zero_when_no_takes(generation_count_client) -> None:
+    client, _ = generation_count_client
+    resp = client.get("/api/songs")
+    assert resp.status_code == 200
+    by_id = {s["id"]: s for s in resp.json()["items"]}
+    assert by_id["no-takes"]["generation_count"] == 0
+
+
+def test_list_songs_generation_count_counts_one_take(generation_count_client) -> None:
+    client, _ = generation_count_client
+    resp = client.get("/api/songs")
+    by_id = {s["id"]: s for s in resp.json()["items"]}
+    assert by_id["one-take"]["generation_count"] == 1
+
+
+def test_list_songs_generation_count_counts_n_takes(generation_count_client) -> None:
+    client, _ = generation_count_client
+    resp = client.get("/api/songs")
+    by_id = {s["id"]: s for s in resp.json()["items"]}
+    assert by_id["many-takes"]["generation_count"] == 5
+
+
+def test_list_songs_computes_generation_count_in_one_aggregate_query(
+    generation_count_client,
+) -> None:
+    client, factory = generation_count_client
+    with factory() as probe_session:
+        engine = probe_session.get_bind()
+
+    queries, handle = _count_queries(engine, "from generations", "group by")
+    try:
+        resp = client.get("/api/songs")
+    finally:
+        event.remove(engine, "before_cursor_execute", handle)
+
+    assert resp.status_code == 200
+    assert len(resp.json()["items"]) == 3
+    assert len(queries) == 1, (
+        f"expected one aggregate generation-count query for all songs, "
+        f"got {len(queries)}: {queries}"
+    )

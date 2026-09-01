@@ -1065,6 +1065,75 @@ def test_library_stream_windowed_for_oversize_library(tmp_path: Path, monkeypatc
     assert len(data["tracks"]) == 1
 
 
+def _seed_large_library(session, *, song_count: int) -> None:
+    """One user, one album, ``song_count`` songs each with one playable take."""
+    user = User(id="user-a", username="usera", password_hash=hash_password("pass1234"))
+    session.add(user)
+    session.flush()
+    session.add(Album(id="a1", title="Big Album", artist="A", created_by=user.id))
+    session.flush()
+    for i in range(song_count):
+        song_id = f"s{i}"
+        session.add(Song(id=song_id, title=song_id, album_id="a1", track_number=i, slug=song_id))
+        session.add(Version(id=f"v{i}", song_id=song_id, version_number=1, lyrics=""))
+        session.add(Generation(
+            id=f"g{i}", song_id=song_id, version_id=f"v{i}", generation_number=1,
+            mp3_path=f"user-a/g{i}.mp3", seed=i,
+        ))
+
+
+def _write_large_library_audio_files(root: Path, *, song_count: int) -> None:
+    audio_dir = root / "audio" / "user-a"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    for i in range(song_count):
+        (audio_dir / f"g{i}.mp3").write_bytes(b"source")
+
+
+def test_library_pool_queue_query_count_is_constant_not_per_song(
+    tmp_path: Path, monkeypatch,
+) -> None:
+    """#340: resolve_library_pool_membership() must load every song's
+    generations in one bulk query, not one lazy query per song."""
+    from collections.abc import Callable
+
+    from sqlalchemy import event
+
+    song_count = 50
+    _patch_audio_build(monkeypatch)
+    client, factory = make_test_app(
+        tmp_path, seed_db=lambda s: _seed_large_library(s, song_count=song_count),
+    )
+    _write_large_library_audio_files(tmp_path, song_count=song_count)
+    login_and_csrf(client, "usera", "pass1234")
+
+    with factory() as probe_session:
+        engine = probe_session.get_bind()
+
+    queries: list[str] = []
+
+    def _record(conn, cursor, statement, parameters, context, executemany) -> None:
+        queries.append(statement)
+
+    handle: Callable = _record
+    event.listen(engine, "before_cursor_execute", handle)
+    try:
+        resp = client.get("/api/library/pool-queue?pool=all")
+    finally:
+        event.remove(engine, "before_cursor_execute", handle)
+
+    assert resp.status_code == 200
+    assert len(resp.json()["takes"]) == song_count
+    generation_queries = [q for q in queries if "from generations" in q.lower()]
+    assert len(generation_queries) == 1, (
+        f"expected one bulk generations query regardless of song count, "
+        f"got {len(generation_queries)} for {song_count} songs: {generation_queries}"
+    )
+    assert len(queries) < song_count, (
+        f"expected a query count independent of song count ({song_count} songs), "
+        f"got {len(queries)} total queries: {queries}"
+    )
+
+
 def test_library_stream_empty_playable_library_is_422(tmp_path: Path, monkeypatch) -> None:
     """Songs with only archived or missing generations make an honest 422, not an empty stream."""
 

@@ -145,6 +145,30 @@ def test_list_albums_computes_picked_count_in_one_aggregate_query(picks_client) 
     )
 
 
+def test_list_albums_computes_song_count_in_one_aggregate_query(picks_client) -> None:
+    """#340: song_count must come from one aggregate query, never from
+    joinedload(Album.songs) + len() -- that reintroduces the album-list
+    equivalent of the per-song generation-count N+1."""
+    client, factory = picks_client
+    with factory() as probe_session:
+        engine = probe_session.get_bind()
+
+    queries, handle = _count_queries(engine, "from songs", "count(songs.id)")
+    try:
+        resp = client.get("/api/albums")
+    finally:
+        event.remove(engine, "before_cursor_execute", handle)
+
+    assert resp.status_code == 200
+    by_id = {a["id"]: a for a in resp.json()["items"]}
+    assert by_id["no-songs"]["song_count"] == 0
+    assert by_id["one-pick"]["song_count"] == 2
+    assert by_id["many-picks"]["song_count"] == 4
+    assert len(queries) == 1, (
+        f"expected one aggregate song-count query for all albums, got {len(queries)}: {queries}"
+    )
+
+
 def _seed_metadata_scenarios(session) -> None:
     session.add(User(
         username=_ADMIN_USER, password_hash=hash_password(_ADMIN_PASSWORD), role="admin",
