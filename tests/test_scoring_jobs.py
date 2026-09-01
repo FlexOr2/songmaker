@@ -17,7 +17,12 @@ from fastapi.testclient import TestClient
 
 from songmaker_cli.api_models.whisper import WhisperCue
 from songmaker_cli.app_context import AppContext
-from songmaker_cli.constants import CLAUDE_SCORING_MODEL_DEFAULT, JUDGE_DEFAULT_PROVIDER
+from songmaker_cli.constants import (
+    CLAUDE_SCORING_MODEL_DEFAULT,
+    JUDGE_DEFAULT_PROVIDER,
+    SETTING_JUDGE_MODEL,
+    SETTING_JUDGE_PROVIDER,
+)
 from songmaker_cli.db.engine import init_test_db as init_db
 from songmaker_cli.db.models import Album, Generation, Job, Song, User, Version
 from songmaker_cli.db.queries.settings import (
@@ -60,6 +65,34 @@ def test_judge_defaults_to_claude_and_todays_scoring_model(tmp_path: Path) -> No
         set_claude_model(session, "claude_scoring_model", "claude-haiku-4-5-20251001")
         session.commit()
         assert get_judge_model(session, "claude") == "claude-haiku-4-5-20251001"
+
+
+def test_judge_model_from_a_different_provider_never_leaks_to_the_default(
+    tmp_path: Path,
+) -> None:
+    """A judge_model row with no matching judge_provider row is a foreign or
+    orphaned value, not this provider's model — it must not reach the
+    default provider's call (#315, review finding F3)."""
+    factory = init_db(tmp_path / "settings.db")
+    with factory() as session:
+        set_claude_model(session, SETTING_JUDGE_MODEL, "grok-4.6")
+        session.commit()
+        assert get_judge_provider(session) == "claude"
+        assert get_judge_model(session, "claude") == CLAUDE_SCORING_MODEL_DEFAULT
+
+
+def test_judge_provider_without_a_stored_model_falls_back_cleanly(
+    tmp_path: Path,
+) -> None:
+    """A judge_provider row with no matching judge_model row leaves the
+    model empty for a non-default provider — never a stale model borrowed
+    from elsewhere (#315, review finding F3)."""
+    factory = init_db(tmp_path / "settings.db")
+    with factory() as session:
+        set_claude_model(session, SETTING_JUDGE_PROVIDER, "grok")
+        session.commit()
+        assert get_judge_provider(session) == "grok"
+        assert get_judge_model(session, "grok") == ""
 
 
 def test_judge_settings_are_not_coupled_to_the_cowriters(tmp_path: Path) -> None:
@@ -232,7 +265,8 @@ def test_run_scoring_job_fails_the_judge_loudly_when_its_provider_is_unconfigure
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """No configured Grok credential must never fall back to Claude — the
-    generation keeps no lyrical_coherence score and the reason is named."""
+    generation keeps no lyrical_coherence score, and the job itself surfaces
+    the failure (status + named reason) instead of ending green (#315)."""
     factory, audio_dir = _seeded_generation(tmp_path)
     with factory() as session:
         set_judge_settings(session, "grok", "grok-4.6")
@@ -258,3 +292,9 @@ def test_run_scoring_job_fails_the_judge_loudly_when_its_provider_is_unconfigure
     with factory() as session:
         stored = session.query(Score).filter_by(generation_id="g1").one()
         assert "lyrical_coherence" not in stored.value
+
+    with factory() as session:
+        job = session.query(Job).filter_by(id="j-score").one()
+        assert job.status == "partial"
+        assert job.error_type == "judge_error"
+        assert "grok" in job.error

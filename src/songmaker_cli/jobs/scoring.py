@@ -22,6 +22,7 @@ from songmaker_cli.scoring.lyrical_coherence import (
     CoherenceJudgeConfig,
     judge_lyrical_coherence,
 )
+from songmaker_cli.scoring.models import ScorerOutcome, SongScores
 from songmaker_cli.scoring.pipeline import PipelineConfig
 from songmaker_cli.scoring.registry import CHILD_SCORER_NAMES, LYRICAL_COHERENCE_SCORER
 from songmaker_cli.settings import get_settings
@@ -42,6 +43,22 @@ def _split_by_host(scorers: list[str] | None) -> tuple[list[str] | None, bool]:
         [name for name in scorers if name in CHILD_SCORER_NAMES],
         LYRICAL_COHERENCE_SCORER in scorers,
     )
+
+
+def _judge_failure_reason(scores: SongScores) -> str | None:
+    """Why the lyrical-coherence judge itself failed this run, if it did.
+
+    Never for a legitimate skip (no lyrics, no transcript) or a timeout —
+    both already have their own outcome — only for the judge call actually
+    failing, e.g. its configured provider has no credential. A scorer's fate
+    is normally data (``run_scorer`` never raises), but an unconfigured
+    judge provider is a setup problem, not noise in one run, so it must not
+    leave the job looking green.
+    """
+    for run in scores.runs:
+        if run.scorer == LYRICAL_COHERENCE_SCORER and run.outcome is ScorerOutcome.FAILED:
+            return run.detail
+    return None
 
 
 def run_scoring_job(
@@ -140,6 +157,7 @@ def run_scoring_job(
                 model=resolved_judge_model,
                 timeout=settings.scorer_timeout_seconds,
             ))
+        judge_failure = _judge_failure_reason(song_scores) if judge_coherence else None
 
         scores_dict = song_scores.to_dict()
 
@@ -173,7 +191,14 @@ def run_scoring_job(
                 job_id,
             )
             scorer.recycle()
-        _update_job(db_factory, job_id, JobStatus.COMPLETED, progress=1.0)
+        if judge_failure is not None:
+            _update_job(
+                db_factory, job_id, JobStatus.PARTIAL, progress=1.0,
+                error=f"Lyrical coherence judge failed: {judge_failure}",
+                error_type="judge_error",
+            )
+        else:
+            _update_job(db_factory, job_id, JobStatus.COMPLETED, progress=1.0)
 
     except TimeoutError as exc:
         log.error("Scoring job timed out: %s", exc)

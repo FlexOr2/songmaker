@@ -162,10 +162,12 @@ COWRITER_SUMMARY_TAG = "conversation_summary"
 COWRITER_MAX_SUMMARY_CHARS = 12_000
 
 # Owned solely by the legacy `/settings/claude-models` endpoint and the dead
-# chat_api.py co-writer (chat_model), plus that endpoint's now-orphaned
-# scoring_model field — real provider-neutral scoring (#315) reads
-# judge_provider/judge_model instead and the co-writer reads its live catalog
-# (cowriter/catalog.py). Retire this list with chat_api.py's cleanup.
+# chat_api.py co-writer (chat_model). scoring_model is not orphaned: it is
+# the Claude judge's fallback until a judge_provider/judge_model pair is
+# configured (#315, get_judge_model()) — once that pair exists it takes over
+# and scoring_model has no further effect. The co-writer reads its live
+# catalog instead (cowriter/catalog.py). Retire this list with chat_api.py's
+# cleanup.
 MODEL_ALLOWED_CLAUDE = frozenset({
     "claude-opus-4-6",
     "claude-sonnet-4-6",

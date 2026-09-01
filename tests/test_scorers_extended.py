@@ -749,6 +749,23 @@ def test_judge_uses_the_model_from_its_config_not_a_hardcoded_default() -> None:
     assert mock_call_claude.call_args.kwargs["model"] == "test-model"
 
 
+def test_judge_claude_call_gets_its_credential_from_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The Claude path still resolves its credential through Settings
+    (#315), not something the adapter invents — ``call_claude`` must always
+    receive the configured key explicitly rather than pick one up itself."""
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "settings-key")
+    from songmaker_cli.settings import get_settings
+    get_settings.cache_clear()
+
+    with _claude_answers('{"score": 7, "issues": [], "summary": "ok"}') as mock_call_claude:
+        _judge(_child_result("hello world"), SongMeta(prompt="test", lyrics=_LYRICS))
+
+    assert mock_call_claude.call_args.kwargs["api_key"] == "settings-key"
+    get_settings.cache_clear()
+
+
 def test_judge_routes_to_the_configured_provider_and_no_other(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

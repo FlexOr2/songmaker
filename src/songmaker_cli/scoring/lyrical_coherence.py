@@ -138,6 +138,7 @@ def _judge(
     )
     response_text = call_provider_once(
         provider=config.provider, model=config.model, prompt=prompt,
+        timeout=config.timeout,
     )
     log.debug("Judge response: %d chars", len(response_text))
     data = parse_json_response(response_text)

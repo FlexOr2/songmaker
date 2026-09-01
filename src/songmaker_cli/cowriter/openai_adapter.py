@@ -156,13 +156,15 @@ def call_openai_compatible_once(
     api_key: str,
     model: str,
     prompt: str,
+    timeout: int,
     system: str | None = None,
 ) -> str:
     """Synchronous, tool-free, single-turn completion.
 
     Used by the lyrical-coherence judge (#315), which needs one verdict, not
     the tool-using multi-round chat ``stream_openai_compatible_turn`` gives
-    the co-writer.
+    the co-writer — so it runs under the judge's own budget, not the
+    co-writer's much longer session timeout.
     """
     messages: list[dict[str, str]] = []
     if system:
@@ -176,7 +178,7 @@ def call_openai_compatible_once(
                 "Content-Type": "application/json",
             },
             json={"model": model, "messages": messages},
-            timeout=COWRITER_CLI_TIMEOUT_SECONDS,
+            timeout=timeout,
         )
     except httpx.HTTPError as exc:
         raise ProviderUnavailableError(

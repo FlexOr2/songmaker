@@ -267,10 +267,17 @@ def get_judge_model(session: Session, provider: str) -> str:
     """Return the configured judge model: DB row override, or — on the
     default provider — the pre-existing scoring-model setting, so a musician
     who never touches the new judge settings keeps today's behavior (#315).
+
+    The stored model only counts when it was set for this same ``provider``
+    — ``set_judge_settings`` writes both together, but the two are still
+    separate rows, so a stored model left over from a different provider (or
+    with no provider ever stored) is treated as unset rather than handed to
+    a provider it was never configured for.
     """
-    stored = _get_claude_model_row(session, SETTING_JUDGE_MODEL)
-    if stored:
-        return stored
+    stored_provider = _get_claude_model_row(session, SETTING_JUDGE_PROVIDER)
+    stored_model = _get_claude_model_row(session, SETTING_JUDGE_MODEL)
+    if stored_model and stored_provider == provider:
+        return stored_model
     if provider == "claude":
         return get_claude_scoring_model(session)
     return ""

@@ -66,14 +66,15 @@ async def stream_cowriter_turn(
 
 
 def call_provider_once(
-    *, provider: str, model: str, prompt: str, system: str | None = None,
+    *, provider: str, model: str, prompt: str, timeout: int, system: str | None = None,
 ) -> str:
     """One-shot completion from the selected provider — no tools, no session,
     no chat history.
 
     Used by the lyrical-coherence judge (#315), which needs a single verdict
     rather than the co-writer's multi-turn tool-using chat that
-    ``stream_cowriter_turn`` gives.
+    ``stream_cowriter_turn`` gives, and runs under its own (much shorter)
+    time budget rather than the co-writer's session timeout.
     """
     if provider not in COWRITER_PROVIDERS:
         raise ProviderUnavailableError(
@@ -93,7 +94,7 @@ def call_provider_once(
         api_url = COWRITER_OPENAI_CHAT_URL
     return call_openai_compatible_once(
         provider=provider, api_url=api_url, api_key=api_key, model=model,
-        prompt=prompt, system=system,
+        prompt=prompt, timeout=timeout, system=system,
     )
 
 
