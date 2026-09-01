@@ -27,6 +27,20 @@ const SONG_TITLES = ['Opening Move', 'Second Wind', 'Closing Time'] as const;
 // previous local run left behind, so their titles carry a per-run marker.
 const ALBUM_TITLE_PREFIX = 'E2E Album';
 const PLAYLIST_TITLE_PREFIX = 'E2E Playlist';
+// A second, sibling album: the rail's one-open-album rule (#323) and its
+// real CSS visibility (#326) only show up with two albums that can each be
+// opened in turn. No take is imported for it -- the rail only needs the
+// song rows to exist, not a playable generation.
+const RAIL_ALBUM_TITLE_PREFIX = 'E2E Rail Album';
+const RAIL_ALBUM_SONG_TITLES = ['Rail Echo', 'Rail Drift'] as const;
+// Enough closed rows to make the rail's own LIBRARY+PLAYLISTS scroll region
+// taller than the viewport, so the Settings/user-row pin promise (ruled in
+// #302) can be measured by scrolling the rail and checking where Settings
+// actually renders -- not merely asserted from the CSS class structure.
+// Deliberately songless: a closed album row costs one cheap POST each and
+// never needs to be expanded by the pin test.
+const RAIL_FILLER_ALBUM_TITLE_PREFIX = 'E2E Rail Filler';
+const RAIL_FILLER_ALBUM_COUNT = 30;
 
 function runMarker(): string {
 	return Date.now().toString(36);
@@ -49,6 +63,10 @@ export interface SeededLibrary {
 	playlistTakes: SeededTake[];
 	/** Row label of a reimported take, which carries no version. */
 	takeLabel: string;
+	/** A sibling album, open in the rail beside `albumTitle` -- the rail's one-open-album rule. */
+	secondAlbumTitle: string;
+	/** One of the second album's own songs, for the visibility assertion. */
+	secondAlbumSongTitle: string;
 }
 
 /** Seeded per attempt, because the flow reorders and prunes it. */
@@ -158,11 +176,34 @@ export async function seedLibrary(api: APIRequestContext): Promise<SeededLibrary
 
 	const share = await seed.postJson<ShareLink>(`/api/albums/${album.id}/share`, {});
 
+	const secondAlbumTitle = `${RAIL_ALBUM_TITLE_PREFIX} ${runMarker()}`;
+	const secondAlbum = await seed.postJson<CreatedResource>('/api/albums', {
+		title: secondAlbumTitle,
+		artist: ALBUM_ARTIST
+	});
+	for (const title of RAIL_ALBUM_SONG_TITLES) {
+		await seed.postJson<CreatedResource>('/api/songs', {
+			title,
+			album_id: secondAlbum.id,
+			lyrics: `${title} — seeded lyrics`,
+			prompt: 'calm test tone'
+		});
+	}
+
+	for (let i = 0; i < RAIL_FILLER_ALBUM_COUNT; i += 1) {
+		await seed.postJson<CreatedResource>('/api/albums', {
+			title: `${RAIL_FILLER_ALBUM_TITLE_PREFIX} ${runMarker()}-${i}`,
+			artist: ALBUM_ARTIST
+		});
+	}
+
 	return {
 		albumTitle,
 		albumId: album.id,
 		albumShareUrl: `${BASE_URL}/share/${share.share_slug}`,
 		pickedSongTitle,
+		secondAlbumTitle,
+		secondAlbumSongTitle: RAIL_ALBUM_SONG_TITLES[0],
 		playlistTakes: playlistSongTitles.map((songTitle) => ({
 			songTitle,
 			takeId: takeId(takeBySongTitle, songTitle)

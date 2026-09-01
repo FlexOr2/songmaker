@@ -6,11 +6,11 @@ tests keep missing those; `.github/workflows/e2e.yml` runs these on every PR.
 
 ## What runs
 
-| File                       | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                             |
-| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
-| `library.spec.ts`          | Wall → album → play the pick → judge a take → add it to a playlist → reorder and prune the playlist → play and judge a playlist row → shuffle → open the public album link logged out                                                                                                                                                                                                                                                                              |
-| `album-address.spec.ts`    | An album address pasted into a tab that knows nothing else → open a track under its own song address → Back → Forward, with the shell standing throughout (issue #269); a song address pasted into a tab that knows nothing else, on its own (issue #275); a take address pasted into a tab that knows nothing else, on its own (issue #281); a legacy `/?song=<uuid>` bookmark redirects onto the song address in place, and Back skips the old form (issue #284) |
-| `playlist-address.spec.ts` | A playlist address pasted into a tab that knows nothing else, on its own, and an unknown playlist slug states the address names nothing rather than redirecting away (issue #286) — the last new address of #265's chain, a sibling of `/` rather than nested under `/album/<slug>`                                                                                                                                                                                |
+| File                       | Covers                                                                                                                                                                                                                                                                                                                                                                                                                                                                                                 |
+| -------------------------- | ------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------ |
+| `library.spec.ts`          | Wall → album → play the pick → judge a take → add it to a playlist → reorder and prune the playlist → play and judge a playlist row → shuffle → open the public album link logged out. A second test walks the rail itself (issue #326): a playlist track click, an album row's label and chevron (on-demand load, no navigation, the one-open-album rule as real CSS visibility, not an attribute), the LIBRARY group's own title, and the Settings/user-row pin promise proven by actually scrolling |
+| `album-address.spec.ts`    | An album address pasted into a tab that knows nothing else → open a track under its own song address → Back → Forward, with the shell standing throughout (issue #269); a song address pasted into a tab that knows nothing else, on its own (issue #275); a take address pasted into a tab that knows nothing else, on its own (issue #281); a legacy `/?song=<uuid>` bookmark redirects onto the song address in place, and Back skips the old form (issue #284)                                     |
+| `playlist-address.spec.ts` | A playlist address pasted into a tab that knows nothing else, on its own, and an unknown playlist slug states the address names nothing rather than redirecting away (issue #286) — the last new address of #265's chain, a sibling of `/` rather than nested under `/album/<slug>`                                                                                                                                                                                                                    |
 
 `album-address.spec.ts` and `playlist-address.spec.ts` run on **desktop
 only**: what they pin is the router's behaviour across an address that
@@ -49,7 +49,12 @@ directly; everything a flow asserts, it clicks.
 
 The seed builds one album with three songs, a real take per song imported from
 `fixtures/take.mp3` via `POST /api/songs/{id}/reimport`, one pick, a playlist
-holding two of those takes, and a public link for the album.
+holding two of those takes, and a public link for the album — plus a second,
+songs-only album for the rail's one-open-album proof and enough filler albums
+(`RAIL_FILLER_ALBUM_COUNT` in `seed.ts`) to overflow the rail's own scroll
+region for the Settings pin promise. The filler albums cost nothing against
+the per-flow `/api` budgets below: seeding goes through the `request` API
+context, never the page a flow's `FlowGuard` listens on.
 
 `fixtures/take.mp3` is a 3-second 440 Hz tone, mono, 32 kbps (~12 KB), and
 Chromium plays it: `canPlayType('audio/mpeg')` answers `probably`. Regenerate
@@ -67,8 +72,13 @@ browser console error, and on any uncaught page exception. It also counts what
 the flow costs the API and holds it under a named budget.
 
 **The budget is a ceiling, not a knob.** Each flow has its own, measured on a
-green run and carrying headroom: the library flow measures 26 `/api` requests
-per shell against a budget of 32, `album-address.spec.ts` carries four —
+green run and carrying headroom. The library flow's and the rail flow's own
+numbers live in `LIBRARY_FLOW_API_REQUEST_BUDGET` and
+`RAIL_FLOW_API_REQUEST_BUDGET` (`helpers.ts`) — that comment is the one place
+the measured count is written down; this file and `docs/testing.md` point
+there rather than restate it, which is exactly how the library flow's number
+drifted into three different values before a test audit caught it (issue
+#326). `album-address.spec.ts` carries four —
 22 for the cold album open, one-step track click and Back/Forward, 16 for a
 standalone cold song open, 16 for a standalone cold take open, 15 for the
 legacy `/?song=` bookmark redirect (issue #284, two full cold page loads: a
@@ -85,10 +95,11 @@ round trips is a regression — find the extra requests instead of raising the
 number. The measured count is printed on every run.
 
 Measured together on a clean isolated stack (one run, both projects, nothing
-else hitting it): the full suite costs 116 `/api` requests on **desktop**
-(all four album-address tests, both playlist-address tests, and the library
-flow) and 26 on **mobile** (`library.spec.ts` only — the address specs are
-desktop-only, see above) — 142 total, comfortably under the CI stack's
+else hitting it): the full suite costs 158 `/api` requests on **desktop**
+(all four album-address tests, both playlist-address tests, and both
+`library.spec.ts` tests) and 59 on **mobile** (both `library.spec.ts` tests
+only — the address specs are desktop-only, see above) — 217 total, comfortably
+under the CI stack's
 `IP_RATE_LIMIT: "300"` override (`docker-compose.ci.yml`) for one IP's
 60-second window. Re-running the suite repeatedly against the same stack
 inside that window is cumulative, not reset per run — see "Running it
@@ -133,7 +144,24 @@ already did.
 
 Selectors are roles and accessible names, imported from `src/lib/constants.ts`
 — never `data-testid`. A flow that cannot find an element by its accessible
-name has found an accessibility defect.
+name has found an accessibility defect. Two narrow exceptions this suite has
+needed so far, both structural rather than test-only hooks: asserting
+`.settings-sidebar` is gone (the old second column has no accessible name to
+assert the absence of) and `library.spec.ts`'s own `railAlbumRow` (every
+album row's chevron shares one accessible name, `RAIL_ALBUM_DISCLOSE_LABEL`
+— the row must be narrowed by its own title text first, since the rail never
+nests one navigation landmark per album to scope by role alone).
+
+A row collapsed by the `grid-template-rows: 0fr` + `overflow: hidden` trick
+(`.rail-group-panel`, `.album-songs`, ...) is not provable with
+`toBeVisible()`/`toBeHidden()`: a descendant clipped by that zero-height
+ancestor still reports its own natural bounding box, so Playwright considers
+it visible regardless of the ancestor's collapse (found while building the
+rail's own e2e coverage, issue #326 — see `expectRailRowExpanded` /
+`expectRailRowCollapsed` in `library.spec.ts`). `toBeInViewport()` uses the
+browser's own IntersectionObserver, which does resolve clipping through
+ancestors, and is the one assertion that actually distinguishes collapsed
+from expanded for this pattern.
 
 ## Running it locally
 
