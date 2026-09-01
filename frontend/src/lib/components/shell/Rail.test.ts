@@ -107,7 +107,12 @@ describe('Rail', () => {
 		librarySurface.set('detail');
 		const target = await render();
 		const brand = requireElement<HTMLButtonElement>(target, '.brand');
-		expect(brand.getAttribute('aria-label')).toBe('Library');
+		// Named after what it is (the wordmark), not what it does -- GitHub's own
+		// logo pattern -- so it never collides with the LIBRARY group's own
+		// "Library" name in an accessible-name lookup (both live in the same
+		// mobile drawer).
+		expect(brand.hasAttribute('aria-label')).toBe(false);
+		expect(brand.textContent).toBe('Hallucinai');
 		brand.click();
 		await tick();
 		await Promise.resolve();

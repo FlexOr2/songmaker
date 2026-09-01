@@ -9,6 +9,7 @@
 
 import { expect, test, type Locator, type Page } from '@playwright/test';
 import {
+	APP_NAME,
 	collectionRowPlayLabel,
 	EDITOR_TAB_TAKES_LABEL,
 	EDITOR_TAB_WRITE_LABEL,
@@ -174,9 +175,11 @@ async function openLibraryWall(page: Page, shell: Shell): Promise<void> {
 	await page.getByRole('button', { name: RAIL_DRAWER_OPEN_LABEL }).click();
 	const drawer = page.getByRole('dialog', { name: RAIL_DRAWER_LABEL });
 	// The LIBRARY rail group (#308) is a disclosure, not a link -- its own
-	// title does not navigate yet (a later slice). The wordmark above it is
-	// still the rail's one library shortcut, named "Library" and nothing else.
-	await drawer.getByRole('button', { name: RAIL_LIBRARY_LABEL, exact: true }).click();
+	// title does not navigate yet (a later slice), and it shares the drawer
+	// with the wordmark, so "Library" alone is no longer unique there. The
+	// wordmark is named after what it is, not what it does (GitHub's own logo
+	// pattern) -- it is still the rail's one library shortcut.
+	await drawer.getByRole('button', { name: APP_NAME, exact: true }).click();
 	await expect(drawer).toBeHidden();
 }
 

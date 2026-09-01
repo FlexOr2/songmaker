@@ -1,6 +1,6 @@
 <script lang="ts">
 	import { openLibraryWall } from '$lib/stores/navigation';
-	import { APP_NAME, RAIL_LIBRARY_LABEL, RAIL_NAV_LABEL } from '$lib/constants';
+	import { APP_NAME, RAIL_NAV_LABEL } from '$lib/constants';
 	import RailLibraryGroup from './RailLibraryGroup.svelte';
 	import RailSettings from './RailSettings.svelte';
 	import UserRow from './UserRow.svelte';
@@ -10,12 +10,8 @@
 
 <nav class="rail" aria-label={RAIL_NAV_LABEL}>
 	<div class="rail-top">
-		<button
-			type="button"
-			class="brand"
-			onclick={() => openLibraryWall()}
-			aria-label={RAIL_LIBRARY_LABEL}
-			data-text={APP_NAME}>{APP_NAME}</button
+		<button type="button" class="brand" onclick={() => openLibraryWall()} data-text={APP_NAME}
+			>{APP_NAME}</button
 		>
 	</div>
 
