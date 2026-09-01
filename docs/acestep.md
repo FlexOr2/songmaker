@@ -241,6 +241,12 @@ sudo reboot
 docker compose ps -a                                # confirm: State = running, no manual `docker start` needed
 ```
 
+### Auto-deploy and generation jobs (issue #298)
+
+`scripts/auto-deploy.sh` (a systemd timer, see [Auto-Deploy](architecture.md#auto-deploy) in `docs/architecture.md` for the full mechanism) redeploys the stack on every merge to `main` — but never mid-generation. Before pulling or touching containers it checks `jobs.status IN ('queued', 'running')`; any active music or scoring job defers that tick, because a `docker compose up --build` recreates the acestep-worker and music-worker containers, which kills whatever ACE-Step subprocess call is in flight (incident 2026-08-30 18:31, a redeploy mid-generation dropped every active stream). The next tick (~2 minutes later) tries again once the queue drains — same "the next tick retries" tolerance this doc already gives migration lock_timeout failures like `c9d4a2f18e37`.
+
+If the database itself is unreachable when the guard runs, auto-deploy fails **closed**: it refuses to deploy rather than assume the queue is empty.
+
 ### pin_model semantics
 
 The cache is normally LRU: when a new `load_model` would exceed the VRAM budget, the least-recently-used loaded model is evicted to make room. Capacity is planned against `max(measured VRAM used, sum of declared sizes of what's currently loaded)`, not the declared-size table alone: ACE-Step loads lazily, so a model that hasn't served its first generation yet can measure almost nothing on NVML even though it is genuinely resident, and without that floor the cache would read it as free and overbook the GPU. The full eviction plan — which models, in what order — is computed and checked against the budget before anything is actually unloaded; a load the plan can't satisfy is rejected outright, with nothing destroyed. **Pinning** marks a loaded model as exempt from eviction. Use it when a single-GPU multi-user deployment has a "must always be loaded" preference (e.g. the operator wants `sft` to stay resident regardless of how many other modes get loaded).

@@ -900,3 +900,18 @@ Health endpoint at `/health` reports:
 DB and audio must be backed up and restored together — one without the other leaves orphaned records or unreachable files.
 
 Album covers live as files on that same audio volume (`covers/{album_id}/` for original plus card and detail derivatives). Song covers live beside them at `song-covers/{song_id}/` — not under `covers/songs/`, because an album slug can be `songs`. They are not stored as Base64 in PostgreSQL; the album or song row only stores `cover_key`. Authenticated song JSON advertises `cover` only from that song's key; display inheritance of album art is a UI concern. Backup/restore of the audio volume therefore includes covers with no extra volume.
+
+## Auto-Deploy
+
+A merge to `main` goes live without a manual `git pull && docker compose up` (issue #298). The host runs a **pull-based systemd timer** — `scripts/songmaker-autodeploy.timer` fires `scripts/songmaker-autodeploy.service` (`scripts/auto-deploy.sh`) every ~2 minutes — deliberately not a self-hosted CI runner (a permanent externally-triggered agent on the host) and not a webhook (a new inbound endpoint behind the tunnel). CI is green on every merge by process, so "origin/main moved" already means deployable; the script does not re-run tests.
+
+Each tick, in order, and non-blocking (`flock -n`, a run already in flight makes the next tick exit 0 silently):
+
+1. **Up to date?** `git fetch origin main`; if local `HEAD` already equals `origin/main`, exit 0 — logged at debug priority only, so this ~2-minute steady-state tick doesn't spam an unfiltered journal (`journalctl -t songmaker-autodeploy -p info` stays quiet on every ordinary tick).
+2. **Safe to touch?** A dirty working tree or a diverged (non-fast-forwardable) local `main` stops here with a loud (`prio=err`) journal line and touches nothing — the host's checkout is also the operator's manual workspace.
+3. **Idle?** Before any destructive step, a job guard checks `jobs.status IN ('queued', 'running')` via `docker compose exec postgres psql`. Active jobs defer the deploy to the next tick (a redeploy mid-generation kills the take — incident 2026-08-30 18:31). An unreachable database fails **closed** (no deploy), not open.
+4. **Deploy.** `git pull --ff-only` then `docker compose up -d --build --wait` — no `timeout` wrapper (see the Docker section of `CLAUDE.md`; a cold-cache rebuild legitimately takes 8-15 minutes).
+
+A failed deploy (migration lock, build error) is not treated as a crisis on its own — the next tick just retries. A state file counts consecutive failures; only the Nth in a row (default 3) escalates to an emphatic `prio=err` "needs human attention" line. A success resets the counter and logs the deployed SHA.
+
+Install once with `sudo ./scripts/install-autodeploy.sh` (root-guarded, idempotent, derives `WorkingDirectory`/`User` from the invoking checkout and operator like `scripts/install-autostart.sh`). Unlike the boot-autostart unit, this installer enables **and starts** the timer immediately — arming a ~2-minute schedule is harmless because every tick goes through the guards above before touching the stack, unlike starting `songmaker.service` directly (which unconditionally runs `docker compose up -d`).

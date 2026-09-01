@@ -1,0 +1,28 @@
+[Unit]
+Description=Songmaker pull-based auto-deploy tick (issue #298)
+After=docker.service
+Requires=docker.service
+StartLimitIntervalSec=300
+StartLimitBurst=10
+
+[Service]
+Type=oneshot
+# WorkingDirectory, ExecStart, and User below are placeholders (this repo's
+# canonical checkout/owner), kept concrete only so `systemd-analyze verify`
+# can check absolute paths. scripts/install-autodeploy.sh always overwrites
+# all three with the real project root and invoking user at install time —
+# copying this file by hand instead of running that script inherits these
+# values as-is, which is very likely wrong for a different checkout or
+# operator.
+WorkingDirectory=/home/felix-hummert/git/songmaker
+ExecStart=/home/felix-hummert/git/songmaker/scripts/auto-deploy.sh
+User=felix-hummert
+Group=docker
+# No TimeoutStartSec override: a cold-cache `docker compose up --build` can
+# legitimately take 8-15 minutes (see CLAUDE.md — never wrap compose in a
+# timeout). The systemd default TimeoutStartSec (90s) would kill it mid-build
+# if not disabled here.
+TimeoutStartSec=infinity
+
+[Install]
+WantedBy=multi-user.target
