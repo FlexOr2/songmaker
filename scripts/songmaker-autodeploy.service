@@ -20,12 +20,19 @@ User=felix-hummert
 # Forcing Group=docker as the *primary* group would make `git pull` write
 # new files with group docker instead of the owner's usual group.
 #
-# RuntimeDirectory creates /run/songmaker-autodeploy (cleared on reboot) for
-# the flock lock file; StateDirectory creates /var/lib/songmaker-autodeploy
-# (survives reboots) for the consecutive-setback counter. auto-deploy.sh
-# reads both via $RUNTIME_DIRECTORY/$STATE_DIRECTORY, falling back to
-# /var/tmp only for a manual run outside systemd.
-RuntimeDirectory=songmaker-autodeploy
+# StateDirectory creates /var/lib/songmaker-autodeploy (survives reboots)
+# for the consecutive-failure counter, the consecutive-busy-deferral
+# counter, and the deployed.sha marker. auto-deploy.sh reads all three via
+# $STATE_DIRECTORY, falling back to a path inside the checkout itself
+# (.git/songmaker-autodeploy.*) for a manual run outside systemd — not
+# /var/tmp, so a manual run shares the same state a unit run would have
+# used instead of starting fresh every time.
+#
+# No RuntimeDirectory: the flock lock file lives at a fixed path inside the
+# checkout (.git/songmaker-autodeploy.lock, see auto-deploy.sh), not under a
+# unit-managed runtime dir. A unit-scoped RuntimeDirectory would give the
+# systemd-run tick and a manual shell run of this same script two different
+# lock inodes — no mutual exclusion between them at all.
 StateDirectory=songmaker-autodeploy
 # No TimeoutStartSec override: a cold-cache `docker compose build` can
 # legitimately take 8-15 minutes (see CLAUDE.md — never wrap compose in a

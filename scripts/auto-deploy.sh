@@ -18,25 +18,58 @@
 #     take. A build-only tick that finds jobs active on the recheck defers
 #     to the next tick, which finds the image already built and is back at
 #     the recheck within seconds.
+#   - "Up to date" is judged against what actually got recreated, not just
+#     what got pulled. A `deployed.sha` file in the state directory is
+#     written ONLY by `record_success`, right after `compose up -d --wait`
+#     succeeds. Up-to-date means `HEAD == origin/$DEPLOY_BRANCH` AND
+#     `deployed.sha == HEAD` — not `HEAD == origin/$DEPLOY_BRANCH` alone.
+#     Without this, a tick that pulled and built but deferred the recreate
+#     (jobs still active, or a build/up failure) already sits on the new
+#     HEAD; every following tick then saw "local == remote" and treated the
+#     stale running containers as "nothing to deploy" forever, silently
+#     resetting the setback counter along the way. The first tick that ever
+#     finds no `deployed.sha` (fresh install) adopts the current HEAD as
+#     already-deployed instead of deploying — the operator chose that to
+#     keep `install-autodeploy.sh`'s `enable --now` harmless; the
+#     consequence is that a checkout installed while behind main stays on
+#     the stale stack until the operator deploys it once by hand (see
+#     docs/architecture.md).
 #   - Migrations occasionally abort loudly on lock_timeout (see the
 #     c9d4a2f18e37 unique-slug-index migration). That is not fatal — the
 #     next tick retries the same pull+deploy. A tick that could not deploy
-#     despite main having moved (build/pull/compose failure, a deferred job
-#     check, or a fail-closed DB check) increments a setback counter; only N
-#     consecutive setbacks escalate to a prio=err journal line worth paging
-#     on. A tick that deploys, or that finds nothing to deploy, resets it.
+#     despite main having moved (a hard refusal, or a pull/build/up
+#     failure) increments a consecutive-FAILURE counter; only N in a row
+#     escalates to a prio=err journal line worth paging on. A tick that
+#     merely defers because jobs are active increments a separate
+#     consecutive-BUSY counter with a much higher threshold and a quieter
+#     prio=warning line — a normal generation queue or an hours-long
+#     lora_training job legitimately keeps jobs active for a long time, and
+#     that is not the same emergency as a deploy that keeps failing outright
+#     (see record_failure / record_busy_deferral below). Both counters reset
+#     only on an actual deploy or a genuine "nothing to deploy" tick.
 #   - This host's `.env` and checkout are also the operator's manual
 #     workspace. A dirty tree, a diverged local main, or HEAD sitting on a
 #     branch other than the deploy branch are left completely untouched —
 #     the script only ever fast-forwards a clean checkout of the deploy
-#     branch.
+#     branch. The up-to-date shortcut (including the deployed.sha check)
+#     runs BEFORE this branch guard: an operator sitting on an experiment
+#     branch with nothing actually pending to deploy must not get a loud
+#     err line every ~2 minutes for no reason (see step ordering below).
 #
 # Per CLAUDE.md: NEVER wrap `docker compose up --build --wait` in `timeout`.
 # A cold-cache rebuild can take 8-15 minutes; the systemd unit has no
 # TimeoutStartSec override for the same reason. That rule is about the
 # image BUILD, not about the DB round-trip the active-jobs check makes —
 # that one gets its own short `timeout` (see below) so a wedged DB
-# connection can't hang a tick indefinitely.
+# connection can't hang a tick indefinitely. `compose build` and
+# `compose up` both stream straight to this process's stdout/stderr (which
+# systemd journals under the unit) rather than being captured into a
+# variable — a failed build can print far more than a single logger
+# invocation can safely carry as one argument, so only a short log_err line
+# with the exit code goes through `logger`. `log()` itself additionally
+# truncates any payload to ~2000 chars as a second line of defense for
+# every other captured-output log line in this script (git status, pull,
+# fetch, the DB check).
 #
 # All journal lines are tagged "songmaker-autodeploy" (`journalctl -t
 # songmaker-autodeploy`). The steady-state "nothing to do" tick (the common
@@ -45,7 +78,11 @@
 # default), but any priority-restricted view (e.g. `journalctl -t
 # songmaker-autodeploy -p info`, or a dashboard/alerting rule that only
 # watches info-and-above) stays quiet, and only real events (deferred,
-# refused, deployed, failed) surface there.
+# refused, deployed, failed) surface there. If a tick dies before it ever
+# reaches `logger` (e.g. the shell itself fails to start), the tag-filtered
+# view is empty by construction — `journalctl -u
+# songmaker-autodeploy.service -n 20` (unit-filtered, not tag-filtered)
+# still shows it.
 #
 # REPO_ROOT is derived from where this script itself lives (same pattern as
 # install-autostart.sh's SCRIPT_DIR/PROJECT_ROOT derivation), never hardcoded
@@ -54,12 +91,23 @@
 # WorkingDirectory/User/ExecStart into the systemd unit, exactly like
 # install-autostart.sh does for songmaker.service.
 #
-# LOCK_FILE and FAILURE_COUNT_FILE default to the systemd-managed
-# RuntimeDirectory/StateDirectory (see songmaker-autodeploy.service) so both
-# survive reboots (state) or are cleaned automatically (lock) without this
-# script owning that lifecycle. The /var/tmp path is only a fallback for a
-# manual run outside systemd (e.g. testing from a shell), and the
-# SONGMAKER_AUTODEPLOY_* env vars remain the explicit override for that case.
+# LOCK_FILE lives at a fixed path inside the checkout itself
+# ($REPO_ROOT/.git/songmaker-autodeploy.lock), not under systemd's
+# RuntimeDirectory. A unit-managed RuntimeDirectory gives the systemd-run
+# tick and a manual shell run of this same script two different lock
+# inodes — no mutual exclusion at all between them, which defeats the whole
+# point of the lock. The checkout is the one thing every caller (systemd
+# unit, manual invocation, a second worktree pointed at a different
+# checkout) already agrees on, so the lock lives there instead.
+#
+# FAILURE_COUNT_FILE, BUSY_COUNT_FILE, and DEPLOYED_SHA_FILE default to
+# systemd's StateDirectory (survives reboots) when running under the unit,
+# and fall back to the SAME $REPO_ROOT/.git-relative path the lock file
+# uses (not /var/tmp) when STATE_DIRECTORY is unset — a manual run outside
+# systemd then shares exactly the state a unit run would have used, instead
+# of drifting to a throwaway path that starts every manual invocation back
+# at "no deployed.sha, no failure history". The SONGMAKER_AUTODEPLOY_* env
+# vars remain the explicit override for tests and unusual setups.
 
 set -euo pipefail
 
@@ -67,10 +115,15 @@ SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 
 LOG_TAG="songmaker-autodeploy"
+LOG_PAYLOAD_MAX_CHARS=2000
 DEPLOY_BRANCH="${SONGMAKER_AUTODEPLOY_BRANCH:-main}"
-LOCK_FILE="${SONGMAKER_AUTODEPLOY_LOCK_FILE:-${RUNTIME_DIRECTORY:-/var/tmp}/songmaker-autodeploy.lock}"
-FAILURE_COUNT_FILE="${SONGMAKER_AUTODEPLOY_FAILURE_COUNT_FILE:-${STATE_DIRECTORY:-/var/tmp}/songmaker-autodeploy.failcount}"
+STATE_DIR_FALLBACK="$REPO_ROOT/.git"
+LOCK_FILE="${SONGMAKER_AUTODEPLOY_LOCK_FILE:-$STATE_DIR_FALLBACK/songmaker-autodeploy.lock}"
+FAILURE_COUNT_FILE="${SONGMAKER_AUTODEPLOY_FAILURE_COUNT_FILE:-${STATE_DIRECTORY:-$STATE_DIR_FALLBACK}/songmaker-autodeploy.failcount}"
+BUSY_COUNT_FILE="${SONGMAKER_AUTODEPLOY_BUSY_COUNT_FILE:-${STATE_DIRECTORY:-$STATE_DIR_FALLBACK}/songmaker-autodeploy.busycount}"
+DEPLOYED_SHA_FILE="${SONGMAKER_AUTODEPLOY_DEPLOYED_SHA_FILE:-${STATE_DIRECTORY:-$STATE_DIR_FALLBACK}/songmaker-autodeploy.deployed-sha}"
 FAILURE_ALERT_THRESHOLD="${SONGMAKER_AUTODEPLOY_FAILURE_ALERT_THRESHOLD:-3}"
+BUSY_ALERT_THRESHOLD="${SONGMAKER_AUTODEPLOY_BUSY_ALERT_THRESHOLD:-30}"
 DB_CHECK_TIMEOUT_SECONDS="${SONGMAKER_AUTODEPLOY_DB_CHECK_TIMEOUT_SECONDS:-30}"
 POSTGRES_USER="${POSTGRES_USER:-songmaker}"
 POSTGRES_DB="${POSTGRES_DB:-songmaker}"
@@ -78,10 +131,16 @@ POSTGRES_DB="${POSTGRES_DB:-songmaker}"
 log() {
     local level="$1"
     shift
-    logger -t "$LOG_TAG" -p "user.$level" -- "$*"
+    local message="$*"
+    local original_length=${#message}
+    if ((original_length > LOG_PAYLOAD_MAX_CHARS)); then
+        message="${message:0:$LOG_PAYLOAD_MAX_CHARS}... (truncated from $original_length chars)"
+    fi
+    logger -t "$LOG_TAG" -p "user.$level" -- "$message"
 }
 log_debug() { log debug "$*"; }
 log_info() { log info "$*"; }
+log_warning() { log warning "$*"; }
 log_err() { log err "$*"; }
 
 compose() {
@@ -109,46 +168,73 @@ active_job_count() {
     printf '%s' "$count"
 }
 
-read_failure_count() {
-    if [[ ! -f "$FAILURE_COUNT_FILE" ]]; then
+# Shared reader for both consecutive-tick counters. Guards `cat` itself
+# against set -e (an unreadable file, e.g. a permissions problem, must be
+# treated like a corrupt one — 0 plus a loud line — rather than killing the
+# tick before it can even record anything).
+read_counter() {
+    local file="$1"
+    if [[ ! -f "$file" ]]; then
         printf '0'
         return
     fi
     local count
-    count="$(cat "$FAILURE_COUNT_FILE")"
+    if ! count="$(cat "$file" 2>&1)"; then
+        log_err "cannot read counter file $file ($count) — treating as corrupt, using 0"
+        printf '0' >"$file"
+        printf '0'
+        return
+    fi
     if ! [[ "$count" =~ ^[0-9]+$ ]]; then
-        log_err "failure count file $FAILURE_COUNT_FILE has corrupt content ('$count') — resetting to 0"
-        printf '0' >"$FAILURE_COUNT_FILE"
+        log_err "counter file $file has corrupt content ('$count') — resetting to 0"
+        printf '0' >"$file"
         printf '0'
         return
     fi
     printf '%s' "$count"
 }
 
-reset_setback_count() {
+reset_counters() {
     printf '0' >"$FAILURE_COUNT_FILE"
+    printf '0' >"$BUSY_COUNT_FILE"
 }
 
 record_success() {
     local deployed_sha="$1"
-    reset_setback_count
+    printf '%s' "$deployed_sha" >"$DEPLOYED_SHA_FILE"
+    reset_counters
     log_info "deploy succeeded, now running $deployed_sha"
 }
 
-# Every tick that could not deploy despite $DEPLOY_BRANCH having moved (or,
-# for the branch/dirty/diverged guards, that refused to even look) bumps
-# this counter — a deferral because jobs are active is not itself a crisis,
-# but N of them in a row without ever landing is exactly the "stuck" signal
-# the ALERT line exists for. Only success and "nothing to deploy" reset it.
-record_setback() {
+# A tick that could not deploy at all despite $DEPLOY_BRANCH having moved —
+# a hard refusal (wrong branch, dirty tree, diverged), a fail-closed DB
+# check, or a pull/build/up failure. This is the "something is actually
+# broken" signal: N of these in a row (default 3, ~6 minutes) pages.
+record_failure() {
     local reason="$1"
     local count
-    count="$(read_failure_count)"
+    count="$(read_counter "$FAILURE_COUNT_FILE")"
     count=$((count + 1))
     printf '%s' "$count" >"$FAILURE_COUNT_FILE"
-    log_debug "setback count now $count (this tick: $reason)"
+    log_debug "failure count now $count (this tick: $reason)"
     if [[ "$count" -ge "$FAILURE_ALERT_THRESHOLD" ]]; then
         log_err "ALERT: $count ticks in a row deferred/failed, reason: $reason — auto-deploy is stuck, needs human attention"
+    fi
+}
+
+# A tick deferred only because jobs are active (before or after the build).
+# This is expected behavior under a busy queue or a long-running
+# lora_training job, not a fault — it gets its own, much higher threshold
+# (default 30 ticks, ~1h) and a quieter prio=warning line instead of err.
+record_busy_deferral() {
+    local active_job_count="$1"
+    local count
+    count="$(read_counter "$BUSY_COUNT_FILE")"
+    count=$((count + 1))
+    printf '%s' "$count" >"$BUSY_COUNT_FILE"
+    log_debug "busy-deferral count now $count ($active_job_count jobs active)"
+    if [[ "$count" -ge "$BUSY_ALERT_THRESHOLD" ]]; then
+        log_warning "deploy pending for ~1h, $active_job_count jobs still active"
     fi
 }
 
@@ -162,22 +248,9 @@ if ! flock -n 200; then
     exit 0
 fi
 
-# --- 2. HEAD must be the deploy branch before anything else is inspected —
-# a detached HEAD or an operator experiment branch must never get fast-
-# forwarded onto origin/$DEPLOY_BRANCH.
-if ! CURRENT_BRANCH="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD 2>&1)"; then
-    log_err "HEAD at $REPO_ROOT is not on a branch (detached?) — refusing to deploy, not touching the tree: $CURRENT_BRANCH"
-    record_setback "HEAD not on a branch"
-    exit 1
-fi
-
-if [[ "$CURRENT_BRANCH" != "$DEPLOY_BRANCH" ]]; then
-    log_err "HEAD at $REPO_ROOT is on branch '$CURRENT_BRANCH', not the deploy branch '$DEPLOY_BRANCH' — refusing to deploy, not touching the tree"
-    record_setback "HEAD on branch $CURRENT_BRANCH instead of $DEPLOY_BRANCH"
-    exit 1
-fi
-
-# --- 3. The common case: nothing changed. Cheap, and must stay silent.
+# --- 2. Cheap reads: local HEAD, then fetch, then remote HEAD. Neither
+# depends on which branch is currently checked out (rev-parse HEAD works
+# detached too), so these run before the branch guard.
 if ! LOCAL_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD 2>&1)"; then
     log_err "cannot determine local HEAD in $REPO_ROOT: $LOCAL_HEAD"
     exit 1
@@ -193,78 +266,123 @@ if ! REMOTE_HEAD="$(git -C "$REPO_ROOT" rev-parse "origin/$DEPLOY_BRANCH" 2>&1)"
     exit 1
 fi
 
-if [[ "$LOCAL_HEAD" == "$REMOTE_HEAD" ]]; then
-    reset_setback_count
-    log_debug "already at origin/$DEPLOY_BRANCH ($LOCAL_HEAD) — nothing to deploy"
+# --- 3. Up-to-date shortcut — the common case, and must stay silent. Judged
+# against what is actually RUNNING ($DEPLOYED_SHA_FILE, written only by
+# record_success), not just what is checked out: a tick that pulled/built
+# but deferred the recreate already sits on the new HEAD, so "local ==
+# remote" alone would call that "nothing to deploy" forever. Runs before the
+# branch guard: an operator sitting on an unrelated branch with nothing
+# pending to deploy must not get a loud line every ~2 minutes.
+if [[ ! -f "$DEPLOYED_SHA_FILE" ]]; then
+    printf '%s' "$LOCAL_HEAD" >"$DEPLOYED_SHA_FILE"
+    reset_counters
+    log_info "adopted running state $LOCAL_HEAD (no prior $DEPLOYED_SHA_FILE — first run after install; if the live stack is not actually running this commit, deploy manually once)"
     exit 0
 fi
 
-# --- 4. main moved. Before touching anything, make sure it is safe to.
-# The operator works in this checkout — a dirty tree or a diverged local
-# main is left completely alone.
+if ! DEPLOYED_SHA="$(cat "$DEPLOYED_SHA_FILE" 2>&1)"; then
+    log_err "cannot read $DEPLOYED_SHA_FILE ($DEPLOYED_SHA) — treating deploy state as unknown, will re-verify by deploying"
+    DEPLOYED_SHA=""
+elif ! [[ "$DEPLOYED_SHA" =~ ^[0-9a-f]{40}$ ]]; then
+    log_err "deployed-sha file $DEPLOYED_SHA_FILE has unexpected content ('$DEPLOYED_SHA') — treating deploy state as unknown, will re-verify by deploying"
+    DEPLOYED_SHA=""
+fi
+
+if [[ "$LOCAL_HEAD" == "$REMOTE_HEAD" && "$DEPLOYED_SHA" == "$LOCAL_HEAD" ]]; then
+    reset_counters
+    log_debug "already at origin/$DEPLOY_BRANCH ($LOCAL_HEAD) and deployed — nothing to deploy"
+    exit 0
+fi
+
+# --- 4. On the deploy branch? A detached HEAD or the operator sitting on an
+# experiment branch stops here with a loud (prio=err) journal line and
+# touches nothing — this is now known to matter (something IS pending to
+# deploy, per step 3) before it fires.
+if ! CURRENT_BRANCH="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD 2>&1)"; then
+    log_err "HEAD at $REPO_ROOT is not on a branch (detached?) — refusing to deploy, not touching the tree: $CURRENT_BRANCH"
+    record_failure "HEAD not on a branch"
+    exit 1
+fi
+
+if [[ "$CURRENT_BRANCH" != "$DEPLOY_BRANCH" ]]; then
+    log_err "HEAD at $REPO_ROOT is on branch '$CURRENT_BRANCH', not the deploy branch '$DEPLOY_BRANCH' — refusing to deploy, not touching the tree"
+    record_failure "HEAD on branch $CURRENT_BRANCH instead of $DEPLOY_BRANCH"
+    exit 1
+fi
+
+# --- 5. Safe to touch? A dirty working tree or a diverged (non-fast-
+# forwardable) local main stops here — the host's checkout is also the
+# operator's manual workspace.
 if ! STATUS_OUTPUT="$(git -C "$REPO_ROOT" status --porcelain 2>&1)"; then
     log_err "cannot determine working tree status in $REPO_ROOT: $STATUS_OUTPUT"
-    record_setback "git status failed"
+    record_failure "git status failed"
     exit 1
 fi
 
 if [[ -n "$STATUS_OUTPUT" ]]; then
     log_err "working tree at $REPO_ROOT is dirty — refusing to deploy, not touching it (the operator may be working here)"
-    record_setback "working tree dirty"
+    record_failure "working tree dirty"
     exit 1
 fi
 
 if ! git -C "$REPO_ROOT" merge-base --is-ancestor "$LOCAL_HEAD" "$REMOTE_HEAD"; then
     log_err "local HEAD ($LOCAL_HEAD) has diverged from origin/$DEPLOY_BRANCH ($REMOTE_HEAD) — not fast-forwardable, refusing to deploy, not touching the tree"
-    record_setback "local HEAD diverged from origin/$DEPLOY_BRANCH"
+    record_failure "local HEAD diverged from origin/$DEPLOY_BRANCH"
     exit 1
 fi
 
-# --- 5. Job guard, ahead of the first step that touches the checkout. An
+# --- 6. Job guard, ahead of the first step that touches the checkout. An
 # unreachable DB fails closed: unknown job state is treated as "do not
 # deploy", not as "assume idle".
 if ! ACTIVE_JOB_COUNT="$(active_job_count)"; then
     log_err "cannot reach the database to check for active jobs — refusing to deploy (fail closed): $ACTIVE_JOB_COUNT"
-    record_setback "database unreachable before pull"
+    record_failure "database unreachable before pull"
     exit 1
 fi
 
 if [[ "$ACTIVE_JOB_COUNT" -gt 0 ]]; then
     log_info "deploy deferred, $ACTIVE_JOB_COUNT jobs active"
-    record_setback "$ACTIVE_JOB_COUNT jobs active before pull"
+    record_busy_deferral "$ACTIVE_JOB_COUNT"
     exit 0
 fi
 
-# --- 6. Pull, then build. No timeout around the build (CLAUDE.md) — a
+# --- 7. Pull, then build. No timeout around the build (CLAUDE.md) — a
 # cold-cache rebuild legitimately takes 8-15 minutes. Building does not
 # recreate any running container, so it cannot kill an in-flight job by
-# itself — the recheck in step 7 is what guards the actual recreate.
+# itself — the recheck in step 8 is what guards the actual recreate. Both
+# `git pull` and `compose build` stream straight to this process's own
+# stdout/stderr rather than being captured — a failed build's full output
+# can easily exceed what a single logger argument can carry (see header) —
+# only a short log_err line with the exit code goes through `logger`.
 if ! PULL_OUTPUT="$(git -C "$REPO_ROOT" pull --ff-only origin "$DEPLOY_BRANCH" 2>&1)"; then
     log_err "git pull --ff-only failed in $REPO_ROOT despite passing the fast-forward check: $PULL_OUTPUT"
-    record_setback "git pull failed"
+    record_failure "git pull failed"
     exit 1
 fi
 
-if ! BUILD_OUTPUT="$(compose build 2>&1)"; then
-    log_err "docker compose build failed in $REPO_ROOT: $BUILD_OUTPUT"
-    record_setback "compose build failed"
+if compose build; then
+    :
+else
+    BUILD_EXIT_CODE=$?
+    log_err "docker compose build failed in $REPO_ROOT (exit $BUILD_EXIT_CODE)"
+    record_failure "compose build failed"
     exit 1
 fi
 
-# --- 7. Recheck immediately before the recreate — the only step that can
+# --- 8. Recheck immediately before the recreate — the only step that can
 # kill an in-flight job. This shrinks the unsafe window from the build's
 # 8-15 minutes down to the seconds between this check and `compose up`. A
 # deferral here finds the image already built on the next tick, so the
 # recheck lands within seconds rather than after another full build.
 if ! ACTIVE_JOB_COUNT="$(active_job_count)"; then
     log_err "cannot reach the database to recheck for active jobs after build — refusing to recreate containers (fail closed): $ACTIVE_JOB_COUNT"
-    record_setback "database unreachable after build"
+    record_failure "database unreachable after build"
     exit 1
 fi
 
 if [[ "$ACTIVE_JOB_COUNT" -gt 0 ]]; then
     log_info "deploy deferred after build, $ACTIVE_JOB_COUNT jobs active"
-    record_setback "$ACTIVE_JOB_COUNT jobs active after build"
+    record_busy_deferral "$ACTIVE_JOB_COUNT"
     exit 0
 fi
 
@@ -274,7 +392,7 @@ if compose up -d --wait; then
 else
     COMPOSE_EXIT_CODE=$?
     log_err "docker compose up -d --wait failed in $REPO_ROOT (exit $COMPOSE_EXIT_CODE)"
-    record_setback "compose up failed"
+    record_failure "compose up failed"
 fi
 
 exit "$COMPOSE_EXIT_CODE"

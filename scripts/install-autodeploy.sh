@@ -25,11 +25,15 @@
 # recreate containers and kill an in-flight generation — the operator has to
 # choose that moment deliberately. Starting songmaker-autodeploy.timer only
 # arms a ~2-minute schedule; the first tick it triggers goes through
-# auto-deploy.sh's own guards (deploy-branch check, up-to-date short-circuit,
-# dirty-tree/diverge check, active-jobs check before AND after the build)
-# before it would ever touch the stack. There is
-# no unguarded moment to protect the operator from, so there is no reason to
-# make them run a second command.
+# auto-deploy.sh's own guards in order — up-to-date short-circuit (including
+# the deployed.sha check), deploy-branch check, dirty-tree/diverge check,
+# active-jobs check before AND after the build — before it would ever touch
+# the stack. Its very first-ever tick (no deployed.sha yet) ADOPTS the
+# current HEAD as already-deployed instead of deploying: if this checkout
+# was behind main at install time, the stack stays on that stale commit
+# until the operator deploys it once by hand (see docs/architecture.md).
+# There is no unguarded moment to protect the operator from, so there is no
+# reason to make them run a second command.
 #
 # Idempotent: rerunning it re-copies both unit files and re-applies
 # enable/start, all no-ops if already applied. If a unit file's content
