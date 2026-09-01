@@ -200,9 +200,9 @@ describe('RailLibraryGroup', () => {
 		const target = await render();
 		requireElement<HTMLButtonElement>(target, 'button.disclose').click();
 		await tick();
-		const albumRows = target.querySelectorAll('.row-sub .row-title');
+		const albumRows = target.querySelectorAll('.album-label .row-title');
 		expect(Array.from(albumRows).map((row) => row.textContent)).toEqual(['Nachtstrom', 'Anfield']);
-		const counts = target.querySelectorAll('.row-sub .row-meta');
+		const counts = target.querySelectorAll('.album-label .row-meta');
 		expect(Array.from(counts).map((row) => row.textContent)).toEqual(['2', '5']);
 	});
 
@@ -210,7 +210,7 @@ describe('RailLibraryGroup', () => {
 		openCollection.set({ kind: 'album', id: 'a1' });
 		selectedSongId.set('s2');
 		const target = await render();
-		const albumToggle = requireElement<HTMLButtonElement>(target, '.row-sub.disclose');
+		const albumToggle = requireElement<HTMLButtonElement>(target, '.album-disclose');
 		expect(albumToggle.getAttribute('aria-expanded')).toBe('true');
 
 		const rows = target.querySelectorAll('.row-sub2 .row-title');
@@ -270,11 +270,40 @@ describe('RailLibraryGroup', () => {
 			})
 		);
 		const target = await render();
-		const albumToggles = target.querySelectorAll<HTMLButtonElement>('.row-sub.disclose');
+		const albumToggles = target.querySelectorAll<HTMLButtonElement>('.album-disclose');
 		albumToggles[1]?.click();
 		await tick();
 		expect(albumToggles[1]?.getAttribute('aria-expanded')).toBe('true');
 		await vi.waitFor(() => expect(target.textContent).toContain('Kickoff'));
+	});
+
+	it('navigates into the album and expands it when its label is clicked', async () => {
+		albumList.set([
+			album({ id: 'a1', title: 'Nachtstrom' }),
+			album({ id: 'a2', title: 'Anfield' })
+		]);
+		const target = await render();
+		const labels = target.querySelectorAll<HTMLButtonElement>('.album-label');
+		labels[1]?.click();
+		await tick();
+		await Promise.resolve();
+
+		expect(get(openCollection)).toEqual({ kind: 'album', id: 'a2' });
+		const toggles = target.querySelectorAll<HTMLButtonElement>('.album-disclose');
+		expect(toggles[1]?.getAttribute('aria-expanded')).toBe('true');
+	});
+
+	it('toggles the row open without navigating when the chevron is clicked', async () => {
+		albumList.set([album({ id: 'a1', title: 'Nachtstrom' })]);
+		const target = await render();
+		const toggle = requireElement<HTMLButtonElement>(target, '.album-disclose');
+
+		toggle.click();
+		await tick();
+		await Promise.resolve();
+
+		expect(toggle.getAttribute('aria-expanded')).toBe('true');
+		expect(get(openCollection)).toBeNull();
 	});
 
 	it('does not refetch an album on a second expand once its songs are loaded', async () => {
@@ -296,7 +325,7 @@ describe('RailLibraryGroup', () => {
 			})
 		);
 		const target = await render();
-		const albumToggles = target.querySelectorAll<HTMLButtonElement>('.row-sub.disclose');
+		const albumToggles = target.querySelectorAll<HTMLButtonElement>('.album-disclose');
 		albumToggles[1]?.click();
 		await tick();
 		await vi.waitFor(() => expect(target.textContent).toContain('Kickoff'));
@@ -313,7 +342,7 @@ describe('RailLibraryGroup', () => {
 		albumList.set([album({ id: 'a1', title: 'Nachtstrom', song_count: 0 })]);
 		songList.set([]);
 		const target = await render();
-		const albumToggle = requireElement<HTMLButtonElement>(target, '.row-sub.disclose');
+		const albumToggle = requireElement<HTMLButtonElement>(target, '.album-disclose');
 
 		albumToggle.click();
 		await tick();
@@ -329,7 +358,7 @@ describe('RailLibraryGroup', () => {
 	it('lets a viewer collapse the open album even while it stays the open collection', async () => {
 		openCollection.set({ kind: 'album', id: 'a1' });
 		const target = await render();
-		const albumToggle = requireElement<HTMLButtonElement>(target, '.row-sub.disclose');
+		const albumToggle = requireElement<HTMLButtonElement>(target, '.album-disclose');
 		expect(albumToggle.getAttribute('aria-expanded')).toBe('true');
 
 		albumToggle.click();

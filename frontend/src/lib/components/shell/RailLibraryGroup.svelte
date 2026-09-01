@@ -8,7 +8,7 @@
 		songList
 	} from '$lib/stores/libraryData';
 	import { selectedSongId } from '$lib/stores/player';
-	import { compareAlbumTracks, selectSong } from '$lib/stores/navigation';
+	import { compareAlbumTracks, openAlbum, selectSong } from '$lib/stores/navigation';
 	import { audioPlayer } from '$lib/services/audioPlayer.svelte';
 	import { RAIL_CONTEXT_NO_TAKES, RAIL_LIBRARY_LABEL } from '$lib/constants';
 	import type { SongItem } from '$lib/api/types';
@@ -19,6 +19,11 @@
 	// inlined per caller (see RailSettings.svelte) rather than centralized.
 	const LIBRARY_OPEN_STORAGE_KEY = 'songmaker.rail-library-open';
 	const LIBRARY_NAV_LABEL = 'Library albums';
+	// Deliberately generic, never interpolating the album title: e2e drives
+	// the album row by 'a button whose name contains the album title', and
+	// only .album-label may match that -- the chevron carrying the title too
+	// would make every album row ambiguous under that locator.
+	const ALBUM_DISCLOSE_LABEL = 'Toggle album tracks';
 
 	const albums = $derived($albumList);
 	const songs = $derived($songList);
@@ -83,6 +88,21 @@
 		expandAlbum(albumId);
 	}
 
+	// The row's label is the navigation target (ruled sentence 5 of #302: a
+	// list entry click goes directly into that album), the same openAlbum
+	// LibraryWall's own album cards already use -- not goto/pushState, and not
+	// openCollectionEntry, whose "song open -> back to collection" branch reads
+	// the *currently* open collection regardless of which row was clicked and
+	// would misfire for any row that isn't it. expandAlbum runs unconditionally
+	// first (idempotent) so a label click always shows the album's songs even
+	// when the album was already open but its row had been manually collapsed,
+	// a case openAlbum's own collection change alone would not re-trigger (see
+	// the edge-triggered effect above).
+	function onAlbumLabelClick(albumId: string): void {
+		expandAlbum(albumId);
+		void openAlbum(albumId);
+	}
+
 	function isSongPlaying(song: SongItem): boolean {
 		return current?.songId === song.id && playing;
 	}
@@ -131,31 +151,36 @@
 			{#each albums as album (album.id)}
 				{@const expanded = isAlbumExpanded(album.id)}
 				<li>
-					<button
-						type="button"
-						class="row row-sub disclose"
-						aria-expanded={expanded}
-						aria-controls={`rail-library-album-${album.id}`}
-						onclick={() => toggleAlbum(album.id)}
-					>
-						<svg
-							class="caret"
-							class:open={expanded}
-							width="10"
-							height="10"
-							viewBox="0 0 24 24"
-							fill="none"
-							stroke="currentColor"
-							stroke-width="3"
-							stroke-linecap="round"
-							stroke-linejoin="round"
-							aria-hidden="true"
+					<div class="album-row">
+						<button
+							type="button"
+							class="album-disclose"
+							aria-expanded={expanded}
+							aria-controls={`rail-library-album-${album.id}`}
+							aria-label={ALBUM_DISCLOSE_LABEL}
+							onclick={() => toggleAlbum(album.id)}
 						>
-							<polyline points="9 6 15 12 9 18" />
-						</svg>
-						<span class="row-title">{album.title}</span>
-						<span class="row-meta">{album.song_count}</span>
-					</button>
+							<svg
+								class="caret"
+								class:open={expanded}
+								width="10"
+								height="10"
+								viewBox="0 0 24 24"
+								fill="none"
+								stroke="currentColor"
+								stroke-width="3"
+								stroke-linecap="round"
+								stroke-linejoin="round"
+								aria-hidden="true"
+							>
+								<polyline points="9 6 15 12 9 18" />
+							</svg>
+						</button>
+						<button type="button" class="album-label" onclick={() => onAlbumLabelClick(album.id)}>
+							<span class="row-title">{album.title}</span>
+							<span class="row-meta">{album.song_count}</span>
+						</button>
+					</div>
 					<div
 						class="album-songs"
 						data-open={expanded}
@@ -218,8 +243,8 @@
 		color: var(--text);
 	}
 
-	.row-sub {
-		padding-left: 32px;
+	.row-sub2 {
+		padding-left: 48px;
 		font-size: 0.8rem;
 		font-family: inherit;
 		text-transform: none;
@@ -227,8 +252,48 @@
 		border-left: 3px solid transparent;
 	}
 
-	.row-sub2 {
-		padding-left: 48px;
+	/* Mirrors RailGroup's own .disclose-row/.disclose/.group-title-link split
+	   (titleHref seam): the chevron toggles only, the label navigates only --
+	   see onAlbumLabelClick's own comment for why they must be two elements. */
+	.album-row {
+		display: flex;
+		align-items: center;
+		color: var(--text-muted);
+		font-size: 0.8rem;
+	}
+
+	.album-disclose {
+		display: flex;
+		align-items: center;
+		padding: 8px 4px 8px 32px;
+		background: none;
+		border: none;
+		color: inherit;
+		cursor: pointer;
+	}
+
+	.album-disclose:hover {
+		color: var(--text);
+	}
+
+	.album-label {
+		display: flex;
+		align-items: center;
+		gap: 8px;
+		flex: 1;
+		min-width: 0;
+		padding: 8px 16px 8px 4px;
+		background: none;
+		border: none;
+		color: inherit;
+		font: inherit;
+		text-align: left;
+		cursor: pointer;
+	}
+
+	.album-label:hover {
+		background: var(--surface-hover);
+		color: var(--text);
 	}
 
 	.row-title {
