@@ -13,7 +13,8 @@ from typing import Final
 import httpx
 from pydantic import SecretStr
 
-from songmaker_cli.claude.provider import is_available as is_claude_available
+from songmaker_cli.claude.provider import UnavailableError as ClaudeCliUnavailableError
+from songmaker_cli.claude.provider import cli_login_status, list_cli_model_aliases
 from songmaker_cli.constants import (
     ANTHROPIC_API_VERSION,
     COWRITER_ANTHROPIC_MODELS_URL,
@@ -81,11 +82,7 @@ def list_provider_models(provider: str) -> list[str]:
             f"{configuration.missing_environment_key}",
         )
     if configuration.method is ProviderSetupMethod.CLAUDE_CLI:
-        raise ProviderModelCatalogUnavailableError(
-            provider,
-            f"{provider} is configured via Claude CLI, but its model catalog "
-            "is not available through the CLI",
-        )
+        return _list_claude_cli_models()
 
     key = _secret(_provider_api_credential(provider, settings).secret)
     if provider == _GROK_PROVIDER:
@@ -105,7 +102,7 @@ def _provider_configuration(
     credential = _provider_api_credential(provider, settings)
     if _secret(credential.secret):
         return ConfiguredProvider(provider, ProviderSetupMethod.API_KEY)
-    if provider == _CLAUDE_PROVIDER and is_claude_available():
+    if provider == _CLAUDE_PROVIDER and cli_login_status().logged_in:
         return ConfiguredProvider(provider, ProviderSetupMethod.CLAUDE_CLI)
     return UnconfiguredProvider(provider, credential.environment_key)
 
@@ -205,6 +202,20 @@ def _list_openai_models(key: str) -> list[str]:
             _CODEX_PROVIDER, "no chat models returned by codex",
         )
     return sorted(chat)
+
+
+def _list_claude_cli_models() -> list[str]:
+    try:
+        aliases = list_cli_model_aliases()
+    except ClaudeCliUnavailableError as exc:
+        raise ProviderModelCatalogUnavailableError(
+            _CLAUDE_PROVIDER, f"could not list claude CLI models: {exc}",
+        ) from exc
+    if not aliases:
+        raise ProviderModelCatalogUnavailableError(
+            _CLAUDE_PROVIDER, "no chat models returned by claude CLI",
+        )
+    return sorted(aliases)
 
 
 def _list_claude_models(key: str) -> list[str]:
