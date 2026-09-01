@@ -52,9 +52,16 @@ The seed builds one album with three songs, a real take per song imported from
 holding two of those takes, and a public link for the album — plus a second,
 songs-only album for the rail's one-open-album proof and enough filler albums
 (`RAIL_FILLER_ALBUM_COUNT` in `seed.ts`) to overflow the rail's own scroll
-region for the Settings pin promise. The filler albums cost nothing against
-the per-flow `/api` budgets below: seeding goes through the `request` API
-context, never the page a flow's `FlowGuard` listens on.
+region for the Settings pin promise. The filler albums are seeded directly
+against the database (`scripts/seed_e2e_filler_albums.py`, run inside the web
+container), not through `POST /api/albums` — they never reach the server over
+HTTP at all, so unlike the rest of this seed, they cost nothing against
+either a flow's `FlowGuard` budget or the server's own IP rate limit. Issue
+#344 is why this distinction matters: 30 individual `POST /api/albums` calls
+for data that exercises no API semantics were most of what pushed a CI run
+over that limit, and the limiter counts every request it receives regardless
+of which Playwright context sent it — a flow's own `/api` budget below is
+not the same measurement as the server's (see "Guard rails").
 
 `fixtures/take.mp3` is a 3-second 440 Hz tone, mono, 32 kbps (~12 KB), and
 Chromium plays it: `canPlayType('audio/mpeg')` answers `probably`. Regenerate
@@ -94,16 +101,30 @@ that, not for a real regression. A flow that suddenly needs several more
 round trips is a regression — find the extra requests instead of raising the
 number. The measured count is printed on every run.
 
-Measured together on a clean isolated stack (one run, both projects, nothing
-else hitting it): the full suite costs 158 `/api` requests on **desktop**
-(all four album-address tests, both playlist-address tests, and both
-`library.spec.ts` tests) and 59 on **mobile** (both `library.spec.ts` tests
-only — the address specs are desktop-only, see above) — 217 total, comfortably
-under the CI stack's
-`IP_RATE_LIMIT: "300"` override (`docker-compose.ci.yml`) for one IP's
-60-second window. Re-running the suite repeatedly against the same stack
-inside that window is cumulative, not reset per run — see "Running it
-locally" below.
+Summed together, the per-flow `FlowGuard` totals above (158 `/api` requests
+on **desktop**, 59 on **mobile**) are **not** what the server's own IP rate
+limit sees, and issue #344 is the reason that distinction is written down
+explicitly rather than assumed: a `FlowGuard` only counts `/api/*` requests
+the page itself made, so it misses HTML document navigations (`_classify_path`
+in `middleware/rate_limit.py` puts every unrecognized path, including a plain
+page load, in the same API class — fail closed, not fail open), the CI
+workflow's own `/health`/login smoke test before Playwright even starts,
+anything seeded through Playwright's `request` API context (global setup's
+library, each attempt's playlist), and a retry re-running a whole flow inside
+the same window. What the rate limiter actually counts is measured the same
+way `docker-compose.ci.yml`'s own `IP_RATE_LIMIT` comment measures it: from
+`docker compose logs songmaker-web`'s access log, filtered to the runner's
+one IP and to the API class. One full local run of the whole suite (the CI
+workflow's smoke-test curls plus both Playwright projects) measured 288 such
+requests, finishing in about 35 seconds — so the 60-second window's peak is
+that same 288 — comfortably under the CI stack's `IP_RATE_LIMIT: "600"`
+override (`docker-compose.ci.yml`), which carries roughly 2x headroom over
+that measurement, including room for one CI retry landing inside the same
+window. Re-running the suite repeatedly against the same stack inside that
+window is cumulative, not reset per run — see "Running it locally" below. If
+this suite gains more specs, re-measure the same way rather than trusting
+the `FlowGuard` sum — that gap between the two is exactly what let #344
+through.
 
 Opening a track from an open album address is still a route-file crossing
 (issue #269): a song addresses `/album/<slug>/<song-slug>` instead of the
@@ -186,7 +207,7 @@ cd .. && docker compose -f docker-compose.yml -f docker-compose.ci.yml down -v
 ```
 
 Re-running against the same stack repeatedly will trip the app's IP rate limit
-— `IP_RATE_LIMIT: "300"` per 60-second window under this CI recipe (see the
+— `IP_RATE_LIMIT: "600"` per 60-second window under this CI recipe (see the
 budget note above; the production default is 120) — and the flow will report
 429s — that is the guard working, not a flaky test. Wait out the window or
 reset the stack; a fresh run right after a previous one still counts against
