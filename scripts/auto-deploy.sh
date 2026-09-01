@@ -39,14 +39,19 @@
 #     next tick retries the same pull+deploy. A tick that could not deploy
 #     despite main having moved (a hard refusal, or a pull/build/up
 #     failure) increments a consecutive-FAILURE counter; only N in a row
-#     escalates to a prio=err journal line worth paging on. A tick that
-#     merely defers because jobs are active increments a separate
-#     consecutive-BUSY counter with a much higher threshold and a quieter
-#     prio=warning line — a normal generation queue or an hours-long
-#     lora_training job legitimately keeps jobs active for a long time, and
-#     that is not the same emergency as a deploy that keeps failing outright
-#     (see record_failure / record_busy_deferral below). Both counters reset
-#     only on an actual deploy or a genuine "nothing to deploy" tick.
+#     escalates to a prio=err journal line worth paging on — and, since
+#     issue #333, is also the only tick that exits non-zero (fail_tick
+#     below), so `OnFailure=songmaker-alert@%n.service` on the systemd unit
+#     emails the operator at that exact same moment instead of on every
+#     transient blip. A tick that merely defers because jobs are active
+#     increments a separate consecutive-BUSY counter with a much higher
+#     threshold and a quieter prio=warning line, never fails the unit — a
+#     normal generation queue or an hours-long lora_training job
+#     legitimately keeps jobs active for a long time, and that is not the
+#     same emergency as a deploy that keeps failing outright (see
+#     record_failure / fail_tick / record_busy_deferral below). Both
+#     counters reset only on an actual deploy or a genuine "nothing to
+#     deploy" tick.
 #   - This host's `.env` and checkout are also the operator's manual
 #     workspace. A dirty tree, a diverged local main, or HEAD sitting on a
 #     branch other than the deploy branch are left completely untouched —
@@ -251,6 +256,29 @@ record_failure() {
     fi
 }
 
+# Every guard/infra refusal below calls this instead of a bare `exit 1` —
+# it records the tick via record_failure() exactly as before, but only
+# actually fails the systemd unit (exit 1) on the same tick that crosses
+# FAILURE_ALERT_THRESHOLD and logs the "ALERT: N ticks in a row" line
+# above. Every earlier tick in a streak exits 0 despite having deferred.
+# This is what makes `OnFailure=songmaker-alert@%n.service` (issue #333)
+# safe to attach to this unit: without it, the branch guard alone would
+# fire that unit-failure — and the alert email — on essentially every
+# 2-minute tick for as long as the operator works on a branch other than
+# $DEPLOY_BRANCH in this checkout (see step 4's own comment), which is a
+# routine, not an emergency, state. With it, the unit only ever registers
+# as failed at the exact moment a genuine, sustained problem exists.
+fail_tick() {
+    local reason="$1"
+    record_failure "$reason"
+    local count
+    count="$(read_counter "$FAILURE_COUNT_FILE")"
+    if ((count >= FAILURE_ALERT_THRESHOLD)); then
+        exit 1
+    fi
+    exit 0
+}
+
 # A tick deferred only because jobs are active (before or after the build).
 # This is expected behavior under a busy queue or a long-running
 # lora_training job, not a fault — it gets its own, much higher threshold
@@ -310,20 +338,17 @@ fi
 # failure ALERT.
 if ! LOCAL_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD 2>&1)"; then
     log_err "cannot determine local HEAD in $REPO_ROOT: $LOCAL_HEAD"
-    record_failure "cannot determine local HEAD"
-    exit 1
+    fail_tick "cannot determine local HEAD"
 fi
 
 if ! FETCH_OUTPUT="$(git -C "$REPO_ROOT" fetch origin "$DEPLOY_BRANCH" --quiet 2>&1)"; then
     log_err "git fetch origin $DEPLOY_BRANCH failed in $REPO_ROOT: $FETCH_OUTPUT"
-    record_failure "git fetch failed"
-    exit 1
+    fail_tick "git fetch failed"
 fi
 
 if ! REMOTE_HEAD="$(git -C "$REPO_ROOT" rev-parse "origin/$DEPLOY_BRANCH" 2>&1)"; then
     log_err "cannot resolve origin/$DEPLOY_BRANCH in $REPO_ROOT: $REMOTE_HEAD"
-    record_failure "cannot resolve origin/$DEPLOY_BRANCH"
-    exit 1
+    fail_tick "cannot resolve origin/$DEPLOY_BRANCH"
 fi
 
 # --- 3. Up-to-date shortcut — the common case, and must stay silent. Judged
@@ -364,14 +389,12 @@ fi
 # the ALERT threshold is unaffected by the log-level damping.
 if ! CURRENT_BRANCH="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD 2>&1)"; then
     log_guard_reason "HEAD at $REPO_ROOT is not on a branch (detached?) — refusing to deploy, not touching the tree: $CURRENT_BRANCH"
-    record_failure "HEAD not on a branch"
-    exit 1
+    fail_tick "HEAD not on a branch"
 fi
 
 if [[ "$CURRENT_BRANCH" != "$DEPLOY_BRANCH" ]]; then
     log_guard_reason "HEAD at $REPO_ROOT is on branch '$CURRENT_BRANCH', not the deploy branch '$DEPLOY_BRANCH' — refusing to deploy, not touching the tree"
-    record_failure "HEAD on branch $CURRENT_BRANCH instead of $DEPLOY_BRANCH"
-    exit 1
+    fail_tick "HEAD on branch $CURRENT_BRANCH instead of $DEPLOY_BRANCH"
 fi
 
 # Branch guard passed — clear any stale reason so a future recurrence (after
@@ -384,20 +407,17 @@ rm -f "$GUARD_REASON_FILE"
 # operator's manual workspace.
 if ! STATUS_OUTPUT="$(git -C "$REPO_ROOT" status --porcelain 2>&1)"; then
     log_err "cannot determine working tree status in $REPO_ROOT: $STATUS_OUTPUT"
-    record_failure "git status failed"
-    exit 1
+    fail_tick "git status failed"
 fi
 
 if [[ -n "$STATUS_OUTPUT" ]]; then
     log_err "working tree at $REPO_ROOT is dirty — refusing to deploy, not touching it (the operator may be working here)"
-    record_failure "working tree dirty"
-    exit 1
+    fail_tick "working tree dirty"
 fi
 
 if ! git -C "$REPO_ROOT" merge-base --is-ancestor "$LOCAL_HEAD" "$REMOTE_HEAD"; then
     log_err "local HEAD ($LOCAL_HEAD) has diverged from origin/$DEPLOY_BRANCH ($REMOTE_HEAD) — not fast-forwardable, refusing to deploy, not touching the tree"
-    record_failure "local HEAD diverged from origin/$DEPLOY_BRANCH"
-    exit 1
+    fail_tick "local HEAD diverged from origin/$DEPLOY_BRANCH"
 fi
 
 # --- 6. Job guard, ahead of the first step that touches the checkout. An
@@ -405,8 +425,7 @@ fi
 # deploy", not as "assume idle".
 if ! ACTIVE_JOB_COUNT="$(active_job_count)"; then
     log_err "cannot reach the database to check for active jobs — refusing to deploy (fail closed): $ACTIVE_JOB_COUNT"
-    record_failure "database unreachable before pull"
-    exit 1
+    fail_tick "database unreachable before pull"
 fi
 
 if [[ "$ACTIVE_JOB_COUNT" -gt 0 ]]; then
@@ -425,8 +444,7 @@ fi
 # only a short log_err line with the exit code goes through `logger`.
 if ! PULL_OUTPUT="$(git -C "$REPO_ROOT" pull --ff-only origin "$DEPLOY_BRANCH" 2>&1)"; then
     log_err "git pull --ff-only failed in $REPO_ROOT despite passing the fast-forward check: $PULL_OUTPUT"
-    record_failure "git pull failed"
-    exit 1
+    fail_tick "git pull failed"
 fi
 
 if compose build; then
@@ -434,8 +452,7 @@ if compose build; then
 else
     BUILD_EXIT_CODE=$?
     log_err "docker compose build failed in $REPO_ROOT (exit $BUILD_EXIT_CODE)"
-    record_failure "compose build failed"
-    exit 1
+    fail_tick "compose build failed"
 fi
 
 # --- 8. Recheck immediately before the recreate — the only step that can
@@ -445,8 +462,7 @@ fi
 # recheck lands within seconds rather than after another full build.
 if ! ACTIVE_JOB_COUNT="$(active_job_count)"; then
     log_err "cannot reach the database to recheck for active jobs after build — refusing to recreate containers (fail closed): $ACTIVE_JOB_COUNT"
-    record_failure "database unreachable after build"
-    exit 1
+    fail_tick "database unreachable after build"
 fi
 
 if [[ "$ACTIVE_JOB_COUNT" -gt 0 ]]; then
@@ -460,20 +476,22 @@ fi
 # leaving a just-recreated stack with no way to record what it is running.
 if ! DEPLOYED_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD 2>&1)"; then
     log_err "cannot determine HEAD in $REPO_ROOT right before recreate: $DEPLOYED_HEAD"
-    record_failure "cannot determine HEAD before recreate"
-    exit 1
+    fail_tick "cannot determine HEAD before recreate"
 fi
 
 if compose up -d --wait; then
     if record_success "$DEPLOYED_HEAD"; then
-        TICK_EXIT_CODE=0
-    else
-        TICK_EXIT_CODE=1
+        exit 0
     fi
+    # record_success's own failure path (deployed-sha readback mismatch)
+    # already called record_failure — but a deploy that succeeded and then
+    # immediately corrupted its own bookkeeping is a different, rarer, and
+    # more urgent kind of broken than a routine guard refusal, so this one
+    # pages immediately (exit 1) rather than waiting for fail_tick's
+    # threshold.
+    exit 1
 else
-    TICK_EXIT_CODE=$?
-    log_err "docker compose up -d --wait failed in $REPO_ROOT (exit $TICK_EXIT_CODE)"
-    record_failure "compose up failed"
+    UP_EXIT_CODE=$?
+    log_err "docker compose up -d --wait failed in $REPO_ROOT (exit $UP_EXIT_CODE)"
+    fail_tick "compose up failed"
 fi
-
-exit "$TICK_EXIT_CODE"

@@ -214,10 +214,65 @@ services:
     restart: unless-stopped
     volumes:
       - ./monitoring/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./monitoring/alert.rules.yml:/etc/prometheus/alert.rules.yml:ro
       - promdata:/prometheus
     depends_on:
       songmaker-web:
         condition: service_healthy
+      alertmanager:
+        condition: service_started
+    cap_drop:
+      - ALL
+
+  # Delivers the three alert.rules.yml conditions by email via Alertmanager's
+  # own SMTP client (issue #333) — see monitoring/alertmanager.yml.template
+  # for why this owns delivery instead of scripts/alert.sh or Grafana's
+  # native alerting. Internal-only, same as prometheus above (no published
+  # port): reached by Prometheus over the compose network, not by a human
+  # browser directly.
+  alertmanager:
+    image: prom/alertmanager:latest
+    restart: unless-stopped
+    environment:
+      ALERT_EMAIL_TO: "${ALERT_EMAIL_TO:-}"
+      SMTP_HOST: "${SMTP_HOST:-}"
+      SMTP_PORT: "${SMTP_PORT:-}"
+      SMTP_USER: "${SMTP_USER:-}"
+      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+    volumes:
+      - ./monitoring/alertmanager.yml.template:/etc/alertmanager/alertmanager.yml.template:ro
+      - alertmanagerdata:/alertmanager
+    # The image's own ENTRYPOINT is /bin/alertmanager; entrypoint: replaces
+    # it entirely so the SMTP config can be templated in first (see the
+    # mounted template's header comment) instead of being appended as
+    # arguments to it. Confirmed against prom/alertmanager:latest that
+    # /bin/sh and /bin/sed both exist in this image — no envsubst, sed
+    # substitution instead.
+    #
+    # Every $ below is doubled ($$) so docker-compose's OWN ${...}
+    # substitution leaves it alone: without the escape, `docker compose
+    # config`/`up` would bake the current .env values (including
+    # SMTP_PASSWORD) as a literal string into this entrypoint at compose
+    # time — visible in `docker inspect`/`docker compose config` output —
+    # instead of the container's own shell reading them from its
+    # environment: block at start, the way this is meant to work.
+    entrypoint:
+      - /bin/sh
+      - -c
+      - |
+        set -eu
+        if [ -z "$${ALERT_EMAIL_TO:-}" ] || [ -z "$${SMTP_HOST:-}" ] || [ -z "$${SMTP_PORT:-}" ] || [ -z "$${SMTP_USER:-}" ] || [ -z "$${SMTP_PASSWORD:-}" ]; then
+          echo "alertmanager: missing ALERT_EMAIL_TO/SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASSWORD in .env -- refusing to start with an incomplete SMTP config" >&2
+          exit 1
+        fi
+        sed \
+          -e "s|__SMTP_HOST__|$$SMTP_HOST|g" \
+          -e "s|__SMTP_PORT__|$$SMTP_PORT|g" \
+          -e "s|__SMTP_USER__|$$SMTP_USER|g" \
+          -e "s|__SMTP_PASSWORD__|$$SMTP_PASSWORD|g" \
+          -e "s|__ALERT_EMAIL_TO__|$$ALERT_EMAIL_TO|g" \
+          /etc/alertmanager/alertmanager.yml.template > /tmp/alertmanager.yml
+        exec /bin/alertmanager --config.file=/tmp/alertmanager.yml --storage.path=/alertmanager
     cap_drop:
       - ALL
 
@@ -253,3 +308,4 @@ volumes:
   hfcache:
   promdata:
   grafdata:
+  alertmanagerdata:

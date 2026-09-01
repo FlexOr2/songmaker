@@ -4,6 +4,12 @@ After=docker.service
 Requires=docker.service
 StartLimitIntervalSec=300
 StartLimitBurst=5
+# Fires once the unit gives up restarting (after StartLimitBurst is spent
+# within StartLimitIntervalSec below), not on each individual restart
+# attempt — unlike songmaker-autodeploy.service's 2-minute poll, this unit
+# only runs at boot, so there is no "routine, expected" repeat-failure case
+# to damp here (issue #333).
+OnFailure=songmaker-alert@%n.service
 
 [Service]
 Type=oneshot

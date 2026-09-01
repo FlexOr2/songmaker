@@ -889,7 +889,7 @@ its current usage via heartbeat. The music-worker has no GPU access at all.
 
 Prometheus + Grafana stack in `docker-compose.yml`. Prometheus scrapes `/metrics` every 15s. Grafana on port 3000 with a pre-provisioned dashboard.
 
-Exported metrics: `songmaker_http_requests_total`, `songmaker_http_request_duration_milliseconds_total`, `songmaker_active_sessions`, `songmaker_jobs_total`, `songmaker_job_duration_seconds`, `songmaker_queue_depth`, `songmaker_gpu_vram_megabytes`.
+Exported metrics: `songmaker_http_requests_total`, `songmaker_http_request_duration_milliseconds_total`, `songmaker_active_sessions`, `songmaker_jobs_total`, `songmaker_job_duration_seconds`, `songmaker_queue_depth{queue="music"|"scoring"}`, `songmaker_acestep_workers_total{status=...}`, `songmaker_acestep_worker_loaded_models`, `songmaker_acestep_worker_queue_depth`, `songmaker_acestep_worker_vram_used_gigabytes`, `songmaker_acestep_worker_vram_total_gigabytes` (the last two come from each acestep-worker's own heartbeat — `songmaker-web` itself has no GPU access and cannot produce a VRAM number of its own).
 
 Health endpoint at `/health` reports:
 - `music_worker`: running/stopped
@@ -897,6 +897,15 @@ Health endpoint at `/health` reports:
 - `music_queue_depth`, `scoring_queue_depth`: jobs waiting per queue
 - `db`, `redis`, `acestep`: component health
 - `status`: "ok" or "degraded" (degraded if both workers down, DB down, or Redis down)
+
+### Alerting (issue #333)
+
+Two independent sources feed one email address (`ALERT_EMAIL_TO` in `.env`, sent from the operator's own SMTP account — `SMTP_HOST`/`SMTP_PORT`/`SMTP_USER`/`SMTP_PASSWORD`):
+
+1. **systemd.** `scripts/alert.sh <subject> <body>` sends one email via curl's built-in SMTP client (`--ssl-reqd smtp://…` — no sendmail/msmtp install needed). It reads its five config values exclusively from `.env` and fails loudly (non-zero exit, named reason on stderr) if any are missing or the send itself fails; it never reports success it didn't achieve. The template unit `scripts/songmaker-alert@.service` runs it; `songmaker.service` (boot autostart) and `songmaker-autodeploy.service` (the pull-based deploy timer) both declare `OnFailure=songmaker-alert@%n.service`. `songmaker-autodeploy.service` ticks every ~2 minutes and routinely exits non-zero for entirely expected reasons (the operator working on a branch other than `main` in this checkout, a dirty tree) — its own `fail_tick()` helper only lets the unit itself register as failed (and so trigger `OnFailure=`) on the same tick that crosses its existing consecutive-failure ALERT threshold (default 3 ticks, ~6 minutes), not on every transient blip. `songmaker.service` only runs at boot, so no equivalent damping is needed there — `OnFailure=` fires once its own restart budget (`StartLimitBurst`) is exhausted. Both `scripts/install-autostart.sh` and `scripts/install-autodeploy.sh` install `songmaker-alert@.service` alongside their own unit (idempotent — running either, or both, converges on one installed copy).
+2. **Prometheus.** `monitoring/alert.rules.yml` (native Prometheus rule syntax, checkable with `promtool check rules` independent of any UI) defines three alerts, wired in via `rule_files:` in `monitoring/prometheus.yml`: no online ACE-Step worker for 10 minutes (`songmaker_acestep_workers_total{status="online"} == 0`, for: 10m — this is the exact metric that sat correct and unwatched for six days during issue #252), the scrape target down for 5 minutes (`up{job="songmaker"} == 0`), and a nonzero job failure rate over a 15-minute window (`rate(songmaker_jobs_total{status="failed"}[15m]) > 0`). Delivery is a small `alertmanager` container (`monitoring/alertmanager.yml.template`, `rule_files:`'s paired `alerting: alertmanagers:` target) using Alertmanager's own built-in SMTP `email_configs` — the same five `.env` values as `scripts/alert.sh`, templated into the config with `sed` at container start (Alertmanager's config format has no `${VAR}` substitution of its own; the container refuses to start if any value is missing, same as `alert.sh`). This was chosen over both alternatives considered: Grafana's own native alerting would mean maintaining the same three thresholds a second time in Grafana's own rule schema (duplication, not "one alarm channel"); a webhook from Alertmanager back into `scripts/alert.sh` would need a listening receiver process for no benefit over Alertmanager's built-in email receiver, which additionally groups/dedups (`group_wait`/`group_interval`/`repeat_interval` in the template) so a flapping alert re-sends at most once an hour instead of once per Prometheus evaluation.
+
+Dashboard: `songmaker_acestep_workers_total{status="online"}` has its own stat panel (red at 0, green otherwise) in the Overview row — the metric that would have shown the six-day outage now has somewhere a human glances.
 
 ## Operational Scripts
 
