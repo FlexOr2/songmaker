@@ -13,6 +13,7 @@ from sqlalchemy.orm import Session
 from songmaker_cli.app_context import AppContext, get_db_session
 from songmaker_cli.auth import (
     ROLE_ADMIN,
+    get_client_ip,
     verify_session_cookie,
 )
 from songmaker_cli.constants import HTTP_MAX_USER_AGENT_LENGTH, AuditAction, ResourceType
@@ -30,6 +31,13 @@ class AuthenticatedUser:
     username: str
     role: str
     is_active: bool
+
+
+def _session_client_ip(request: Request) -> str:
+    """The IP a session is bound to -- the real client, not the proxy in front of it."""
+    ctx: AppContext = request.app.state.ctx
+    direct_ip = request.client.host if request.client else "unknown"
+    return get_client_ip(direct_ip, request.headers.get("x-forwarded-for"), ctx.trusted_proxies)
 
 
 def _check_ip_ua_changes(
@@ -88,7 +96,7 @@ def _try_redis_auth(
     if not cached.is_active:
         raise HTTPException(403, "Account disabled")
 
-    current_ip = request.client.host if request.client else "unknown"
+    current_ip = _session_client_ip(request)
     current_ua = (request.headers.get("user-agent") or "")[:HTTP_MAX_USER_AGENT_LENGTH]
 
     ip_changed, ua_changed = _check_ip_ua_changes(
@@ -148,7 +156,7 @@ def get_current_user(
     if not user_session.user.is_active:
         raise HTTPException(403, "Account disabled")
 
-    current_ip = request.client.host if request.client else "unknown"
+    current_ip = _session_client_ip(request)
     current_ua = (request.headers.get("user-agent") or "")[:HTTP_MAX_USER_AGENT_LENGTH]
 
     _check_ip_ua_changes(

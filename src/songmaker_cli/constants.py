@@ -519,12 +519,23 @@ class LimiterFailurePolicy(StrEnum):
 # acestep_worker/constants.py — it cannot import this module (see
 # CLAUDE.md "Engine packages are independent") — and
 # tests/test_secret_scrub_parity.py pins the two as equal sets.
+#
+# ADMIN_USERNAME / ADMIN_PASSWORD: compose sets the bootstrap admin
+# credentials on the long-running web container, not just for a one-shot
+# setup step — lifecycle.auto_setup_admin re-reads them on every startup so
+# a restored-from-empty database gets its admin back. They therefore sit in
+# the parent environment for the container's whole life, and this scrub is
+# the only thing keeping them out of every child process it spawns.
 SECRET_ENV_KEYS: Final[tuple[str, ...]] = (
     "ANTHROPIC_API_KEY",
+    "XAI_API_KEY",
+    "OPENAI_API_KEY",
     "SESSION_SECRET",
     "SONGMAKER_INTERNAL_TOKEN",
     "DATABASE_URL",
     "REDIS_URL",
     "POSTGRES_PASSWORD",
     "HF_TOKEN",
+    "ADMIN_USERNAME",
+    "ADMIN_PASSWORD",
 )

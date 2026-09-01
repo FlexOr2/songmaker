@@ -96,7 +96,7 @@ def _detect_secure(request: Request | None, ctx: AppContext) -> bool:
     if not request:
         return False
     direct_ip = request.client.host if request.client else ""
-    if ctx.trusted_proxies and direct_ip in ctx.trusted_proxies:
+    if direct_ip in ctx.trusted_proxies:
         return request.headers.get("x-forwarded-proto", "") == "https"
     return request.url.scheme == "https"
 

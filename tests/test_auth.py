@@ -11,6 +11,7 @@ from songmaker_cli.auth import (
     MIN_PASSWORD_LENGTH,
     RATE_LIMIT_WINDOW_SECONDS,
     ROLE_ADMIN,
+    TrustedProxies,
     check_password_strength,
     ensure_session_secret,
     generate_csrf_token,
@@ -155,23 +156,90 @@ def test_none_password_passes() -> None:
     assert check_password_strength(None) is None
 
 
-# -- Trusted proxies (parse_trusted_proxies) ---------------------------------
+# -- Trusted proxies ---------------------------------------------------------
 
 
-def test_parse_trusted_proxies(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setenv("TRUSTED_PROXIES", "10.0.0.1, 10.0.0.2")
-    result = parse_trusted_proxies()
-    assert result == frozenset({"10.0.0.1", "10.0.0.2"})
+@pytest.mark.parametrize(
+    ("configured", "peer", "trusted"),
+    [
+        ("172.16.0.0/12", "172.18.0.1", True),
+        ("172.16.0.0/12", "172.31.255.254", True),
+        ("172.16.0.0/12", "10.0.0.1", False),
+        ("10.0.0.1", "10.0.0.1", True),
+        ("10.0.0.1", "10.0.0.2", False),
+        ("10.0.0.1, 172.16.0.0/12", "172.18.0.1", True),
+        ("10.0.0.1, 172.16.0.0/12", "10.0.0.1", True),
+        ("10.0.0.1, 172.16.0.0/12", "203.0.113.9", False),
+        ("172.16.0.0/12", "::ffff:172.18.0.1", True),
+        ("2001:db8::/32", "2001:db8::5", True),
+        ("2001:db8::/32", "172.18.0.1", False),
+        ("172.16.0.0/12", "testclient", False),
+        ("", "172.18.0.1", False),
+    ],
+)
+def test_trusted_proxies_membership(configured: str, peer: str, trusted: bool) -> None:
+    assert (peer in TrustedProxies.parse(configured)) is trusted
 
 
-def test_parse_trusted_proxies_empty_default(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_parse_trusted_proxies_reads_configured_networks(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("TRUSTED_PROXIES", "10.0.0.1, 172.16.0.0/12")
+    proxies = parse_trusted_proxies()
+    assert "10.0.0.1" in proxies
+    assert "172.20.3.4" in proxies
+    assert "203.0.113.9" not in proxies
+
+
+def test_parse_trusted_proxies_empty_default_trusts_nobody(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     monkeypatch.delenv("TRUSTED_PROXIES", raising=False)
-    result = parse_trusted_proxies()
-    assert result == frozenset()
+    proxies = parse_trusted_proxies()
+    assert not proxies
+    assert "172.18.0.1" not in proxies
+
+
+@pytest.mark.parametrize("entry", ["not-an-ip", "10.0.0.0/33", "10.0.0.1/24"])
+def test_parse_trusted_proxies_rejects_unparsable_entry(
+    monkeypatch: pytest.MonkeyPatch, entry: str,
+) -> None:
+    monkeypatch.setenv("TRUSTED_PROXIES", entry)
+    with pytest.raises(ValueError, match="TRUSTED_PROXIES"):
+        parse_trusted_proxies()
 
 
 # -- get_client_ip -----------------------------------------------------------
 
 
 def test_get_client_ip_no_trusted_proxies() -> None:
-    assert get_client_ip("1.2.3.4", "5.6.7.8, 9.10.11.12", frozenset()) == "1.2.3.4"
+    assert get_client_ip("1.2.3.4", "5.6.7.8, 9.10.11.12", TrustedProxies()) == "1.2.3.4"
+
+
+def test_get_client_ip_ignores_forwarded_for_from_untrusted_peer() -> None:
+    proxies = TrustedProxies.parse("172.16.0.0/12")
+    assert get_client_ip("203.0.113.9", "1.2.3.4", proxies) == "203.0.113.9"
+
+
+def test_get_client_ip_rightmost_untrusted() -> None:
+    proxies = TrustedProxies.parse("10.0.0.1")
+    result = get_client_ip("10.0.0.1", "1.2.3.4, 5.6.7.8, 10.0.0.1", proxies)
+    assert result == "5.6.7.8"
+
+
+def test_get_client_ip_rightmost_untrusted_behind_proxy_network() -> None:
+    proxies = TrustedProxies.parse("172.16.0.0/12")
+    result = get_client_ip("172.18.0.1", "203.0.113.7, 172.18.0.9", proxies)
+    assert result == "203.0.113.7"
+
+
+def test_get_client_ip_all_trusted_falls_back() -> None:
+    proxies = TrustedProxies.parse("10.0.0.1, 10.0.0.2")
+    result = get_client_ip("10.0.0.1", "10.0.0.2, 10.0.0.1", proxies)
+    assert result == "10.0.0.1"
+
+
+def test_get_client_ip_no_xff() -> None:
+    proxies = TrustedProxies.parse("10.0.0.1")
+    result = get_client_ip("10.0.0.1", None, proxies)
+    assert result == "10.0.0.1"

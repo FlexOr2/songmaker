@@ -5,6 +5,15 @@ from __future__ import annotations
 import hashlib
 import hmac
 import os
+from dataclasses import dataclass
+from ipaddress import (
+    IPv4Address,
+    IPv4Network,
+    IPv6Address,
+    IPv6Network,
+    ip_address,
+    ip_network,
+)
 
 import bcrypt
 
@@ -12,18 +21,67 @@ from songmaker_cli.settings import get_settings
 
 BCRYPT_ROUNDS = 12
 
+IpAddress = IPv4Address | IPv6Address
+IpNetwork = IPv4Network | IPv6Network
 
-def parse_trusted_proxies() -> frozenset[str]:
-    """Parse trusted-proxies CSV from Settings. Returns a frozenset of proxy IPs."""
-    raw = get_settings().trusted_proxies
-    return frozenset(p.strip() for p in raw.split(",") if p.strip())
+
+@dataclass(frozen=True)
+class TrustedProxies:
+    """The peers whose forwarding headers this server believes.
+
+    Every entry is an IP network, so a CIDR block from configuration matches
+    each address inside it and a bare address matches only itself. A peer
+    whose address is not an IP at all (a unix socket, a test transport) is
+    never trusted, and no entries means no peer is trusted.
+    """
+
+    networks: tuple[IpNetwork, ...] = ()
+
+    @classmethod
+    def parse(cls, raw: str) -> TrustedProxies:
+        """Build from a CSV of addresses and CIDR blocks. Raises on garbage."""
+        entries = (entry.strip() for entry in raw.split(","))
+        return cls(tuple(_proxy_network(entry) for entry in entries if entry))
+
+    def __contains__(self, host: str) -> bool:
+        address = _peer_address(host)
+        if address is None:
+            return False
+        return any(address in network for network in self.networks)
+
+    def __bool__(self) -> bool:
+        return bool(self.networks)
+
+
+def _proxy_network(entry: str) -> IpNetwork:
+    try:
+        return ip_network(entry)
+    except ValueError as exc:
+        raise ValueError(
+            f"TRUSTED_PROXIES entry {entry!r} is not an IP address or CIDR network: {exc}",
+        ) from exc
+
+
+def _peer_address(host: str) -> IpAddress | None:
+    try:
+        address = ip_address(host)
+    except ValueError:
+        return None
+    if isinstance(address, IPv6Address) and address.ipv4_mapped:
+        return address.ipv4_mapped
+    return address
+
+
+def parse_trusted_proxies() -> TrustedProxies:
+    """Read TRUSTED_PROXIES from Settings. Raises at startup on an unparsable entry."""
+    return TrustedProxies.parse(get_settings().trusted_proxies)
 
 
 def get_client_ip(
-    client_host: str, forwarded_for: str | None, trusted_proxies: frozenset[str],
+    client_host: str, forwarded_for: str | None, trusted_proxies: TrustedProxies,
 ) -> str:
     """Extract the real client IP, using rightmost untrusted XFF entry."""
-    if trusted_proxies and client_host in trusted_proxies and forwarded_for:
+    if client_host in trusted_proxies and forwarded_for:
         ips = [ip.strip() for ip in forwarded_for.split(",")]
         for ip in reversed(ips):
             if ip not in trusted_proxies:

@@ -15,12 +15,16 @@ from songmaker_cli.constants import SECRET_ENV_KEYS as CLI_SECRET_ENV_KEYS
 
 EXPECTED_SECRET_ENV_KEYS = frozenset({
     "ANTHROPIC_API_KEY",
+    "XAI_API_KEY",
+    "OPENAI_API_KEY",
     "SESSION_SECRET",
     "SONGMAKER_INTERNAL_TOKEN",
     "DATABASE_URL",
     "REDIS_URL",
     "POSTGRES_PASSWORD",
     "HF_TOKEN",
+    "ADMIN_USERNAME",
+    "ADMIN_PASSWORD",
 })
 
 
