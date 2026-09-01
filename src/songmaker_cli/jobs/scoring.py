@@ -11,8 +11,9 @@ from sqlalchemy.orm import Session, sessionmaker
 from songmaker_cli import jobs
 from songmaker_cli.constants import JobStatus, JobType
 from songmaker_cli.db.queries import (
-    get_claude_scoring_model,
     get_generation,
+    get_judge_model,
+    get_judge_provider,
     lock_active_job,
     save_scores,
 )
@@ -92,7 +93,8 @@ def run_scoring_job(
                     meta_kwargs["bpm"] = ver.bpm
                 if song and song.vocal_language:
                     meta_kwargs["vocal_language"] = song.vocal_language
-            resolved_model = get_claude_scoring_model(session)
+            resolved_judge_provider = get_judge_provider(session)
+            resolved_judge_model = get_judge_model(session, resolved_judge_provider)
 
         mp3_full = audio_dir / mp3_path_rel
 
@@ -134,8 +136,8 @@ def run_scoring_job(
 
         if judge_coherence:
             song_scores = judge_lyrical_coherence(song_scores, meta, CoherenceJudgeConfig(
-                model=resolved_model,
-                api_key=settings.anthropic_api_key,
+                provider=resolved_judge_provider,
+                model=resolved_judge_model,
                 timeout=settings.scorer_timeout_seconds,
             ))
 

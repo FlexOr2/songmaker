@@ -149,6 +149,62 @@ def _assistant_message(
     return message
 
 
+def call_openai_compatible_once(
+    *,
+    provider: str,
+    api_url: str,
+    api_key: str,
+    model: str,
+    prompt: str,
+    system: str | None = None,
+) -> str:
+    """Synchronous, tool-free, single-turn completion.
+
+    Used by the lyrical-coherence judge (#315), which needs one verdict, not
+    the tool-using multi-round chat ``stream_openai_compatible_turn`` gives
+    the co-writer.
+    """
+    messages: list[dict[str, str]] = []
+    if system:
+        messages.append({"role": "system", "content": system})
+    messages.append({"role": "user", "content": prompt})
+    try:
+        response = httpx.post(
+            api_url,
+            headers={
+                "Authorization": f"Bearer {api_key}",
+                "Content-Type": "application/json",
+            },
+            json={"model": model, "messages": messages},
+            timeout=COWRITER_CLI_TIMEOUT_SECONDS,
+        )
+    except httpx.HTTPError as exc:
+        raise ProviderUnavailableError(
+            provider, f"{provider} is currently unavailable",
+        ) from exc
+    if response.status_code >= 400:
+        raise ProviderUnavailableError(
+            provider, f"{provider} is currently unavailable",
+        )
+    try:
+        payload = response.json()
+    except ValueError as exc:
+        raise ProviderUnavailableError(
+            provider, f"{provider} is currently unavailable",
+        ) from exc
+    if not isinstance(payload, dict):
+        raise ProviderUnavailableError(
+            provider, f"{provider} is currently unavailable",
+        )
+    message = _assistant_message(payload, provider)
+    content = message.get("content")
+    if not isinstance(content, str) or not content:
+        raise ProviderUnavailableError(
+            provider, f"{provider} returned an invalid response",
+        )
+    return content
+
+
 def _parse_tool_call(call: object, provider: str) -> tuple[str, str, dict[str, Any]]:
     if not isinstance(call, dict):
         raise ProviderUnavailableError(
