@@ -20,20 +20,19 @@ User=felix-hummert
 # Forcing Group=docker as the *primary* group would make `git pull` write
 # new files with group docker instead of the owner's usual group.
 #
-# StateDirectory creates /var/lib/songmaker-autodeploy (survives reboots)
-# for the consecutive-failure counter, the consecutive-busy-deferral
-# counter, and the deployed.sha marker. auto-deploy.sh reads all three via
-# $STATE_DIRECTORY, falling back to a path inside the checkout itself
-# (.git/songmaker-autodeploy.*) for a manual run outside systemd — not
-# /var/tmp, so a manual run shares the same state a unit run would have
-# used instead of starting fresh every time.
+# No StateDirectory: the consecutive-failure counter, the consecutive-
+# busy-deferral counter, and the deployed.sha marker all live inside the
+# checkout's own git ADMIN directory instead, resolved by auto-deploy.sh at
+# runtime via `git rev-parse --absolute-git-dir` (NOT a fixed path — see its
+# header for why a linked worktree needs this resolved rather than assumed).
+# A StateDirectory here would be a second location the unit run and a
+# manual shell run would silently diverge onto instead of sharing.
 #
-# No RuntimeDirectory: the flock lock file lives at a fixed path inside the
-# checkout (.git/songmaker-autodeploy.lock, see auto-deploy.sh), not under a
-# unit-managed runtime dir. A unit-scoped RuntimeDirectory would give the
-# systemd-run tick and a manual shell run of this same script two different
-# lock inodes — no mutual exclusion between them at all.
-StateDirectory=songmaker-autodeploy
+# No RuntimeDirectory either, for the same reason: the flock lock file lives
+# at that same resolved admin-directory path, not under a unit-managed
+# runtime dir. A unit-scoped RuntimeDirectory would give the systemd-run
+# tick and a manual shell run of this same script two different lock
+# inodes — no mutual exclusion between them at all.
 # No TimeoutStartSec override: a cold-cache `docker compose build` can
 # legitimately take 8-15 minutes (see CLAUDE.md — never wrap compose in a
 # timeout). The systemd default TimeoutStartSec (90s) would kill it mid-build

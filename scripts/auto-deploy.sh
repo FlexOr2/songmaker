@@ -91,23 +91,23 @@
 # WorkingDirectory/User/ExecStart into the systemd unit, exactly like
 # install-autostart.sh does for songmaker.service.
 #
-# LOCK_FILE lives at a fixed path inside the checkout itself
-# ($REPO_ROOT/.git/songmaker-autodeploy.lock), not under systemd's
-# RuntimeDirectory. A unit-managed RuntimeDirectory gives the systemd-run
-# tick and a manual shell run of this same script two different lock
-# inodes — no mutual exclusion at all between them, which defeats the whole
-# point of the lock. The checkout is the one thing every caller (systemd
-# unit, manual invocation, a second worktree pointed at a different
-# checkout) already agrees on, so the lock lives there instead.
-#
-# FAILURE_COUNT_FILE, BUSY_COUNT_FILE, and DEPLOYED_SHA_FILE default to
-# systemd's StateDirectory (survives reboots) when running under the unit,
-# and fall back to the SAME $REPO_ROOT/.git-relative path the lock file
-# uses (not /var/tmp) when STATE_DIRECTORY is unset — a manual run outside
-# systemd then shares exactly the state a unit run would have used, instead
-# of drifting to a throwaway path that starts every manual invocation back
-# at "no deployed.sha, no failure history". The SONGMAKER_AUTODEPLOY_* env
-# vars remain the explicit override for tests and unusual setups.
+# LOCK_FILE and all three state files (FAILURE_COUNT_FILE, BUSY_COUNT_FILE,
+# DEPLOYED_SHA_FILE) live at a fixed path inside the git ADMIN directory,
+# resolved via `git rev-parse --absolute-git-dir` (GIT_ADMIN_DIR below) —
+# not assumed to be $REPO_ROOT/.git. In a normal checkout that IS
+# $REPO_ROOT/.git; in a linked worktree (`git worktree add`), $REPO_ROOT/.git
+# is a FILE ("gitdir: /path/to/main/.git/worktrees/<name>"), and the real
+# admin dir lives at that other path — redirecting straight at
+# $REPO_ROOT/.git/songmaker-autodeploy.lock would fail before the first log
+# line and kill the shell every tick. There is deliberately no separate
+# systemd StateDirectory: that would be a second location, so a manual shell
+# run outside systemd and the unit's own tick would silently diverge onto
+# two different "deployed.sha"/failure histories instead of sharing one. The
+# resolved admin dir is the one thing every caller (systemd unit, manual
+# invocation, a second worktree pointed at a different checkout) already
+# agrees on for a given checkout, and it survives reboots exactly like the
+# rest of the repo. The SONGMAKER_AUTODEPLOY_* env vars remain the explicit
+# override for tests and unusual setups.
 
 set -euo pipefail
 
@@ -117,16 +117,6 @@ REPO_ROOT="$(dirname "$SCRIPT_DIR")"
 LOG_TAG="songmaker-autodeploy"
 LOG_PAYLOAD_MAX_CHARS=2000
 DEPLOY_BRANCH="${SONGMAKER_AUTODEPLOY_BRANCH:-main}"
-STATE_DIR_FALLBACK="$REPO_ROOT/.git"
-LOCK_FILE="${SONGMAKER_AUTODEPLOY_LOCK_FILE:-$STATE_DIR_FALLBACK/songmaker-autodeploy.lock}"
-FAILURE_COUNT_FILE="${SONGMAKER_AUTODEPLOY_FAILURE_COUNT_FILE:-${STATE_DIRECTORY:-$STATE_DIR_FALLBACK}/songmaker-autodeploy.failcount}"
-BUSY_COUNT_FILE="${SONGMAKER_AUTODEPLOY_BUSY_COUNT_FILE:-${STATE_DIRECTORY:-$STATE_DIR_FALLBACK}/songmaker-autodeploy.busycount}"
-DEPLOYED_SHA_FILE="${SONGMAKER_AUTODEPLOY_DEPLOYED_SHA_FILE:-${STATE_DIRECTORY:-$STATE_DIR_FALLBACK}/songmaker-autodeploy.deployed-sha}"
-FAILURE_ALERT_THRESHOLD="${SONGMAKER_AUTODEPLOY_FAILURE_ALERT_THRESHOLD:-3}"
-BUSY_ALERT_THRESHOLD="${SONGMAKER_AUTODEPLOY_BUSY_ALERT_THRESHOLD:-30}"
-DB_CHECK_TIMEOUT_SECONDS="${SONGMAKER_AUTODEPLOY_DB_CHECK_TIMEOUT_SECONDS:-30}"
-POSTGRES_USER="${POSTGRES_USER:-songmaker}"
-POSTGRES_DB="${POSTGRES_DB:-songmaker}"
 
 log() {
     local level="$1"
@@ -142,6 +132,25 @@ log_debug() { log debug "$*"; }
 log_info() { log info "$*"; }
 log_warning() { log warning "$*"; }
 log_err() { log err "$*"; }
+
+# Resolve the real git ADMIN directory instead of assuming $REPO_ROOT/.git
+# is one (see the LOCK_FILE/state-file comment above) — must run after log()
+# is defined, since a failure here has to log_err before it exits.
+if ! GIT_ADMIN_DIR="$(git -C "$REPO_ROOT" rev-parse --absolute-git-dir 2>&1)"; then
+    log_err "cannot resolve the git admin directory for $REPO_ROOT: $GIT_ADMIN_DIR"
+    exit 1
+fi
+STATE_DIR_FALLBACK="$GIT_ADMIN_DIR"
+LOCK_FILE="${SONGMAKER_AUTODEPLOY_LOCK_FILE:-$STATE_DIR_FALLBACK/songmaker-autodeploy.lock}"
+FAILURE_COUNT_FILE="${SONGMAKER_AUTODEPLOY_FAILURE_COUNT_FILE:-$STATE_DIR_FALLBACK/songmaker-autodeploy.failcount}"
+BUSY_COUNT_FILE="${SONGMAKER_AUTODEPLOY_BUSY_COUNT_FILE:-$STATE_DIR_FALLBACK/songmaker-autodeploy.busycount}"
+DEPLOYED_SHA_FILE="${SONGMAKER_AUTODEPLOY_DEPLOYED_SHA_FILE:-$STATE_DIR_FALLBACK/songmaker-autodeploy.deployed-sha}"
+GUARD_REASON_FILE="${SONGMAKER_AUTODEPLOY_GUARD_REASON_FILE:-$STATE_DIR_FALLBACK/songmaker-autodeploy.guard-reason}"
+FAILURE_ALERT_THRESHOLD="${SONGMAKER_AUTODEPLOY_FAILURE_ALERT_THRESHOLD:-3}"
+BUSY_ALERT_THRESHOLD="${SONGMAKER_AUTODEPLOY_BUSY_ALERT_THRESHOLD:-30}"
+DB_CHECK_TIMEOUT_SECONDS="${SONGMAKER_AUTODEPLOY_DB_CHECK_TIMEOUT_SECONDS:-30}"
+POSTGRES_USER="${POSTGRES_USER:-songmaker}"
+POSTGRES_DB="${POSTGRES_DB:-songmaker}"
 
 compose() {
     (cd "$REPO_ROOT" && docker compose "$@")
@@ -197,11 +206,31 @@ read_counter() {
 reset_counters() {
     printf '0' >"$FAILURE_COUNT_FILE"
     printf '0' >"$BUSY_COUNT_FILE"
+    # The counters hitting 0 means the guard streak is over too — an
+    # up-to-date shortcut or a first-run adoption both reset the counters
+    # without ever reaching the branch check that would otherwise clear
+    # this file (see step 4 below), so it has to be cleared here as well or
+    # a stale reason from a previous episode could suppress the err line on
+    # a genuinely new one.
+    rm -f "$GUARD_REASON_FILE"
 }
 
+# Writes $DEPLOYED_SHA_FILE and reads it straight back before declaring
+# success — the reader elsewhere in this script rejects anything that isn't
+# a clean 40-char hex SHA (see step 3), so a write that silently didn't take
+# (full disk, permissions, a stale bind mount) would otherwise look like
+# nothing was ever deployed and every following tick would redeploy the
+# same commit forever with no ALERT. A mismatch counts as a failed tick, not
+# a successful one.
 record_success() {
     local deployed_sha="$1"
     printf '%s' "$deployed_sha" >"$DEPLOYED_SHA_FILE"
+    local written_sha
+    if ! written_sha="$(cat "$DEPLOYED_SHA_FILE" 2>&1)" || [[ "$written_sha" != "$deployed_sha" ]]; then
+        log_err "deployed-sha file $DEPLOYED_SHA_FILE reads back as '$written_sha' after writing '$deployed_sha' — treating this deploy as failed, not successful"
+        record_failure "deployed-sha readback mismatch"
+        return 1
+    fi
     reset_counters
     log_info "deploy succeeded, now running $deployed_sha"
 }
@@ -238,6 +267,29 @@ record_busy_deferral() {
     fi
 }
 
+# Dedup for the branch guard's err line only (step 4 below). An operator who
+# stays on a work branch has step 3's up-to-date shortcut fail on
+# essentially every tick — their HEAD is essentially never ==
+# origin/$DEPLOY_BRANCH while they are away from it — so without this, the
+# branch guard would log the identical prio=err line every ~2 minutes for
+# hours. Only a CHANGED reason (a different branch, or detached vs named)
+# re-earns an err line; the same reason repeating logs at debug instead.
+# record_failure still counts every tick regardless of which level this
+# logs at, so the ALERT threshold is unaffected.
+log_guard_reason() {
+    local reason="$1"
+    local previous_reason=""
+    if [[ -f "$GUARD_REASON_FILE" ]]; then
+        previous_reason="$(cat "$GUARD_REASON_FILE" 2>/dev/null || true)"
+    fi
+    if [[ "$reason" == "$previous_reason" ]]; then
+        log_debug "$reason (unchanged since last tick, not repeating at err)"
+    else
+        log_err "$reason"
+        printf '%s' "$reason" >"$GUARD_REASON_FILE"
+    fi
+}
+
 # --- 1. Refuse to overlap with another run in flight (a slow cold-cache
 # build can outlive one 2-minute tick). Busy is the expected steady state
 # under a running build, not an error — logged at debug so an unfiltered
@@ -250,19 +302,27 @@ fi
 
 # --- 2. Cheap reads: local HEAD, then fetch, then remote HEAD. Neither
 # depends on which branch is currently checked out (rev-parse HEAD works
-# detached too), so these run before the branch guard.
+# detached too), so these run before the branch guard. A persistently
+# broken `git fetch` (e.g. a dead SSH key on the host) is the single most
+# likely way this whole mechanism goes silently stale, so all three record a
+# failure tick like every other refusal below, instead of only logging and
+# exiting — without this a stuck fetch would never reach the consecutive-
+# failure ALERT.
 if ! LOCAL_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD 2>&1)"; then
     log_err "cannot determine local HEAD in $REPO_ROOT: $LOCAL_HEAD"
+    record_failure "cannot determine local HEAD"
     exit 1
 fi
 
 if ! FETCH_OUTPUT="$(git -C "$REPO_ROOT" fetch origin "$DEPLOY_BRANCH" --quiet 2>&1)"; then
     log_err "git fetch origin $DEPLOY_BRANCH failed in $REPO_ROOT: $FETCH_OUTPUT"
+    record_failure "git fetch failed"
     exit 1
 fi
 
 if ! REMOTE_HEAD="$(git -C "$REPO_ROOT" rev-parse "origin/$DEPLOY_BRANCH" 2>&1)"; then
     log_err "cannot resolve origin/$DEPLOY_BRANCH in $REPO_ROOT: $REMOTE_HEAD"
+    record_failure "cannot resolve origin/$DEPLOY_BRANCH"
     exit 1
 fi
 
@@ -294,21 +354,30 @@ if [[ "$LOCAL_HEAD" == "$REMOTE_HEAD" && "$DEPLOYED_SHA" == "$LOCAL_HEAD" ]]; th
     exit 0
 fi
 
-# --- 4. On the deploy branch? A detached HEAD or the operator sitting on an
-# experiment branch stops here with a loud (prio=err) journal line and
-# touches nothing — this is now known to matter (something IS pending to
-# deploy, per step 3) before it fires.
+# --- 4. On the deploy branch? Reached only once step 3 has established that
+# something is actually pending — but on a work branch that is essentially
+# every tick: HEAD there is essentially never == origin/$DEPLOY_BRANCH, so
+# this guard fires continuously for as long as the operator stays away from
+# it, not as some rare edge case. A detached HEAD or a non-deploy branch
+# therefore only re-logs at prio=err when the reason actually changes
+# (log_guard_reason); record_failure still counts every tick regardless, so
+# the ALERT threshold is unaffected by the log-level damping.
 if ! CURRENT_BRANCH="$(git -C "$REPO_ROOT" symbolic-ref --quiet --short HEAD 2>&1)"; then
-    log_err "HEAD at $REPO_ROOT is not on a branch (detached?) — refusing to deploy, not touching the tree: $CURRENT_BRANCH"
+    log_guard_reason "HEAD at $REPO_ROOT is not on a branch (detached?) — refusing to deploy, not touching the tree: $CURRENT_BRANCH"
     record_failure "HEAD not on a branch"
     exit 1
 fi
 
 if [[ "$CURRENT_BRANCH" != "$DEPLOY_BRANCH" ]]; then
-    log_err "HEAD at $REPO_ROOT is on branch '$CURRENT_BRANCH', not the deploy branch '$DEPLOY_BRANCH' — refusing to deploy, not touching the tree"
+    log_guard_reason "HEAD at $REPO_ROOT is on branch '$CURRENT_BRANCH', not the deploy branch '$DEPLOY_BRANCH' — refusing to deploy, not touching the tree"
     record_failure "HEAD on branch $CURRENT_BRANCH instead of $DEPLOY_BRANCH"
     exit 1
 fi
+
+# Branch guard passed — clear any stale reason so a future recurrence (after
+# a branch change or a successful deploy in between) logs at err again
+# instead of being suppressed by a reason left over from before.
+rm -f "$GUARD_REASON_FILE"
 
 # --- 5. Safe to touch? A dirty working tree or a diverged (non-fast-
 # forwardable) local main stops here — the host's checkout is also the
@@ -386,13 +455,25 @@ if [[ "$ACTIVE_JOB_COUNT" -gt 0 ]]; then
     exit 0
 fi
 
+# Resolved once, right before the recreate — not after `compose up`
+# succeeds — so a broken `rev-parse` here fails the tick outright instead of
+# leaving a just-recreated stack with no way to record what it is running.
+if ! DEPLOYED_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD 2>&1)"; then
+    log_err "cannot determine HEAD in $REPO_ROOT right before recreate: $DEPLOYED_HEAD"
+    record_failure "cannot determine HEAD before recreate"
+    exit 1
+fi
+
 if compose up -d --wait; then
-    COMPOSE_EXIT_CODE=0
-    record_success "$(git -C "$REPO_ROOT" rev-parse HEAD)"
+    if record_success "$DEPLOYED_HEAD"; then
+        TICK_EXIT_CODE=0
+    else
+        TICK_EXIT_CODE=1
+    fi
 else
-    COMPOSE_EXIT_CODE=$?
-    log_err "docker compose up -d --wait failed in $REPO_ROOT (exit $COMPOSE_EXIT_CODE)"
+    TICK_EXIT_CODE=$?
+    log_err "docker compose up -d --wait failed in $REPO_ROOT (exit $TICK_EXIT_CODE)"
     record_failure "compose up failed"
 fi
 
-exit "$COMPOSE_EXIT_CODE"
+exit "$TICK_EXIT_CODE"
