@@ -105,6 +105,7 @@ def test_heartbeat_payload_keys_match_admin_reader() -> None:
     assert state.vram_used_gb == 6.0
     assert state.target_loading is None
     assert state.vram_total_gb == 24.0
+    assert state.vram_measured is False
     assert state.available_modes == []
     assert state.pinned == ["sft"]
     assert state.loading_started_at is None
