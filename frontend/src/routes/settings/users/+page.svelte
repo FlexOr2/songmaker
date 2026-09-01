@@ -321,19 +321,25 @@
 	);
 	const judgeCanSave = $derived(judgeDirty && judgeModel !== '' && !savingJudge);
 
-	$effect(() => {
-		void cowriterProvider;
-		if (!cowriterModels.includes(cowriterModel)) {
-			cowriterModel = '';
+	function selectCowriterProvider(provider: string): void {
+		cowriterProvider = provider;
+		if (cowriterSettings && provider === cowriterSettings.provider) {
+			cowriterModel = cowriterSettings.model;
+			return;
 		}
-	});
+		const models = cowriterSettings?.models_by_provider?.[provider] ?? [];
+		cowriterModel = models[0] ?? '';
+	}
 
-	$effect(() => {
-		void judgeProvider;
-		if (!judgeModels.includes(judgeModel)) {
-			judgeModel = '';
+	function selectJudgeProvider(provider: string): void {
+		judgeProvider = provider;
+		if (judgeSettings && provider === judgeSettings.provider) {
+			judgeModel = judgeSettings.model;
+			return;
 		}
-	});
+		const models = judgeSettings?.models_by_provider?.[provider] ?? [];
+		judgeModel = models[0] ?? '';
+	}
 
 	async function handleSaveCowriter() {
 		savingCowriter = true;
@@ -982,7 +988,7 @@
 										class:selected={cowriterProvider === provider}
 										aria-pressed={cowriterProvider === provider}
 										disabled={!configured}
-										onclick={() => (cowriterProvider = provider)}
+										onclick={() => selectCowriterProvider(provider)}
 									>
 										<span class="name">{providerLabel(provider)}</span>
 										<span
@@ -1008,6 +1014,11 @@
 								bind:value={cowriterModel}
 								disabled={cowriterModels.length === 0}
 							>
+								{#if cowriterModels.length === 0 && cowriterModel}
+									<option value={cowriterModel}
+										>{cowriterModel} (current — live list unavailable)</option
+									>
+								{/if}
 								{#each cowriterModels as model (model)}
 									<option value={model}>{model}</option>
 								{/each}
@@ -1078,7 +1089,7 @@
 										class:selected={judgeProvider === provider}
 										aria-pressed={judgeProvider === provider}
 										disabled={!configured}
-										onclick={() => (judgeProvider = provider)}
+										onclick={() => selectJudgeProvider(provider)}
 									>
 										<span class="name">{providerLabel(provider)}</span>
 										<span
@@ -1100,6 +1111,9 @@
 						<div class="claude-field">
 							<label for="judge-model">Model</label>
 							<select id="judge-model" bind:value={judgeModel} disabled={judgeModels.length === 0}>
+								{#if judgeModels.length === 0 && judgeModel}
+									<option value={judgeModel}>{judgeModel} (current — live list unavailable)</option>
+								{/if}
 								{#each judgeModels as model (model)}
 									<option value={model}>{model}</option>
 								{/each}
@@ -1649,13 +1663,14 @@
 		margin-top: 0.5rem;
 	}
 
-	.save-btn:hover:not(.disabled) {
+	.save-btn:hover:not(.disabled):not(:disabled) {
 		box-shadow: 0 0 16px rgba(160, 32, 240, 0.3);
 	}
 
-	.save-btn.disabled {
+	.save-btn.disabled,
+	.save-btn:disabled {
 		opacity: 0.5;
-		cursor: wait;
+		cursor: not-allowed;
 	}
 
 	.clear-btn {

@@ -15,7 +15,10 @@ from fastapi.testclient import TestClient
 from songmaker_cli.app_context import AppContext
 from songmaker_cli.claude.provider import FinalEvent, ToolCallEvent
 from songmaker_cli.constants import COWRITER_MAX_TOOL_ROUNDS, SETTING_CLAUDE_SCORING_MODEL
-from songmaker_cli.cowriter.errors import ProviderUnavailableError
+from songmaker_cli.cowriter.errors import (
+    ProviderModelCatalogUnavailableError,
+    ProviderUnavailableError,
+)
 from songmaker_cli.cowriter.openai_adapter import (
     _parse_tool_call,
     stream_openai_compatible_turn,
@@ -416,6 +419,83 @@ def test_models_errors_cover_every_provider_not_only_the_saved_one(admin_client,
     assert settings["models_by_provider"]["grok"] == []
     assert "codex" not in settings["models_errors"]
     assert "XAI_API_KEY" in settings["models_errors"]["grok"]
+
+
+def test_provider_status_requires_admin(admin_client):
+    client, _ = admin_client
+    client.app.dependency_overrides[get_current_user] = _fake_user("u-plain", "user")
+    try:
+        resp = client.get("/api/settings/providers")
+    finally:
+        client.app.dependency_overrides[get_current_user] = _fake_user("u-test", "admin")
+
+    assert resp.status_code == 403
+
+
+def test_judge_models_errors_cover_every_provider_not_only_the_saved_one(admin_client, monkeypatch):
+    client, _ = admin_client
+    client.put("/api/settings/judge", json={"provider": "codex", "model": "gpt-5.4"})
+
+    def _list_provider_models(provider: str) -> list[str]:
+        if provider == "grok":
+            raise ProviderUnavailableError(
+                "grok", "grok is not configured: missing XAI_API_KEY",
+            )
+        return list(LIVE_CATALOG[provider])
+
+    monkeypatch.setattr(
+        "songmaker_cli.cowriter.catalog.list_provider_models", _list_provider_models,
+    )
+    settings = client.get("/api/settings/judge").json()
+    assert settings["provider"] == "codex"
+    assert settings["models_by_provider"]["grok"] == []
+    assert "codex" not in settings["models_errors"]
+    assert "XAI_API_KEY" in settings["models_errors"]["grok"]
+
+
+def test_cowriter_save_with_unchanged_provider_and_model_survives_a_down_catalog(admin_client):
+    client, _ = admin_client
+    saved = client.put(
+        "/api/settings/cowriter",
+        json={"provider": "grok", "model": "grok-4.6", "tail_token_budget": 20000},
+    )
+    assert saved.status_code == 200
+
+    def _down(provider: str) -> list[str]:
+        raise ProviderModelCatalogUnavailableError(
+            provider, f"could not list {provider} models",
+        )
+
+    with patch("songmaker_cli.cowriter.catalog.list_provider_models", side_effect=_down):
+        budget_only = client.put(
+            "/api/settings/cowriter",
+            json={"provider": "grok", "model": "grok-4.6", "tail_token_budget": 30000},
+        )
+
+    assert budget_only.status_code == 200
+    assert budget_only.json()["tail_token_budget"] == 30000
+    assert budget_only.json()["model"] == "grok-4.6"
+
+
+def test_cowriter_save_that_actually_changes_the_model_still_needs_a_live_catalog(admin_client):
+    client, _ = admin_client
+    client.put(
+        "/api/settings/cowriter",
+        json={"provider": "grok", "model": "grok-4.6"},
+    )
+
+    def _down(provider: str) -> list[str]:
+        raise ProviderModelCatalogUnavailableError(
+            provider, f"could not list {provider} models",
+        )
+
+    with patch("songmaker_cli.cowriter.catalog.list_provider_models", side_effect=_down):
+        resp = client.put(
+            "/api/settings/cowriter",
+            json={"provider": "grok", "model": "grok-4.5"},
+        )
+
+    assert resp.status_code == 503
 
 
 def test_openai_adapter_rejects_malformed_tool_arguments_without_calling_tool():

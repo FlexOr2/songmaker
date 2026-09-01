@@ -347,7 +347,7 @@ def api_set_claude_models(
 
 @router.get("/settings/providers")
 def api_get_provider_status(
-    _user: AuthenticatedUser = Depends(get_current_user),
+    _admin: AuthenticatedUser = Depends(require_admin),
 ) -> list[ProviderStatusResponse]:
     from songmaker_cli.constants import COWRITER_PROVIDERS
     from songmaker_cli.cowriter.catalog import (
@@ -439,14 +439,20 @@ def api_set_cowriter_settings(
         raise HTTPException(
             422, f"Unknown co-writer provider '{req.provider}'",
         )
-    allowed, catalog_error = _models_for_provider(req.provider)
-    if catalog_error:
-        raise HTTPException(503, catalog_error)
-    if req.model not in allowed:
-        raise HTTPException(
-            422,
-            f"Unknown {req.provider} model '{req.model}'",
-        )
+    saved_provider = get_cowriter_provider(session)
+    provider_or_model_changed = (
+        req.provider != saved_provider
+        or req.model != get_cowriter_model(session, saved_provider)
+    )
+    if provider_or_model_changed:
+        allowed, catalog_error = _models_for_provider(req.provider)
+        if catalog_error:
+            raise HTTPException(503, catalog_error)
+        if req.model not in allowed:
+            raise HTTPException(
+                422,
+                f"Unknown {req.provider} model '{req.model}'",
+            )
     set_cowriter_settings(session, req.provider, req.model)
     if req.tail_token_budget is not None:
         try:

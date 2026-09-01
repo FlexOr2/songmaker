@@ -377,10 +377,78 @@ describe('admin models tab', () => {
 		expect(buttonNamed(cowriter, 'Save Co-Writer').disabled).toBe(true);
 	});
 
+	it('disables picking an unconfigured provider in the scoring picker', async () => {
+		const target = await renderPage(true);
+		await selectTab(target, 'models');
+		const scoring = sectionByHeading(target, 'Scoring');
+
+		expect(pillNamed(scoring, 'Grok').disabled).toBe(true);
+	});
+
+	it('disables Save and shows "Nothing changed" right after a clean load', async () => {
+		const target = await renderPage(true);
+		await selectTab(target, 'models');
+		const cowriter = sectionByHeading(target, 'Co-Writer');
+		const scoring = sectionByHeading(target, 'Scoring');
+
+		expect(buttonNamed(cowriter, 'Save Co-Writer').disabled).toBe(true);
+		expect(cowriter.textContent).toContain('Nothing changed.');
+		expect(buttonNamed(scoring, 'Save Scoring').disabled).toBe(true);
+		expect(scoring.textContent).toContain('Nothing changed.');
+	});
+
+	it('has no Chat Model field anymore', async () => {
+		const target = await renderPage(true);
+		await selectTab(target, 'models');
+
+		expect(target.textContent).not.toContain('Chat Model');
+	});
+
+	it('opens without claiming unsaved changes when the saved provider has no live catalog', async () => {
+		api.fetchCowriterSettings.mockResolvedValue({
+			provider: 'claude',
+			model: 'claude-sonnet',
+			tail_token_budget: 8000,
+			allowed_providers: ['claude', 'codex', 'grok'],
+			allowed_models: [],
+			models_by_provider: { claude: [], codex: [], grok: [] },
+			models_errors: { claude: 'could not list claude models' }
+		});
+		const target = await renderPage(true);
+		await selectTab(target, 'models');
+		const cowriter = sectionByHeading(target, 'Co-Writer');
+		const modelSelect = requireElement<HTMLSelectElement>(cowriter, '#cowriter-model');
+
+		expect(cowriter.textContent).toContain('Nothing changed.');
+		expect(buttonNamed(cowriter, 'Save Co-Writer').disabled).toBe(true);
+		expect(modelSelect.value).toBe('claude-sonnet');
+		expect(modelSelect.disabled).toBe(true);
+	});
+
+	it('lets a history-tail-only change stay saveable when the saved provider has no live catalog', async () => {
+		api.fetchCowriterSettings.mockResolvedValue({
+			provider: 'claude',
+			model: 'claude-sonnet',
+			tail_token_budget: 8000,
+			allowed_providers: ['claude', 'codex', 'grok'],
+			allowed_models: [],
+			models_by_provider: { claude: [], codex: [], grok: [] },
+			models_errors: { claude: 'could not list claude models' }
+		});
+		const target = await renderPage(true);
+		await selectTab(target, 'models');
+		const cowriter = sectionByHeading(target, 'Co-Writer');
+		const budgetInput = requireElement<HTMLInputElement>(cowriter, '#cowriter-budget');
+		budgetInput.value = '30000';
+		budgetInput.dispatchEvent(new Event('input', { bubbles: true }));
+		await tick();
+
+		expect(buttonNamed(cowriter, 'Save Co-Writer').disabled).toBe(false);
+	});
+
 	it('loads and saves the scoring block against /api/settings/judge', async () => {
 		const target = await renderPage(true);
 		await selectTab(target, 'models');
-		expect(api.fetchJudgeSettings).toHaveBeenCalled();
 		const scoring = sectionByHeading(target, 'Scoring');
 		expect(scoring.textContent).toContain('claude-opus');
 
