@@ -3,8 +3,8 @@
 #
 # scripts/songmaker-autodeploy.service runs scripts/auto-deploy.sh once;
 # scripts/songmaker-autodeploy.timer fires it every ~2 minutes. The script
-# itself does the actual git-fetch/compare, guard checks, and
-# `docker compose up -d --build --wait` — see its header for the full
+# itself does the actual git-fetch/compare, guard checks, `docker compose
+# build`, and `docker compose up -d --wait` — see its header for the full
 # design rationale and the incidents that shaped the guards.
 #
 # The OPERATOR runs this script, not an agent. It only touches
@@ -25,8 +25,9 @@
 # recreate containers and kill an in-flight generation — the operator has to
 # choose that moment deliberately. Starting songmaker-autodeploy.timer only
 # arms a ~2-minute schedule; the first tick it triggers goes through
-# auto-deploy.sh's own guards (up-to-date short-circuit, dirty-tree/diverge
-# check, active-jobs check) before it would ever touch the stack. There is
+# auto-deploy.sh's own guards (deploy-branch check, up-to-date short-circuit,
+# dirty-tree/diverge check, active-jobs check before AND after the build)
+# before it would ever touch the stack. There is
 # no unguarded moment to protect the operator from, so there is no reason to
 # make them run a second command.
 #
@@ -45,6 +46,19 @@ set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(dirname "$SCRIPT_DIR")"
 INSTALL_USER="${SUDO_USER:-$(id -un)}"
+
+# systemd unit files field-split on whitespace and expand '%' as a specifier
+# (e.g. %h, %H) inside directive values — a checkout path containing either
+# cannot be embedded as a plain WorkingDirectory=/ExecStart= value at all, no
+# matter how it is escaped for sed. Reject it outright rather than install a
+# unit that silently misparses its own paths.
+if [[ "$PROJECT_ROOT" == *%* || "$PROJECT_ROOT" =~ [[:space:]] ]]; then
+    echo "ERROR: checkout path '$PROJECT_ROOT' contains '%' or whitespace." >&2
+    echo "systemd unit files treat '%' as specifier expansion and split fields on" >&2
+    echo "whitespace, so this path cannot be embedded into WorkingDirectory=/ExecStart=." >&2
+    echo "Move or rename the checkout to a path without '%' or spaces and re-run." >&2
+    exit 1
+fi
 
 SERVICE_SOURCE="$SCRIPT_DIR/songmaker-autodeploy.service"
 SERVICE_TARGET="/etc/systemd/system/songmaker-autodeploy.service"
@@ -78,9 +92,10 @@ if [ "$INSTALL_USER" = "root" ]; then
 fi
 
 # Escape backslash, the sed delimiter (#), and & (which sed would otherwise
-# expand to "whatever matched the pattern" in the replacement text) so an
-# unusual PROJECT_ROOT or INSTALL_USER can never corrupt or misdirect the
-# substitution below.
+# expand to "whatever matched the pattern" in the replacement text). The
+# guard above already rejected the '%'/whitespace that systemd itself would
+# choke on; this only has to protect sed's own substitution syntax, not
+# systemd's parsing of the result.
 sed_escape_replacement() {
     printf '%s' "$1" | sed -e 's/[\&#]/\\&/g'
 }
@@ -119,3 +134,7 @@ echo "To verify what's installed:"
 echo "  systemctl status songmaker-autodeploy.timer"
 echo "  systemctl list-timers songmaker-autodeploy.timer"
 echo "  journalctl -t songmaker-autodeploy -f"
+echo
+echo "Acceptance step: wait for the first tick (up to 2 minutes), then confirm"
+echo "it actually ran before walking away:"
+echo "  journalctl -t songmaker-autodeploy -n 5"

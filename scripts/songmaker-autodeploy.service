@@ -1,9 +1,7 @@
 [Unit]
 Description=Songmaker pull-based auto-deploy tick (issue #298)
-After=docker.service
+After=docker.service songmaker.service
 Requires=docker.service
-StartLimitIntervalSec=300
-StartLimitBurst=10
 
 [Service]
 Type=oneshot
@@ -17,12 +15,20 @@ Type=oneshot
 WorkingDirectory=/home/felix-hummert/git/songmaker
 ExecStart=/home/felix-hummert/git/songmaker/scripts/auto-deploy.sh
 User=felix-hummert
-Group=docker
-# No TimeoutStartSec override: a cold-cache `docker compose up --build` can
+# No Group= override: the stack owner (User= above) is already a member of
+# the docker group, so the process inherits it as a supplementary group.
+# Forcing Group=docker as the *primary* group would make `git pull` write
+# new files with group docker instead of the owner's usual group.
+#
+# RuntimeDirectory creates /run/songmaker-autodeploy (cleared on reboot) for
+# the flock lock file; StateDirectory creates /var/lib/songmaker-autodeploy
+# (survives reboots) for the consecutive-setback counter. auto-deploy.sh
+# reads both via $RUNTIME_DIRECTORY/$STATE_DIRECTORY, falling back to
+# /var/tmp only for a manual run outside systemd.
+RuntimeDirectory=songmaker-autodeploy
+StateDirectory=songmaker-autodeploy
+# No TimeoutStartSec override: a cold-cache `docker compose build` can
 # legitimately take 8-15 minutes (see CLAUDE.md — never wrap compose in a
 # timeout). The systemd default TimeoutStartSec (90s) would kill it mid-build
 # if not disabled here.
 TimeoutStartSec=infinity
-
-[Install]
-WantedBy=multi-user.target
