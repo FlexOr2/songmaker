@@ -20,10 +20,10 @@ from songmaker_cli.constants import (
     PROM_HTTP_REQUEST_DURATION_MS,
     PROM_HTTP_REQUESTS_TOTAL,
     PROM_JOB_DURATION_SECONDS,
-    PROM_JOB_FAILURES_TOTAL,
     PROM_JOBS_TOTAL,
+    PROM_LAST_JOB_FAILURE_TIMESTAMP,
+    PROM_NEVER_FAILED_TIMESTAMP,
     PROM_QUEUE_DEPTH,
-    JobStatus,
 )
 
 router = APIRouter()
@@ -56,6 +56,7 @@ def _check_db(ctx: AppContext) -> bool:
 def _format_prometheus(
     http_snapshot: dict,
     jobs_by_type: dict[str, dict[str, int]],
+    last_job_failure_epoch_seconds: float,
     duration_avg: float | None,
     duration_min: float | None,
     duration_max: float | None,
@@ -98,14 +99,12 @@ def _format_prometheus(
                 f'{PROM_JOBS_TOTAL}{{type="{job_type}",status="{status}"}} {count}'
             )
 
-    failed_jobs = sum(
-        statuses.get(JobStatus.FAILED, 0) for statuses in jobs_by_type.values()
-    )
     lines.append(
-        f"# HELP {PROM_JOB_FAILURES_TOTAL} Jobs that have failed, across all job types.",
+        f"# HELP {PROM_LAST_JOB_FAILURE_TIMESTAMP} "
+        "Unix time of the newest job failure, 0 while nothing has ever failed.",
     )
-    lines.append(f"# TYPE {PROM_JOB_FAILURES_TOTAL} counter")
-    lines.append(f"{PROM_JOB_FAILURES_TOTAL} {failed_jobs}")
+    lines.append(f"# TYPE {PROM_LAST_JOB_FAILURE_TIMESTAMP} gauge")
+    lines.append(f"{PROM_LAST_JOB_FAILURE_TIMESTAMP} {last_job_failure_epoch_seconds}")
 
     lines.append(f"# HELP {PROM_JOB_DURATION_SECONDS} Job duration statistics for completed jobs.")
     lines.append(f"# TYPE {PROM_JOB_DURATION_SECONDS} gauge")
@@ -191,12 +190,14 @@ async def metrics_endpoint(request: Request) -> PlainTextResponse:
         count_active_sessions,
         job_counts_by_type_and_status,
         job_duration_stats,
+        last_job_failure_time,
         list_worker_identities,
     )
     ctx: AppContext = request.app.state.ctx
     with ctx.db() as session:
         jobs_by_type = job_counts_by_type_and_status(session)
         duration = job_duration_stats(session)
+        last_job_failure = last_job_failure_time(session)
         active_sessions = count_active_sessions(session)
         acestep_workers = list_worker_identities(session)
 
@@ -232,6 +233,10 @@ async def metrics_endpoint(request: Request) -> PlainTextResponse:
     body = _format_prometheus(
         http_snapshot=http_metrics.snapshot(),
         jobs_by_type=jobs_by_type,
+        last_job_failure_epoch_seconds=(
+            last_job_failure.timestamp() if last_job_failure
+            else PROM_NEVER_FAILED_TIMESTAMP
+        ),
         duration_avg=duration.avg,
         duration_min=duration.min,
         duration_max=duration.max,

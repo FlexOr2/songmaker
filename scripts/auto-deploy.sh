@@ -44,9 +44,10 @@
 #     non-zero (fail_tick below), so `OnFailure=songmaker-alert@%n.service`
 #     on the systemd unit emails the operator at that exact same moment
 #     instead of on every transient blip. A streak that simply continues
-#     escalates again once per ALERT_REPEAT_TICKS, so an outage nobody
-#     reacts to stays visible without mailing every two minutes (see
-#     is_alert_tick). A tick that merely defers because jobs are active
+#     escalates again once every ALERT_REPEAT_SECONDS of wall-clock time,
+#     so an outage nobody reacts to stays visible without mailing every
+#     two minutes (see escalation_due). A tick that merely defers because
+#     jobs are active
 #     increments a separate consecutive-BUSY counter with a much higher
 #     threshold and a quieter prio=warning line, never fails the unit — a
 #     normal generation queue or an hours-long lora_training job
@@ -99,9 +100,9 @@
 # WorkingDirectory/User/ExecStart into the systemd unit, exactly like
 # install-autostart.sh does for songmaker.service.
 #
-# LOCK_FILE and all three state files (FAILURE_COUNT_FILE, BUSY_COUNT_FILE,
-# DEPLOYED_SHA_FILE) live at a fixed path inside the git ADMIN directory,
-# resolved via `git rev-parse --absolute-git-dir` (GIT_ADMIN_DIR below) —
+# LOCK_FILE and all state files (the two counters, the two escalation
+# timestamps, DEPLOYED_SHA_FILE) live at a fixed path inside the git ADMIN
+# directory, resolved via `git rev-parse --absolute-git-dir` (GIT_ADMIN_DIR) —
 # not assumed to be $REPO_ROOT/.git. In a normal checkout that IS
 # $REPO_ROOT/.git; in a linked worktree (`git worktree add`), $REPO_ROOT/.git
 # is a FILE ("gitdir: /path/to/main/.git/worktrees/<name>"), and the real
@@ -153,19 +154,21 @@ LOCK_FILE="${SONGMAKER_AUTODEPLOY_LOCK_FILE:-$STATE_DIR_FALLBACK/songmaker-autod
 FAILURE_COUNT_FILE="${SONGMAKER_AUTODEPLOY_FAILURE_COUNT_FILE:-$STATE_DIR_FALLBACK/songmaker-autodeploy.failcount}"
 BUSY_COUNT_FILE="${SONGMAKER_AUTODEPLOY_BUSY_COUNT_FILE:-$STATE_DIR_FALLBACK/songmaker-autodeploy.busycount}"
 DEPLOYED_SHA_FILE="${SONGMAKER_AUTODEPLOY_DEPLOYED_SHA_FILE:-$STATE_DIR_FALLBACK/songmaker-autodeploy.deployed-sha}"
+FAILURE_ESCALATED_AT_FILE="${SONGMAKER_AUTODEPLOY_FAILURE_ESCALATED_AT_FILE:-$STATE_DIR_FALLBACK/songmaker-autodeploy.failure-escalated-at}"
+BUSY_ESCALATED_AT_FILE="${SONGMAKER_AUTODEPLOY_BUSY_ESCALATED_AT_FILE:-$STATE_DIR_FALLBACK/songmaker-autodeploy.busy-escalated-at}"
 GUARD_REASON_FILE="${SONGMAKER_AUTODEPLOY_GUARD_REASON_FILE:-$STATE_DIR_FALLBACK/songmaker-autodeploy.guard-reason}"
 FAILURE_ALERT_THRESHOLD="${SONGMAKER_AUTODEPLOY_FAILURE_ALERT_THRESHOLD:-3}"
 BUSY_ALERT_THRESHOLD="${SONGMAKER_AUTODEPLOY_BUSY_ALERT_THRESHOLD:-30}"
-# How many further ticks of an unbroken streak pass between one escalation
-# and the next — 30 ticks is ~1h, deliberately the same cadence
-# Alertmanager's repeat_interval gives the other half of this one alert
-# channel (monitoring/alertmanager.yml.template). See is_alert_tick.
-ALERT_REPEAT_TICKS="${SONGMAKER_AUTODEPLOY_ALERT_REPEAT_TICKS:-30}"
+# Wall-clock time between one escalation of an unbroken streak and the
+# next — 1h, deliberately the same cadence Alertmanager's repeat_interval
+# gives the other half of this one alert channel
+# (monitoring/alertmanager.yml.template). See escalation_due.
+ALERT_REPEAT_SECONDS="${SONGMAKER_AUTODEPLOY_ALERT_REPEAT_SECONDS:-3600}"
 # A zero or garbage value here would make every escalation arithmetic
 # silently fail, i.e. turn the alarm off — the one failure mode this whole
 # issue exists to prevent.
-if ! [[ "$ALERT_REPEAT_TICKS" =~ ^[1-9][0-9]*$ ]]; then
-    log_err "SONGMAKER_AUTODEPLOY_ALERT_REPEAT_TICKS must be a positive integer, got '$ALERT_REPEAT_TICKS'"
+if ! [[ "$ALERT_REPEAT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    log_err "SONGMAKER_AUTODEPLOY_ALERT_REPEAT_SECONDS must be a positive integer, got '$ALERT_REPEAT_SECONDS'"
     exit 1
 fi
 DB_CHECK_TIMEOUT_SECONDS="${SONGMAKER_AUTODEPLOY_DB_CHECK_TIMEOUT_SECONDS:-30}"
@@ -207,35 +210,44 @@ active_job_count() {
     printf '%s' "$count"
 }
 
-# Shared reader for both consecutive-tick counters. Guards `cat` itself
-# against set -e (an unreadable file, e.g. a permissions problem, must be
-# treated like a corrupt one — 0 plus a loud line — rather than killing the
-# tick before it can even record anything).
-read_counter() {
+# Shared reader for every whole-number state file this script keeps: the
+# two consecutive-tick counters and the two escalation timestamps. A
+# missing file reads 0, which is what both kinds want — no streak yet, and
+# no escalation yet. Guards `cat` itself against set -e (an unreadable
+# file, e.g. a permissions problem, must be treated like a corrupt one — 0
+# plus a loud line — rather than killing the tick before it can even
+# record anything).
+read_number() {
     local file="$1"
     if [[ ! -f "$file" ]]; then
         printf '0'
         return
     fi
-    local count
-    if ! count="$(cat "$file" 2>&1)"; then
-        log_err "cannot read counter file $file ($count) — treating as corrupt, using 0"
+    local value
+    if ! value="$(cat "$file" 2>&1)"; then
+        log_err "cannot read state file $file ($value) — treating as corrupt, using 0"
         printf '0' >"$file"
         printf '0'
         return
     fi
-    if ! [[ "$count" =~ ^[0-9]+$ ]]; then
-        log_err "counter file $file has corrupt content ('$count') — resetting to 0"
+    if ! [[ "$value" =~ ^[0-9]+$ ]]; then
+        log_err "state file $file has corrupt content ('$value') — resetting to 0"
         printf '0' >"$file"
         printf '0'
         return
     fi
-    printf '%s' "$count"
+    printf '%s' "$value"
 }
 
 reset_counters() {
     printf '0' >"$FAILURE_COUNT_FILE"
     printf '0' >"$BUSY_COUNT_FILE"
+    # The escalation timestamps belong to the streak that is now over. A
+    # new streak has to be able to escalate on the tick that crosses its
+    # threshold, even if that is minutes after the previous streak's last
+    # escalation — otherwise a recovery followed by a fresh outage would
+    # stay silent for the rest of the repeat window.
+    rm -f "$FAILURE_ESCALATED_AT_FILE" "$BUSY_ESCALATED_AT_FILE"
     # The counters hitting 0 means the guard streak is over too — an
     # up-to-date shortcut or a first-run adoption both reset the counters
     # without ever reaching the branch check that would otherwise clear
@@ -258,53 +270,84 @@ record_success() {
     local written_sha
     if ! written_sha="$(cat "$DEPLOYED_SHA_FILE" 2>&1)" || [[ "$written_sha" != "$deployed_sha" ]]; then
         log_err "deployed-sha file $DEPLOYED_SHA_FILE reads back as '$written_sha' after writing '$deployed_sha' — treating this deploy as failed, not successful"
-        record_failure "deployed-sha readback mismatch"
+        # This path pages immediately either way (the caller exits 1), so
+        # only record_failure's counting matters here, not its answer to
+        # "did this tick escalate".
+        record_failure "deployed-sha readback mismatch" || true
         return 1
     fi
     reset_counters
     log_info "deploy succeeded, now running $deployed_sha"
 }
 
+# What the clock reads. Its own function because the tests replace it —
+# a repetition promised in hours cannot be proven by a test that waits
+# hours.
+now_seconds() {
+    date +%s
+}
+
 # The escalation rule both counters below share: escalate on the tick that
-# CROSSES the threshold, then once per ALERT_REPEAT_TICKS for as long as
-# the streak lasts. Escalating on every tick past the threshold would mail
-# the operator every two minutes through `OnFailure=` (issue #333) and
-# bury the journal; escalating only on the crossing tick would let a
-# permanent outage go quiet after a single missed message, which is the
-# worse of the two failures. Every tick is still counted and still logged
-# at debug, so the record of what happened is complete either way.
-is_alert_tick() {
+# CROSSES the threshold, then at most once per ALERT_REPEAT_SECONDS for as
+# long as the streak lasts, recording in $timestamp_file when it did.
+# Escalating on every tick past the threshold would mail the operator
+# every two minutes through `OnFailure=` (issue #333) and bury the
+# journal; escalating only on the crossing tick would let a permanent
+# outage go quiet after a single missed message, which is the worse of the
+# two failures. Every tick is still counted and still logged at debug, so
+# the record of what happened is complete either way.
+#
+# The repetition is measured in TIME, not in ticks. A systemd timer starts
+# no second run while the previous one is still going, so a tick is not a
+# fixed two minutes: one that waits out COMPOSE_UP_WAIT_TIMEOUT_SECONDS
+# occupies twenty. Counting ticks turned "again in an hour" into "again in
+# ten hours" on exactly the slow, broken ticks this alarm exists for.
+# The THRESHOLD stays a tick count on
+# purpose: "three attempts in a row failed" is what separates a transient
+# blip (a migration lock_timeout the next tick retries) from an outage,
+# and elapsed time cannot tell those two apart.
+#
+# Called at most once per tick per counter — it writes the timestamp it
+# reads.
+escalation_due() {
     local count="$1"
     local threshold="$2"
-    if ((count < threshold)); then
-        return 1
-    fi
-    (( (count - threshold) % ALERT_REPEAT_TICKS == 0 ))
+    local timestamp_file="$3"
+    ((count >= threshold)) || return 1
+    local now last_escalation
+    now="$(now_seconds)"
+    last_escalation="$(read_number "$timestamp_file")"
+    ((now - last_escalation >= ALERT_REPEAT_SECONDS)) || return 1
+    printf '%s' "$now" >"$timestamp_file"
 }
 
 # A tick that could not deploy at all despite $DEPLOY_BRANCH having moved —
 # a hard refusal (wrong branch, dirty tree, diverged), a fail-closed DB
 # check, or a pull/build/up failure. This is the "something is actually
-# broken" signal: N of these in a row (default 3, ~6 minutes) pages.
+# broken" signal: N of these in a row (default 3) pages.
+#
+# Returns success on exactly the ticks that escalated, so fail_tick below
+# fails the systemd unit — and therefore sends the email — on those and
+# only those, without asking escalation_due a second question it would
+# answer differently (it records the time it escalated).
 record_failure() {
     local reason="$1"
     local count
-    count="$(read_counter "$FAILURE_COUNT_FILE")"
+    count="$(read_number "$FAILURE_COUNT_FILE")"
     count=$((count + 1))
     printf '%s' "$count" >"$FAILURE_COUNT_FILE"
     log_debug "failure count now $count (this tick: $reason)"
-    if is_alert_tick "$count" "$FAILURE_ALERT_THRESHOLD"; then
-        log_err "ALERT: $count ticks in a row deferred/failed, reason: $reason — auto-deploy is stuck, needs human attention"
-    fi
+    escalation_due "$count" "$FAILURE_ALERT_THRESHOLD" "$FAILURE_ESCALATED_AT_FILE" || return 1
+    log_err "ALERT: $count ticks in a row deferred/failed, reason: $reason — auto-deploy is stuck, needs human attention"
 }
 
 # Every guard/infra refusal below calls this instead of a bare `exit 1` —
 # it records the tick via record_failure() exactly as before, and fails the
 # systemd unit (exit 1) on exactly the ticks that also log the "ALERT: N
 # ticks in a row" line above: the tick that crosses
-# FAILURE_ALERT_THRESHOLD, and then one per ALERT_REPEAT_TICKS while the
-# streak holds. Every other tick in a streak exits 0 despite having
-# deferred.
+# FAILURE_ALERT_THRESHOLD, and then the first tick at least
+# ALERT_REPEAT_SECONDS later while the streak holds. Every other tick in a
+# streak exits 0 despite having deferred.
 #
 # This is what makes `OnFailure=songmaker-alert@%n.service` (issue #333)
 # safe to attach to this unit: without it, the branch guard alone would
@@ -314,10 +357,7 @@ record_failure() {
 # routine, not an emergency, state.
 fail_tick() {
     local reason="$1"
-    record_failure "$reason"
-    local count
-    count="$(read_counter "$FAILURE_COUNT_FILE")"
-    if is_alert_tick "$count" "$FAILURE_ALERT_THRESHOLD"; then
+    if record_failure "$reason"; then
         exit 1
     fi
     exit 0
@@ -326,16 +366,16 @@ fail_tick() {
 # A tick deferred only because jobs are active (before or after the build).
 # This is expected behavior under a busy queue or a long-running
 # lora_training job, not a fault — it gets its own, much higher threshold
-# (default 30 ticks, ~1h) and a quieter prio=warning line instead of err.
+# (default 30 ticks) and a quieter prio=warning line instead of err.
 record_busy_deferral() {
     local active_job_count="$1"
     local count
-    count="$(read_counter "$BUSY_COUNT_FILE")"
+    count="$(read_number "$BUSY_COUNT_FILE")"
     count=$((count + 1))
     printf '%s' "$count" >"$BUSY_COUNT_FILE"
     log_debug "busy-deferral count now $count ($active_job_count jobs active)"
-    if is_alert_tick "$count" "$BUSY_ALERT_THRESHOLD"; then
-        log_warning "deploy pending for ~1h, $active_job_count jobs still active"
+    if escalation_due "$count" "$BUSY_ALERT_THRESHOLD" "$BUSY_ESCALATED_AT_FILE"; then
+        log_warning "deploy deferred on $count ticks in a row, $active_job_count jobs still active"
     fi
 }
 

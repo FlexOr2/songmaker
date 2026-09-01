@@ -277,13 +277,21 @@ PROM_HTTP_REQUESTS_TOTAL = "songmaker_http_requests_total"
 PROM_HTTP_REQUEST_DURATION_MS = "songmaker_http_request_duration_milliseconds_total"
 PROM_ACTIVE_SESSIONS = "songmaker_active_sessions"
 PROM_JOBS_TOTAL = "songmaker_jobs_total"
-# Failed jobs as a real counter: unlabeled, and emitted even while it
-# reads 0 (issue #333). songmaker_jobs_total{status="failed"} is a
-# per-type gauge whose series only comes into existence WITH the first
-# failure of that type, and Prometheus can compute no rate/increase across
-# a series' very first sample — so alerting on it silently skipped the
-# first failure and only fired on the second.
-PROM_JOB_FAILURES_TOTAL = "songmaker_job_failures_total"
+# When the newest job failure finished, as Unix time (issue #333). A
+# timestamp rather than a failure counter, because every counter-shaped
+# answer needs history the alarm may not have: a per-type
+# songmaker_jobs_total{status="failed"} series only comes into existence
+# WITH the first failure of that type, and even an always-exported total
+# reads 1 on Prometheus' FIRST sample if the failure happened between the
+# web container becoming healthy and that first scrape. increase() finds
+# no rise across a series' first sample either way, so exactly the first
+# failure of a fresh stack went unalerted. "How long ago was the last
+# one" needs no history: one sample carries the whole answer.
+PROM_LAST_JOB_FAILURE_TIMESTAMP = "songmaker_last_job_failure_timestamp_seconds"
+# What that metric reads while nothing has ever failed: the Unix epoch,
+# which puts `time() - <metric>` decades outside every alert window
+# without the series ever having to be absent.
+PROM_NEVER_FAILED_TIMESTAMP = 0.0
 PROM_JOB_DURATION_SECONDS = "songmaker_job_duration_seconds"
 # Labeled by queue ("music"/"scoring") — the arq queue names the workers
 # actually run on. Renders as songmaker_queue_depth{queue="music"} etc.

@@ -254,9 +254,10 @@ services:
     # The image's own ENTRYPOINT is /bin/alertmanager; entrypoint: replaces
     # it entirely so the SMTP config can be assembled first (see
     # monitoring/alertmanager-entrypoint.sh, which then execs the real
-    # binary). Confirmed against prom/alertmanager:latest that /bin/sh and
-    # /bin/sed both exist in this image — no envsubst, sed substitution
-    # instead.
+    # binary). Confirmed against prom/alertmanager:latest that /bin/sh,
+    # /bin/sed and /bin/amtool all exist in this image — no envsubst, sed
+    # substitution instead, and amtool validates the result before the
+    # daemon ever sees it.
     entrypoint: ["/bin/sh", "/etc/alertmanager/entrypoint.sh"]
     # Without this, a container stuck in a config-error restart loop still
     # counts as "started" — `docker compose up --wait` would then wait on

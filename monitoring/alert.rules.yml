@@ -36,18 +36,17 @@ groups:
             up{job="songmaker"} has been 0 for 5 minutes — songmaker-web is
             unreachable or the container is down.
 
-      - alert: SongmakerJobFailureRate
-        expr: increase(songmaker_job_failures_total[15m]) > 0
+      # Age of the newest failure, not a rise in a failure count: a
+      # counter answers "how many more since the last sample", which
+      # nothing can answer about the very FIRST sample of a series — and
+      # the first sample is exactly where a fresh stack's first failed job
+      # lands when it fails between songmaker-web becoming healthy and
+      # Prometheus' first scrape of it. A timestamp is complete in every
+      # single sample. See alert.rules.test.yml for both cases pinned.
+      - alert: SongmakerJobFailure
+        expr: time() - songmaker_last_job_failure_timestamp_seconds < 900
         labels:
           severity: warning
         annotations:
           summary: Songmaker jobs are failing
-          description: >-
-            At least one job failed within the last 15 minutes
-            (increase(songmaker_job_failures_total[15m]) > 0). This reads
-            the dedicated counter rather than
-            songmaker_jobs_total{status="failed"}, whose per-type series
-            only comes into existence WITH the first failure of that type —
-            Prometheus can compute no increase across a series' very first
-            sample, so the first failure of a fresh deployment would have
-            gone unalerted.
+          description: At least one job failed within the last 15 minutes.

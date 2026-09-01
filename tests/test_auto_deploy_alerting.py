@@ -4,8 +4,10 @@ The unit's ``OnFailure=songmaker-alert@%n.service`` turns a non-zero exit
 of scripts/auto-deploy.sh into an email (issue #333), so "which ticks exit
 non-zero" is this script's alerting contract and is pinned here against
 the real script: a copy of it runs against a throwaway git checkout with
-its own origin, with ``logger`` and ``docker`` replaced by fakes on PATH.
-No real deploy, no syslog, no network.
+its own origin, with ``logger``, ``docker`` and ``date`` replaced by fakes
+on PATH. No real deploy, no syslog, no network — and no waiting: the fake
+``date`` is the script's only clock, so an hourly repeat is proven by
+moving that clock, never by sleeping.
 """
 
 from __future__ import annotations
@@ -21,7 +23,12 @@ DEPLOY_SCRIPT = REPO_ROOT / "scripts" / "auto-deploy.sh"
 ALERT_CONFIG_LIB = REPO_ROOT / "scripts" / "alert-config.sh"
 
 FAILURE_ALERT_THRESHOLD = 3
-ALERT_REPEAT_TICKS = 2
+# Shorter than the 1h default only to keep the number of ticks a test has
+# to drive small; what is under test is that the repeat follows this
+# duration rather than a tick count.
+ALERT_REPEAT_SECONDS = 600
+# Any fixed point in time — the script only ever reads differences.
+CLOCK_START_EPOCH = 1_756_000_000
 
 VALID_ALERT_ENV = """\
 ALERT_EMAIL_TO='operator@example.com'
@@ -56,6 +63,8 @@ class Checkout:
         self.log_file = tmp_path / "journal.txt"
         self._bin = tmp_path / "bin"
         self._bin.mkdir()
+        self._clock_file = tmp_path / "clock.txt"
+        self._clock_file.write_text(str(CLOCK_START_EPOCH))
         self._commits_pushed = 0
 
         _git(tmp_path, "init", "--bare", "--initial-branch=main", str(self.origin))
@@ -81,6 +90,15 @@ class Checkout:
         _write_executable(
             self._bin / "logger",
             '#!/bin/bash\nprintf "%s\\n" "$*" >> "$LOG_CAPTURE_FILE"\n',
+        )
+        _write_executable(
+            self._bin / "date",
+            "#!/bin/bash\n"
+            'if [[ "$1" == "+%s" ]]; then\n'
+            '    cat "$FAKE_CLOCK_FILE"\n'
+            "else\n"
+            '    exec /usr/bin/date "$@"\n'
+            "fi\n",
         )
         self.set_active_jobs(0)
 
@@ -109,6 +127,10 @@ class Checkout:
     def switch_to_main(self) -> None:
         _git(self.root, "checkout", "main")
 
+    def advance_clock(self, seconds: int) -> None:
+        """Let time pass for the script without any passing for the test."""
+        self._clock_file.write_text(str(int(self._clock_file.read_text()) + seconds))
+
     def adopt_current_head_as_deployed(self) -> None:
         """Skip the first-run adoption tick the script does on a fresh state."""
         self.tick()
@@ -123,8 +145,9 @@ class Checkout:
                 "PATH": f"{self._bin}:/usr/bin:/bin",
                 "HOME": str(self.root.parent),
                 "LOG_CAPTURE_FILE": str(self.log_file),
+                "FAKE_CLOCK_FILE": str(self._clock_file),
                 "SONGMAKER_AUTODEPLOY_FAILURE_ALERT_THRESHOLD": str(FAILURE_ALERT_THRESHOLD),
-                "SONGMAKER_AUTODEPLOY_ALERT_REPEAT_TICKS": str(ALERT_REPEAT_TICKS),
+                "SONGMAKER_AUTODEPLOY_ALERT_REPEAT_SECONDS": str(ALERT_REPEAT_SECONDS),
             },
         )
 
@@ -156,15 +179,36 @@ def test_a_streak_fails_the_unit_only_on_the_tick_that_crosses_the_threshold(
     assert len(stuck_checkout.alert_lines()) == 1
 
 
-def test_an_outage_nobody_fixes_keeps_alerting(stuck_checkout: Checkout) -> None:
-    exit_codes = [stuck_checkout.tick().returncode for _ in range(7)]
+# A tick is not a fixed two minutes: a systemd timer starts no second run
+# while the previous one is still going, and one tick may wait out the
+# whole compose-up timeout. Both speeds below therefore have to reach the
+# operator on the same wall-clock cadence — the fast one without paging
+# more often, the slow one without going quiet for hours.
+@pytest.mark.parametrize("seconds_per_tick", [60, ALERT_REPEAT_SECONDS])
+def test_an_outage_nobody_fixes_is_paged_again_after_the_repeat_time(
+    stuck_checkout: Checkout, seconds_per_tick: int,
+) -> None:
+    for _ in range(FAILURE_ALERT_THRESHOLD):
+        stuck_checkout.tick()
+    assert len(stuck_checkout.alert_lines()) == 1
 
-    assert exit_codes == [0, 0, 1, 0, 1, 0, 1]
-    assert len(stuck_checkout.alert_lines()) == 3
+    elapsed = 0
+    while elapsed < ALERT_REPEAT_SECONDS:
+        stuck_checkout.advance_clock(seconds_per_tick)
+        elapsed += seconds_per_tick
+        result = stuck_checkout.tick()
+
+    assert result.returncode == 1
+    assert len(stuck_checkout.alert_lines()) == 2
 
 
 def test_a_recovered_tick_resets_the_streak(stuck_checkout: Checkout) -> None:
-    for _ in range(3):
+    """And with it the repeat window — no clock is moved below.
+
+    A new outage minutes after a recovered one must page on its own
+    crossing tick instead of waiting out the previous episode's hour.
+    """
+    for _ in range(FAILURE_ALERT_THRESHOLD):
         stuck_checkout.tick()
 
     stuck_checkout.switch_to_main()
