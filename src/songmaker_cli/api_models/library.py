@@ -89,13 +89,13 @@ class LibrarySearchResponse(BaseModel):
         *,
         has_more: bool,
         next_cursor: str | None,
+        song_counts: dict[str, int],
         picked_counts: dict[str, int] | None = None,
-        song_counts: dict[str, int] | None = None,
     ) -> LibrarySearchResponse:
         from songmaker_cli.db.models import Album as AlbumModel
 
         picked = picked_counts or {}
-        songs = song_counts or {}
+        songs = song_counts
         items: list[LibraryAlbumHit | LibrarySongHit] = []
         for hit in hits:
             if isinstance(hit, AlbumModel):

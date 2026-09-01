@@ -36,6 +36,7 @@ def _count_queries(engine, *substrings: str) -> tuple[list[str], Callable]:
 
 def _add_song_with_generations(
     session, *, song_id: str, album_id: str, track_number: int, generation_count: int,
+    is_archived: bool = False,
 ) -> None:
     session.add(Song(
         id=song_id, title=song_id, album_id=album_id,
@@ -46,6 +47,7 @@ def _add_song_with_generations(
         session.add(Generation(
             id=f"g-{song_id}-{i}", song_id=song_id, version_id=f"v-{song_id}",
             generation_number=i + 1, mp3_path=f"{_ADMIN_USER}/{song_id}-{i}.mp3", seed=1,
+            is_archived=is_archived,
         ))
 
 
@@ -62,6 +64,10 @@ def _seed_generation_count_scenarios(session) -> None:
     )
     _add_song_with_generations(
         session, song_id="many-takes", album_id="alb", track_number=3, generation_count=5,
+    )
+    _add_song_with_generations(
+        session, song_id="archived-take", album_id="alb", track_number=4,
+        generation_count=1, is_archived=True,
     )
 
 
@@ -94,6 +100,17 @@ def test_list_songs_generation_count_counts_n_takes(generation_count_client) -> 
     assert by_id["many-takes"]["generation_count"] == 5
 
 
+def test_list_songs_generation_count_counts_archived_take(generation_count_client) -> None:
+    """#340 F1: an archived generation must still count, matching the old
+    len(song.generations) behaviour -- count_generations_by_song() carries
+    no is_archived filter, unlike count_picked_songs_by_album()'s picked
+    aggregate, which deliberately excludes archived picks."""
+    client, _ = generation_count_client
+    resp = client.get("/api/songs")
+    by_id = {s["id"]: s for s in resp.json()["items"]}
+    assert by_id["archived-take"]["generation_count"] == 1
+
+
 def test_list_songs_computes_generation_count_in_one_aggregate_query(
     generation_count_client,
 ) -> None:
@@ -101,15 +118,28 @@ def test_list_songs_computes_generation_count_in_one_aggregate_query(
     with factory() as probe_session:
         engine = probe_session.get_bind()
 
-    queries, handle = _count_queries(engine, "from generations", "group by")
+    all_queries, all_handle = _count_queries(engine)
+    aggregate_queries, aggregate_handle = _count_queries(engine, "from generations", "group by")
     try:
         resp = client.get("/api/songs")
     finally:
-        event.remove(engine, "before_cursor_execute", handle)
+        event.remove(engine, "before_cursor_execute", all_handle)
+        event.remove(engine, "before_cursor_execute", aggregate_handle)
 
     assert resp.status_code == 200
-    assert len(resp.json()["items"]) == 3
-    assert len(queries) == 1, (
+    assert len(resp.json()["items"]) == 4
+    assert len(aggregate_queries) == 1, (
         f"expected one aggregate generation-count query for all songs, "
-        f"got {len(queries)}: {queries}"
+        f"got {len(aggregate_queries)}: {aggregate_queries}"
+    )
+    # Fixed budget for GET /api/songs against this fixture: one count(*) for
+    # the page total, one SELECT for the page of songs (+versions +album via
+    # joinedload, no extra round trip), one aggregate generations count --
+    # never a query per song. A regression on an unrelated relationship
+    # (e.g. an N+1 reintroduced on Song.versions) changes this number
+    # without changing the aggregate-query assertion above, which is why
+    # both are pinned.
+    assert len(all_queries) == 3, (
+        f"expected exactly 3 queries for GET /api/songs against this fixture "
+        f"(count + page + aggregate generation-count), got {len(all_queries)}: {all_queries}"
     )

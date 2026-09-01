@@ -1128,8 +1128,16 @@ def test_library_pool_queue_query_count_is_constant_not_per_song(
         f"expected one bulk generations query regardless of song count, "
         f"got {len(generation_queries)} for {song_count} songs: {generation_queries}"
     )
-    assert len(queries) < song_count, (
-        f"expected a query count independent of song count ({song_count} songs), "
+    # Fixed budget for GET /api/library/pool-queue against this fixture: one
+    # SELECT for the page of songs (+versions +album via joinedload), one
+    # selectinload SELECT for all of their generations (+version +song
+    # +album) -- never a query per song. Pinned as an exact count rather
+    # than "< song_count" so a regression that adds one query per some
+    # OTHER relationship (not caught by the generations-only assertion
+    # above) still fails loudly instead of passing at 49 of 50.
+    assert len(queries) == 2, (
+        f"expected exactly 2 queries for GET /api/library/pool-queue against "
+        f"{song_count} songs (page of songs + bulk generations selectinload), "
         f"got {len(queries)} total queries: {queries}"
     )
 
