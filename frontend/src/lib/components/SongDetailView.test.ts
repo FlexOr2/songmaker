@@ -19,6 +19,7 @@ import {
 	EDITOR_GENERATING_LABEL,
 	EDITOR_GPU_OFFLINE_LABEL,
 	EDITOR_GPU_OFFLINE_TITLE,
+	EDITOR_SAVE_ACCESSIBLE_LABEL,
 	EDITOR_SAVE_LABEL,
 	EDITOR_TAB_TAKES_LABEL,
 	EDITOR_TAB_WRITE_LABEL,
@@ -37,6 +38,7 @@ import {
 	TAKE_AGAIN_LABEL,
 	TAKE_PLAYLIST_LABEL
 } from '$lib/constants';
+import { accessibleName } from '$lib/test-utils/accessible-name';
 import {
 	clearHitboxStyles,
 	clearPointer,
@@ -812,6 +814,28 @@ describe('SongDetailView unsaved-draft guard', () => {
 
 		await vi.waitFor(() => expect(get(selectedSongId)).toBe('s-last'));
 		expect(updateSong).toHaveBeenCalled();
+	});
+
+	it('keeps write-surface Save and the unsaved-changes confirm as distinct accessible names while the dialog is open', async () => {
+		songList.set(albumSongs());
+		const target = await renderView();
+		setDraftLyrics('unsaved edit');
+		await tick();
+
+		selectSong('s-last', song({ id: 's-last', album_id: 'a-local', title: 'Last' }));
+		await tick();
+
+		const dialog = target.querySelector<HTMLElement>('.dialog');
+		if (!dialog) throw new Error('Expected the unsaved-changes dialog');
+
+		const buttons = Array.from(target.querySelectorAll('button'));
+		expect(buttons.filter((el) => accessibleName(el) === EDITOR_UNSAVED_SAVE_LABEL)).toHaveLength(
+			1
+		);
+		expect(
+			buttons.filter((el) => accessibleName(el) === EDITOR_SAVE_ACCESSIBLE_LABEL)
+		).toHaveLength(1);
+		expect(EDITOR_SAVE_ACCESSIBLE_LABEL).not.toBe(EDITOR_UNSAVED_SAVE_LABEL);
 	});
 
 	it('makes unsaved changes visible on the write surface before you hunt for them', async () => {

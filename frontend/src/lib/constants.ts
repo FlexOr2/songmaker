@@ -118,6 +118,7 @@ export const COWRITER_TOOL_CALL_FOREIGN_TARGET_TITLE =
 
 export const EDITOR_GENERATE_LABEL = 'Generate';
 export const EDITOR_SAVE_LABEL = 'Save';
+export const EDITOR_SAVE_ACCESSIBLE_LABEL = 'Save changes';
 export const EDITOR_GENERATING_LABEL = 'Generating...';
 export const EDITOR_QUEUED_LABEL = 'Queued...';
 export const EDITOR_NO_MODELS_WARNING = 'No models enabled. Ask admin to enable one.';

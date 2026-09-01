@@ -108,6 +108,7 @@
 		EDITOR_NO_MODELS_WARNING,
 		EDITOR_QUEUED_LABEL,
 		EDITOR_QUEUE_BUSY_TITLE,
+		EDITOR_SAVE_ACCESSIBLE_LABEL,
 		EDITOR_SAVE_LABEL,
 		EDITOR_SELECT_MODEL_TITLE,
 		EDITOR_TAB_TAKES_LABEL,
@@ -664,6 +665,7 @@
 				class:dirty
 				data-hitbox="text"
 				disabled={!dirty}
+				aria-label={EDITOR_SAVE_ACCESSIBLE_LABEL}
 				onclick={() => void onSaveVersion()}
 			>
 				{EDITOR_SAVE_LABEL}
