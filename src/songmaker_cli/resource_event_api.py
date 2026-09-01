@@ -28,17 +28,17 @@ from songmaker_cli.constants import (
     REDIS_RL_RESOURCE_STREAM_PREFIX,
     RESOURCE_EVENT_STREAM_CAPACITY_UNAVAILABLE,
     RESOURCE_EVENT_STREAM_CONNECTION_SECONDS,
-    RESOURCE_EVENT_STREAM_HEARTBEAT_SECONDS,
     RESOURCE_EVENT_STREAM_LEASE_SECONDS,
     RESOURCE_EVENT_STREAM_LIMIT_DETAIL,
     RESOURCE_EVENT_STREAM_LIMITER_UNAVAILABLE,
     RESOURCE_EVENT_STREAM_MAX_GLOBAL,
     RESOURCE_EVENT_STREAM_MAX_PER_USER,
-    RESOURCE_EVENT_STREAM_OPEN_LIMIT,
     RESOURCE_EVENT_STREAM_OPEN_WINDOW_SECONDS,
     RESOURCE_EVENT_STREAM_PAGE_SIZE,
     RESOURCE_EVENT_STREAM_PATH,
     RESOURCE_EVENT_STREAM_POLL_SECONDS,
+    SSE_HEARTBEAT_COMMENT,
+    SSE_HEARTBEAT_SECONDS,
     LimiterFailurePolicy,
     ResourceEventKind,
 )
@@ -61,7 +61,6 @@ _SSE_HEADERS = {
     "Cache-Control": "no-cache, no-store",
     "X-Accel-Buffering": "no",
 }
-_HEARTBEAT_COMMENT = ": heartbeat\n\n"
 _AHEAD_BIGINT_SENTINEL = POSTGRES_BIGINT_MAX + 1
 
 
@@ -242,8 +241,8 @@ async def _resource_event_generator(
         now = monotonic()
         if now >= deadline:
             return
-        if now - last_emit >= RESOURCE_EVENT_STREAM_HEARTBEAT_SECONDS:
-            yield _HEARTBEAT_COMMENT
+        if now - last_emit >= SSE_HEARTBEAT_SECONDS:
+            yield SSE_HEARTBEAT_COMMENT
             last_emit = monotonic()
 
         remaining = deadline - monotonic()
@@ -263,10 +262,11 @@ _STREAM_LEASE_FAILURE_POLICY = LimiterFailurePolicy.FAIL_CLOSED
 def _get_open_limiter(request: Request) -> RedisRateLimiter:
     def _build() -> RedisRateLimiter:
         ctx: AppContext = request.app.state.ctx
+        settings = get_settings()
         return RedisRateLimiter(
             ctx.redis,
             REDIS_RL_RESOURCE_STREAM_PREFIX,
-            RESOURCE_EVENT_STREAM_OPEN_LIMIT,
+            settings.resource_event_stream_open_limit,
             RESOURCE_EVENT_STREAM_OPEN_WINDOW_SECONDS,
         )
     return get_cached_limiter(request, "_resource_stream_open_limiter", _build)
