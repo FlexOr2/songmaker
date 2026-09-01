@@ -51,6 +51,7 @@ class ProviderSetupMethod(StrEnum):
 class ConfiguredProvider:
     provider: str
     method: ProviderSetupMethod
+    environment_key: str | None = None
 
 
 @dataclass(frozen=True)
@@ -101,7 +102,9 @@ def _provider_configuration(
 ) -> ProviderConfiguration:
     credential = _provider_api_credential(provider, settings)
     if _secret(credential.secret):
-        return ConfiguredProvider(provider, ProviderSetupMethod.API_KEY)
+        return ConfiguredProvider(
+            provider, ProviderSetupMethod.API_KEY, credential.environment_key,
+        )
     if provider == _CLAUDE_PROVIDER and cli_login_status().logged_in:
         return ConfiguredProvider(provider, ProviderSetupMethod.CLAUDE_CLI)
     return UnconfiguredProvider(provider, credential.environment_key)

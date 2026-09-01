@@ -356,6 +356,68 @@ def test_openai_adapter_allows_final_response_after_last_tool_round(monkeypatch)
     assert execute.call_count == 8
 
 
+def test_provider_status_reports_setup_method_and_missing_key(admin_client, monkeypatch):
+    from songmaker_cli.cowriter.catalog import (
+        ConfiguredProvider,
+        ProviderSetupMethod,
+        UnconfiguredProvider,
+    )
+
+    def _fake_configuration(provider: str):
+        if provider == "claude":
+            return ConfiguredProvider("claude", ProviderSetupMethod.CLAUDE_CLI)
+        if provider == "codex":
+            return ConfiguredProvider("codex", ProviderSetupMethod.API_KEY, "OPENAI_API_KEY")
+        return UnconfiguredProvider("grok", "XAI_API_KEY")
+
+    monkeypatch.setattr(
+        "songmaker_cli.cowriter.catalog.get_provider_configuration", _fake_configuration,
+    )
+    client, _ = admin_client
+    resp = client.get("/api/settings/providers")
+    assert resp.status_code == 200
+    by_provider = {item["provider"]: item for item in resp.json()}
+    assert by_provider["claude"] == {
+        "provider": "claude",
+        "configured": True,
+        "setup_method": "claude_cli",
+        "environment_key": None,
+    }
+    assert by_provider["codex"] == {
+        "provider": "codex",
+        "configured": True,
+        "setup_method": "api_key",
+        "environment_key": "OPENAI_API_KEY",
+    }
+    assert by_provider["grok"] == {
+        "provider": "grok",
+        "configured": False,
+        "setup_method": None,
+        "environment_key": "XAI_API_KEY",
+    }
+
+
+def test_models_errors_cover_every_provider_not_only_the_saved_one(admin_client, monkeypatch):
+    client, _ = admin_client
+    client.put("/api/settings/cowriter", json={"provider": "codex", "model": "gpt-5.4"})
+
+    def _list_provider_models(provider: str) -> list[str]:
+        if provider == "grok":
+            raise ProviderUnavailableError(
+                "grok", "grok is not configured: missing XAI_API_KEY",
+            )
+        return list(LIVE_CATALOG[provider])
+
+    monkeypatch.setattr(
+        "songmaker_cli.cowriter.catalog.list_provider_models", _list_provider_models,
+    )
+    settings = client.get("/api/settings/cowriter").json()
+    assert settings["provider"] == "codex"
+    assert settings["models_by_provider"]["grok"] == []
+    assert "codex" not in settings["models_errors"]
+    assert "XAI_API_KEY" in settings["models_errors"]["grok"]
+
+
 def test_openai_adapter_rejects_malformed_tool_arguments_without_calling_tool():
     with pytest.raises(ProviderUnavailableError, match="invalid tool arguments"):
         _parse_tool_call(
