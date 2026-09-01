@@ -7,6 +7,8 @@ uses them instead of a Claude-only path.
 
 from __future__ import annotations
 
+import subprocess
+import sys
 from pathlib import Path
 from unittest.mock import MagicMock, patch
 
@@ -49,6 +51,31 @@ LIVE_CATALOG = {
     "grok": ["grok-4.6", "grok-4.5"],
     "codex": ["gpt-5.4"],
 }
+
+
+# ── import boundary ─────────────────────────────────────────────────
+
+
+def test_scoring_job_is_importable_without_the_mcp_package() -> None:
+    """The scoring worker container never installs the ``mcp`` extra (it
+    ships only ``server``, ``scoring``, ``whisper``), and the tool-free judge
+    (``call_provider_once``) must not drag the tool-using co-writer's MCP
+    server into its import path (#315). A fresh interpreter with ``mcp``
+    poisoned in ``sys.modules`` proves the whole chain that
+    ``songmaker_cli.jobs.scoring`` pulls in — through
+    ``scoring.lyrical_coherence`` -> ``cowriter.dispatch`` ->
+    ``cowriter.openai_adapter`` — stays importable without it.
+    """
+    script = (
+        "import sys\n"
+        "sys.modules['mcp'] = None\n"
+        "import songmaker_cli.jobs.scoring\n"
+    )
+    result = subprocess.run(
+        [sys.executable, "-c", script],
+        capture_output=True, text=True, timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
 
 
 # ── settings layer ───────────────────────────────────────────────────

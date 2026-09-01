@@ -18,7 +18,6 @@ from songmaker_cli.claude.provider import (
 )
 from songmaker_cli.constants import COWRITER_CLI_TIMEOUT_SECONDS, COWRITER_MAX_TOOL_ROUNDS
 from songmaker_cli.cowriter.errors import ProviderUnavailableError
-from songmaker_cli.cowriter.tools import execute_cowriter_tool, openai_tool_schemas
 from songmaker_cli.middleware import AuthenticatedUser
 
 
@@ -33,6 +32,12 @@ async def stream_openai_compatible_turn(
     session: Session,
     user: AuthenticatedUser,
 ) -> AsyncIterator[StreamEvent]:
+    # Imported lazily: the songmaker tool catalog pulls in the MCP server
+    # package, which only the tool-using co-writer chat needs. The judge's
+    # tool-free ``call_openai_compatible_once`` below must stay importable
+    # without the ``mcp`` extra installed (#315).
+    from songmaker_cli.cowriter.tools import execute_cowriter_tool, openai_tool_schemas
+
     oai_messages: list[dict[str, Any]] = [{"role": "system", "content": system}]
     oai_messages.extend(messages)
     text_chunks: list[str] = []
@@ -41,6 +46,7 @@ async def stream_openai_compatible_turn(
             for round_index in range(COWRITER_MAX_TOOL_ROUNDS + 1):
                 payload = await _post_chat(
                     client, provider, api_url, api_key, model, oai_messages,
+                    openai_tool_schemas(),
                 )
                 message = _assistant_message(payload, provider)
                 tool_calls = message.get("tool_calls") or []
@@ -98,6 +104,7 @@ async def _post_chat(
     api_key: str,
     model: str,
     messages: list[dict[str, Any]],
+    tool_schemas: list[dict[str, Any]],
 ) -> dict[str, Any]:
     try:
         response = await client.post(
@@ -109,7 +116,7 @@ async def _post_chat(
             json={
                 "model": model,
                 "messages": messages,
-                "tools": openai_tool_schemas(),
+                "tools": tool_schemas,
             },
         )
     except httpx.HTTPError as exc:
