@@ -38,12 +38,15 @@
 #     c9d4a2f18e37 unique-slug-index migration). That is not fatal — the
 #     next tick retries the same pull+deploy. A tick that could not deploy
 #     despite main having moved (a hard refusal, or a pull/build/up
-#     failure) increments a consecutive-FAILURE counter; only N in a row
-#     escalates to a prio=err journal line worth paging on — and, since
-#     issue #333, is also the only tick that exits non-zero (fail_tick
-#     below), so `OnFailure=songmaker-alert@%n.service` on the systemd unit
-#     emails the operator at that exact same moment instead of on every
-#     transient blip. A tick that merely defers because jobs are active
+#     failure) increments a consecutive-FAILURE counter; only the tick
+#     that crosses N in a row escalates to a prio=err journal line worth
+#     paging on — and, since issue #333, is also the only tick that exits
+#     non-zero (fail_tick below), so `OnFailure=songmaker-alert@%n.service`
+#     on the systemd unit emails the operator at that exact same moment
+#     instead of on every transient blip. A streak that simply continues
+#     escalates again once per ALERT_REPEAT_TICKS, so an outage nobody
+#     reacts to stays visible without mailing every two minutes (see
+#     is_alert_tick). A tick that merely defers because jobs are active
 #     increments a separate consecutive-BUSY counter with a much higher
 #     threshold and a quieter prio=warning line, never fails the unit — a
 #     normal generation queue or an hours-long lora_training job
@@ -153,7 +156,29 @@ DEPLOYED_SHA_FILE="${SONGMAKER_AUTODEPLOY_DEPLOYED_SHA_FILE:-$STATE_DIR_FALLBACK
 GUARD_REASON_FILE="${SONGMAKER_AUTODEPLOY_GUARD_REASON_FILE:-$STATE_DIR_FALLBACK/songmaker-autodeploy.guard-reason}"
 FAILURE_ALERT_THRESHOLD="${SONGMAKER_AUTODEPLOY_FAILURE_ALERT_THRESHOLD:-3}"
 BUSY_ALERT_THRESHOLD="${SONGMAKER_AUTODEPLOY_BUSY_ALERT_THRESHOLD:-30}"
+# How many further ticks of an unbroken streak pass between one escalation
+# and the next — 30 ticks is ~1h, deliberately the same cadence
+# Alertmanager's repeat_interval gives the other half of this one alert
+# channel (monitoring/alertmanager.yml.template). See is_alert_tick.
+ALERT_REPEAT_TICKS="${SONGMAKER_AUTODEPLOY_ALERT_REPEAT_TICKS:-30}"
+# A zero or garbage value here would make every escalation arithmetic
+# silently fail, i.e. turn the alarm off — the one failure mode this whole
+# issue exists to prevent.
+if ! [[ "$ALERT_REPEAT_TICKS" =~ ^[1-9][0-9]*$ ]]; then
+    log_err "SONGMAKER_AUTODEPLOY_ALERT_REPEAT_TICKS must be a positive integer, got '$ALERT_REPEAT_TICKS'"
+    exit 1
+fi
 DB_CHECK_TIMEOUT_SECONDS="${SONGMAKER_AUTODEPLOY_DB_CHECK_TIMEOUT_SECONDS:-30}"
+# Bounds the container-readiness wait of step 9 only; the image build in
+# step 8 stays deliberately unbounded, because a cold-cache build takes
+# 8-15 minutes by design. Without a bound, one service that can never
+# become healthy (issue #333's own alertmanager, if .env lacks the SMTP
+# values) makes `compose up --wait` wait forever — and since the tick holds
+# the flock the whole time, every later tick skips and nothing is ever
+# alerted. The default is generous enough for a cold ACE-Step model load
+# (ACESTEP_STARTUP_TIMEOUT_SECONDS, 900s) to still converge: this guards
+# against "never", not against "slow".
+COMPOSE_UP_WAIT_TIMEOUT_SECONDS="${SONGMAKER_AUTODEPLOY_COMPOSE_UP_WAIT_TIMEOUT_SECONDS:-1200}"
 POSTGRES_USER="${POSTGRES_USER:-songmaker}"
 POSTGRES_DB="${POSTGRES_DB:-songmaker}"
 
@@ -240,6 +265,23 @@ record_success() {
     log_info "deploy succeeded, now running $deployed_sha"
 }
 
+# The escalation rule both counters below share: escalate on the tick that
+# CROSSES the threshold, then once per ALERT_REPEAT_TICKS for as long as
+# the streak lasts. Escalating on every tick past the threshold would mail
+# the operator every two minutes through `OnFailure=` (issue #333) and
+# bury the journal; escalating only on the crossing tick would let a
+# permanent outage go quiet after a single missed message, which is the
+# worse of the two failures. Every tick is still counted and still logged
+# at debug, so the record of what happened is complete either way.
+is_alert_tick() {
+    local count="$1"
+    local threshold="$2"
+    if ((count < threshold)); then
+        return 1
+    fi
+    (( (count - threshold) % ALERT_REPEAT_TICKS == 0 ))
+}
+
 # A tick that could not deploy at all despite $DEPLOY_BRANCH having moved —
 # a hard refusal (wrong branch, dirty tree, diverged), a fail-closed DB
 # check, or a pull/build/up failure. This is the "something is actually
@@ -251,29 +293,31 @@ record_failure() {
     count=$((count + 1))
     printf '%s' "$count" >"$FAILURE_COUNT_FILE"
     log_debug "failure count now $count (this tick: $reason)"
-    if [[ "$count" -ge "$FAILURE_ALERT_THRESHOLD" ]]; then
+    if is_alert_tick "$count" "$FAILURE_ALERT_THRESHOLD"; then
         log_err "ALERT: $count ticks in a row deferred/failed, reason: $reason — auto-deploy is stuck, needs human attention"
     fi
 }
 
 # Every guard/infra refusal below calls this instead of a bare `exit 1` —
-# it records the tick via record_failure() exactly as before, but only
-# actually fails the systemd unit (exit 1) on the same tick that crosses
-# FAILURE_ALERT_THRESHOLD and logs the "ALERT: N ticks in a row" line
-# above. Every earlier tick in a streak exits 0 despite having deferred.
+# it records the tick via record_failure() exactly as before, and fails the
+# systemd unit (exit 1) on exactly the ticks that also log the "ALERT: N
+# ticks in a row" line above: the tick that crosses
+# FAILURE_ALERT_THRESHOLD, and then one per ALERT_REPEAT_TICKS while the
+# streak holds. Every other tick in a streak exits 0 despite having
+# deferred.
+#
 # This is what makes `OnFailure=songmaker-alert@%n.service` (issue #333)
 # safe to attach to this unit: without it, the branch guard alone would
 # fire that unit-failure — and the alert email — on essentially every
 # 2-minute tick for as long as the operator works on a branch other than
 # $DEPLOY_BRANCH in this checkout (see step 4's own comment), which is a
-# routine, not an emergency, state. With it, the unit only ever registers
-# as failed at the exact moment a genuine, sustained problem exists.
+# routine, not an emergency, state.
 fail_tick() {
     local reason="$1"
     record_failure "$reason"
     local count
     count="$(read_counter "$FAILURE_COUNT_FILE")"
-    if ((count >= FAILURE_ALERT_THRESHOLD)); then
+    if is_alert_tick "$count" "$FAILURE_ALERT_THRESHOLD"; then
         exit 1
     fi
     exit 0
@@ -290,7 +334,7 @@ record_busy_deferral() {
     count=$((count + 1))
     printf '%s' "$count" >"$BUSY_COUNT_FILE"
     log_debug "busy-deferral count now $count ($active_job_count jobs active)"
-    if [[ "$count" -ge "$BUSY_ALERT_THRESHOLD" ]]; then
+    if is_alert_tick "$count" "$BUSY_ALERT_THRESHOLD"; then
         log_warning "deploy pending for ~1h, $active_job_count jobs still active"
     fi
 }
@@ -434,10 +478,27 @@ if [[ "$ACTIVE_JOB_COUNT" -gt 0 ]]; then
     exit 0
 fi
 
-# --- 7. Pull, then build. No timeout around the build (CLAUDE.md) — a
+# --- 7. Alert-channel guard, the last check before anything is changed.
+# The stack's alertmanager refuses to start without the five .env values
+# (issue #333), so a checkout that reaches this commit without them cannot
+# be deployed at all — `compose up --wait` would only discover that after
+# the whole build, minutes later, from an "unhealthy container" message
+# that names no cause. Refusing here instead names the missing keys on the
+# very first tick. The same helper scripts/alert.sh uses owns the list, so
+# there is one answer to "what configures the alert channel".
+if ! ALERT_CONFIG_ERROR="$( (
+    # shellcheck source=scripts/alert-config.sh
+    source "$SCRIPT_DIR/alert-config.sh"
+    load_alert_config "$REPO_ROOT/.env"
+) 2>&1 )"; then
+    log_err "alert channel not configured — refusing to deploy a stack whose alertmanager cannot start: $ALERT_CONFIG_ERROR"
+    fail_tick "alert channel not configured"
+fi
+
+# --- 8. Pull, then build. No timeout around the build (CLAUDE.md) — a
 # cold-cache rebuild legitimately takes 8-15 minutes. Building does not
 # recreate any running container, so it cannot kill an in-flight job by
-# itself — the recheck in step 8 is what guards the actual recreate. Both
+# itself — the recheck in step 9 is what guards the actual recreate. Both
 # `git pull` and `compose build` stream straight to this process's own
 # stdout/stderr rather than being captured — a failed build's full output
 # can easily exceed what a single logger argument can carry (see header) —
@@ -455,7 +516,7 @@ else
     fail_tick "compose build failed"
 fi
 
-# --- 8. Recheck immediately before the recreate — the only step that can
+# --- 9. Recheck immediately before the recreate — the only step that can
 # kill an in-flight job. This shrinks the unsafe window from the build's
 # 8-15 minutes down to the seconds between this check and `compose up`. A
 # deferral here finds the image already built on the next tick, so the
@@ -479,7 +540,7 @@ if ! DEPLOYED_HEAD="$(git -C "$REPO_ROOT" rev-parse HEAD 2>&1)"; then
     fail_tick "cannot determine HEAD before recreate"
 fi
 
-if compose up -d --wait; then
+if compose up -d --wait --wait-timeout "$COMPOSE_UP_WAIT_TIMEOUT_SECONDS"; then
     if record_success "$DEPLOYED_HEAD"; then
         exit 0
     fi
@@ -492,6 +553,6 @@ if compose up -d --wait; then
     exit 1
 else
     UP_EXIT_CODE=$?
-    log_err "docker compose up -d --wait failed in $REPO_ROOT (exit $UP_EXIT_CODE)"
+    log_err "docker compose up -d --wait failed or timed out after ${COMPOSE_UP_WAIT_TIMEOUT_SECONDS}s in $REPO_ROOT (exit $UP_EXIT_CODE)"
     fail_tick "compose up failed"
 fi

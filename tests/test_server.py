@@ -1352,6 +1352,8 @@ def test_metrics_format_prometheus_all_sections() -> None:
     assert 'songmaker_jobs_total{type="generate",status="completed"} 5' in body
     assert 'songmaker_jobs_total{type="generate",status="failed"} 1' in body
     assert 'songmaker_jobs_total{type="score",status="queued"} 2' in body
+    assert "# TYPE songmaker_job_failures_total counter" in body
+    assert "songmaker_job_failures_total 1" in body
     assert 'songmaker_job_duration_seconds{quantile="avg"} 12.3' in body
     assert 'songmaker_job_duration_seconds{quantile="min"} 1.0' in body
     assert 'songmaker_job_duration_seconds{quantile="max"} 45.6' in body
@@ -1388,6 +1390,10 @@ def test_metrics_format_prometheus_no_duration() -> None:
         acestep_worker_vram_total_gb={},
     )
     assert "songmaker_job_duration_seconds{" not in body
+    # Exported even with nothing to report: an alert cannot see an increase
+    # across a series' first sample, so this one must exist before the
+    # first failure does (issue #333).
+    assert "songmaker_job_failures_total 0" in body
     assert "songmaker_active_sessions 0" in body
     assert 'songmaker_queue_depth{queue="music"} 0' in body
     assert 'songmaker_queue_depth{queue="scoring"} 0' in body

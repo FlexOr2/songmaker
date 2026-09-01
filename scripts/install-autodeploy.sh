@@ -78,6 +78,10 @@ DEPLOY_SCRIPT="$SCRIPT_DIR/auto-deploy.sh"
 ALERT_SERVICE_SOURCE="$SCRIPT_DIR/songmaker-alert@.service"
 ALERT_SERVICE_TARGET="/etc/systemd/system/songmaker-alert@.service"
 ALERT_SCRIPT="$SCRIPT_DIR/alert.sh"
+# Sourced by alert.sh (and by auto-deploy.sh) for the .env keys that
+# configure the channel — a checkout missing it has no alert channel at
+# all, which is exactly what must not be discovered during an outage.
+ALERT_CONFIG_LIB="$SCRIPT_DIR/alert-config.sh"
 
 if [ ! -f "$SERVICE_SOURCE" ]; then
     echo "ERROR: $SERVICE_SOURCE not found." >&2
@@ -101,6 +105,11 @@ fi
 
 if [ ! -x "$ALERT_SCRIPT" ]; then
     echo "ERROR: $ALERT_SCRIPT not found or not executable." >&2
+    exit 1
+fi
+
+if [ ! -f "$ALERT_CONFIG_LIB" ]; then
+    echo "ERROR: $ALERT_CONFIG_LIB not found." >&2
     exit 1
 fi
 
@@ -167,11 +176,12 @@ echo "stack: auto-deploy.sh only pulls + redeploys when origin/main has moved,"
 echo "the local tree is clean and fast-forwardable, and no jobs are active."
 echo
 echo "songmaker-alert@.service is installed alongside it (issue #333):"
-echo "songmaker-autodeploy.service now emails ALERT_EMAIL_TO once a deploy has"
-echo "been stuck for ~6 minutes straight. Set ALERT_EMAIL_TO/SMTP_HOST/"
-echo "SMTP_PORT/SMTP_USER/SMTP_PASSWORD in .env for this to actually send —"
-echo "without them scripts/alert.sh fails loudly instead of silently doing"
-echo "nothing."
+echo "songmaker-autodeploy.service emails ALERT_EMAIL_TO once a deploy has been"
+echo "stuck for ~6 minutes straight, then again about hourly while it stays"
+echo "stuck. Set ALERT_EMAIL_TO/SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASSWORD in"
+echo ".env for this to actually send — without them the stack's alertmanager"
+echo "refuses to start and auto-deploy.sh refuses to deploy, both naming the"
+echo "missing keys, instead of silently doing nothing."
 echo
 echo "To verify what's installed:"
 echo "  systemctl status songmaker-autodeploy.timer"

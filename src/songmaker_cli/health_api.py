@@ -20,8 +20,10 @@ from songmaker_cli.constants import (
     PROM_HTTP_REQUEST_DURATION_MS,
     PROM_HTTP_REQUESTS_TOTAL,
     PROM_JOB_DURATION_SECONDS,
+    PROM_JOB_FAILURES_TOTAL,
     PROM_JOBS_TOTAL,
     PROM_QUEUE_DEPTH,
+    JobStatus,
 )
 
 router = APIRouter()
@@ -95,6 +97,15 @@ def _format_prometheus(
             lines.append(
                 f'{PROM_JOBS_TOTAL}{{type="{job_type}",status="{status}"}} {count}'
             )
+
+    failed_jobs = sum(
+        statuses.get(JobStatus.FAILED, 0) for statuses in jobs_by_type.values()
+    )
+    lines.append(
+        f"# HELP {PROM_JOB_FAILURES_TOTAL} Jobs that have failed, across all job types.",
+    )
+    lines.append(f"# TYPE {PROM_JOB_FAILURES_TOTAL} counter")
+    lines.append(f"{PROM_JOB_FAILURES_TOTAL} {failed_jobs}")
 
     lines.append(f"# HELP {PROM_JOB_DURATION_SECONDS} Job duration statistics for completed jobs.")
     lines.append(f"# TYPE {PROM_JOB_DURATION_SECONDS} gauge")

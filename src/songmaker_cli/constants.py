@@ -277,6 +277,13 @@ PROM_HTTP_REQUESTS_TOTAL = "songmaker_http_requests_total"
 PROM_HTTP_REQUEST_DURATION_MS = "songmaker_http_request_duration_milliseconds_total"
 PROM_ACTIVE_SESSIONS = "songmaker_active_sessions"
 PROM_JOBS_TOTAL = "songmaker_jobs_total"
+# Failed jobs as a real counter: unlabeled, and emitted even while it
+# reads 0 (issue #333). songmaker_jobs_total{status="failed"} is a
+# per-type gauge whose series only comes into existence WITH the first
+# failure of that type, and Prometheus can compute no rate/increase across
+# a series' very first sample — so alerting on it silently skipped the
+# first failure and only fired on the second.
+PROM_JOB_FAILURES_TOTAL = "songmaker_job_failures_total"
 PROM_JOB_DURATION_SECONDS = "songmaker_job_duration_seconds"
 # Labeled by queue ("music"/"scoring") — the arq queue names the workers
 # actually run on. Renders as songmaker_queue_depth{queue="music"} etc.

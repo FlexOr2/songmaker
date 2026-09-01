@@ -37,11 +37,17 @@ groups:
             unreachable or the container is down.
 
       - alert: SongmakerJobFailureRate
-        expr: rate(songmaker_jobs_total{status="failed"}[15m]) > 0
+        expr: increase(songmaker_job_failures_total[15m]) > 0
         labels:
           severity: warning
         annotations:
           summary: Songmaker jobs are failing
           description: >-
             At least one job failed within the last 15 minutes
-            (rate(songmaker_jobs_total{status="failed"}[15m]) > 0).
+            (increase(songmaker_job_failures_total[15m]) > 0). This reads
+            the dedicated counter rather than
+            songmaker_jobs_total{status="failed"}, whose per-type series
+            only comes into existence WITH the first failure of that type —
+            Prometheus can compute no increase across a series' very first
+            sample, so the first failure of a fresh deployment would have
+            gone unalerted.

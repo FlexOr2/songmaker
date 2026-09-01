@@ -56,6 +56,10 @@ UNIT_TARGET="/etc/systemd/system/songmaker.service"
 ALERT_UNIT_SOURCE="$SCRIPT_DIR/songmaker-alert@.service"
 ALERT_UNIT_TARGET="/etc/systemd/system/songmaker-alert@.service"
 ALERT_SCRIPT="$SCRIPT_DIR/alert.sh"
+# Sourced by alert.sh (and by auto-deploy.sh) for the .env keys that
+# configure the channel — a checkout missing it has no alert channel at
+# all, which is exactly what must not be discovered during an outage.
+ALERT_CONFIG_LIB="$SCRIPT_DIR/alert-config.sh"
 
 if [ ! -f "$UNIT_SOURCE" ]; then
     echo "ERROR: $UNIT_SOURCE not found." >&2
@@ -69,6 +73,11 @@ fi
 
 if [ ! -x "$ALERT_SCRIPT" ]; then
     echo "ERROR: $ALERT_SCRIPT not found or not executable." >&2
+    exit 1
+fi
+
+if [ ! -f "$ALERT_CONFIG_LIB" ]; then
+    echo "ERROR: $ALERT_CONFIG_LIB not found." >&2
     exit 1
 fi
 

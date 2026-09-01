@@ -3,11 +3,15 @@
 # Alertmanager's own config format has no ${VAR} substitution, so the SMTP
 # account and recipient — the exact same five .env keys scripts/alert.sh
 # reads (ALERT_EMAIL_TO, SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASSWORD):
-# one configured channel, two delivery paths — are templated in with sed
-# at container start (see the `alertmanager` service's command: in
-# docker-compose.yml). The __PLACEHOLDER__ tokens below never reach disk
-# with real values in this file; they are substituted into a throwaway
-# file inside the container.
+# one configured channel, two delivery paths — are resolved at container
+# start by monitoring/alertmanager-entrypoint.sh. The __PLACEHOLDER__
+# tokens below never reach disk with real values in this file; they are
+# substituted into a throwaway file inside the container.
+#
+# The password is the one value that is never substituted: Docker mounts
+# it as a secret file, and smtp_auth_password_file below points
+# Alertmanager straight at that file — so it stays out of process
+# arguments, out of `docker inspect`, and out of the generated config.
 #
 # Delivery for Prometheus-sourced alerts (monitoring/alert.rules.yml) goes
 # through Alertmanager's built-in email_configs, not through
@@ -20,7 +24,7 @@ global:
   smtp_smarthost: '__SMTP_HOST__:__SMTP_PORT__'
   smtp_from: '__SMTP_USER__'
   smtp_auth_username: '__SMTP_USER__'
-  smtp_auth_password: '__SMTP_PASSWORD__'
+  smtp_auth_password_file: '/run/secrets/smtp_password'
   smtp_require_tls: true
 
 route:

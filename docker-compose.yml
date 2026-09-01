@@ -233,46 +233,41 @@ services:
   alertmanager:
     image: prom/alertmanager:latest
     restart: unless-stopped
+    # Only the four non-secret values travel as environment (they are
+    # readable in `docker inspect`, which for a hostname, a port and two
+    # addresses is what they already are in .env.docker.example). The
+    # password does NOT: it is mounted as the smtp_password secret below
+    # and read by Alertmanager itself from /run/secrets/smtp_password
+    # (smtp_auth_password_file in the template), so it never reaches this
+    # container's environment, argv, or writable layer.
     environment:
       ALERT_EMAIL_TO: "${ALERT_EMAIL_TO:-}"
       SMTP_HOST: "${SMTP_HOST:-}"
       SMTP_PORT: "${SMTP_PORT:-}"
       SMTP_USER: "${SMTP_USER:-}"
-      SMTP_PASSWORD: "${SMTP_PASSWORD:-}"
+    secrets:
+      - smtp_password
     volumes:
       - ./monitoring/alertmanager.yml.template:/etc/alertmanager/alertmanager.yml.template:ro
+      - ./monitoring/alertmanager-entrypoint.sh:/etc/alertmanager/entrypoint.sh:ro
       - alertmanagerdata:/alertmanager
     # The image's own ENTRYPOINT is /bin/alertmanager; entrypoint: replaces
-    # it entirely so the SMTP config can be templated in first (see the
-    # mounted template's header comment) instead of being appended as
-    # arguments to it. Confirmed against prom/alertmanager:latest that
-    # /bin/sh and /bin/sed both exist in this image — no envsubst, sed
-    # substitution instead.
-    #
-    # Every $ below is doubled ($$) so docker-compose's OWN ${...}
-    # substitution leaves it alone: without the escape, `docker compose
-    # config`/`up` would bake the current .env values (including
-    # SMTP_PASSWORD) as a literal string into this entrypoint at compose
-    # time — visible in `docker inspect`/`docker compose config` output —
-    # instead of the container's own shell reading them from its
-    # environment: block at start, the way this is meant to work.
-    entrypoint:
-      - /bin/sh
-      - -c
-      - |
-        set -eu
-        if [ -z "$${ALERT_EMAIL_TO:-}" ] || [ -z "$${SMTP_HOST:-}" ] || [ -z "$${SMTP_PORT:-}" ] || [ -z "$${SMTP_USER:-}" ] || [ -z "$${SMTP_PASSWORD:-}" ]; then
-          echo "alertmanager: missing ALERT_EMAIL_TO/SMTP_HOST/SMTP_PORT/SMTP_USER/SMTP_PASSWORD in .env -- refusing to start with an incomplete SMTP config" >&2
-          exit 1
-        fi
-        sed \
-          -e "s|__SMTP_HOST__|$$SMTP_HOST|g" \
-          -e "s|__SMTP_PORT__|$$SMTP_PORT|g" \
-          -e "s|__SMTP_USER__|$$SMTP_USER|g" \
-          -e "s|__SMTP_PASSWORD__|$$SMTP_PASSWORD|g" \
-          -e "s|__ALERT_EMAIL_TO__|$$ALERT_EMAIL_TO|g" \
-          /etc/alertmanager/alertmanager.yml.template > /tmp/alertmanager.yml
-        exec /bin/alertmanager --config.file=/tmp/alertmanager.yml --storage.path=/alertmanager
+    # it entirely so the SMTP config can be assembled first (see
+    # monitoring/alertmanager-entrypoint.sh, which then execs the real
+    # binary). Confirmed against prom/alertmanager:latest that /bin/sh and
+    # /bin/sed both exist in this image — no envsubst, sed substitution
+    # instead.
+    entrypoint: ["/bin/sh", "/etc/alertmanager/entrypoint.sh"]
+    # Without this, a container stuck in a config-error restart loop still
+    # counts as "started" — `docker compose up --wait` would then wait on
+    # it forever and wedge the auto-deploy tick holding the lock (issue
+    # #333). Unhealthy is a state both `compose ps` and `--wait` can see.
+    healthcheck:
+      test: ["CMD", "wget", "--spider", "-q", "http://localhost:9093/-/healthy"]
+      interval: 15s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
     cap_drop:
       - ALL
 
@@ -299,6 +294,13 @@ services:
 secrets:
   hf_token:
     environment: HF_TOKEN
+  # Mounted into the alertmanager container at /run/secrets/smtp_password
+  # instead of being passed as an environment variable: a secret in
+  # `environment:` is visible in `docker inspect` and `docker compose
+  # config` for anyone on the host, and would additionally have to survive
+  # a text substitution on its way into the config (issue #333).
+  smtp_password:
+    environment: SMTP_PASSWORD
 
 volumes:
   pgdata:
