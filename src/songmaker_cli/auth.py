@@ -4,8 +4,8 @@ from __future__ import annotations
 
 import hashlib
 import hmac
+import logging
 import os
-from collections.abc import Sequence
 from dataclasses import dataclass
 from ipaddress import (
     IPv4Address,
@@ -15,6 +15,7 @@ from ipaddress import (
     ip_address,
     ip_network,
 )
+from itertools import islice
 from typing import TYPE_CHECKING, Final
 
 import bcrypt
@@ -22,9 +23,13 @@ import bcrypt
 from songmaker_cli.settings import get_settings
 
 if TYPE_CHECKING:
+    from collections.abc import Iterator, Sequence
+
     from starlette.requests import Request
 
     from songmaker_cli.app_context import AppContext
+
+log = logging.getLogger(__name__)
 
 BCRYPT_ROUNDS = 12
 
@@ -46,15 +51,12 @@ UNKNOWN_CLIENT_IP: Final[str] = "unknown"
 # address carrying one is ever matched or used as an identity here.
 ZONE_SEPARATOR: Final[str] = "%"
 
-# A real chain is short: the CDN edge appends one hop, the tunnel another, the
-# container gateway a third. 16 leaves room for a stacked proxy setup while
-# keeping a forged header from making the server parse an unbounded list.
+# How many hops of a chain are ever read. Only the entries our own proxies
+# appended decide the identity, and a real deployment appends three: the CDN
+# edge, the tunnel, the container gateway. Reaching 16 means the server sits
+# behind more trusted proxies than anyone configured -- a client cannot cause
+# it, because everything a client writes lands left of the hop that decides.
 MAX_FORWARDED_FOR_HOPS: Final[int] = 16
-# 16 hops in the longest textual IPv6 form (45 characters) plus their 15 ", "
-# separators need 750 characters. 1024 is the next round number above that, so
-# this bound rejects only chains the hop bound rejects anyway -- it exists to
-# cap the work done *before* the chain is split.
-MAX_FORWARDED_FOR_CHARS: Final[int] = 1024
 
 
 @dataclass(frozen=True)
@@ -124,28 +126,46 @@ def _canonical_host(host: str) -> str:
     return host if address is None else str(address)
 
 
-def _forwarded_chain(header_values: Sequence[str]) -> tuple[IpAddress, ...] | None:
-    """The merged X-Forwarded-For chain, or None when it cannot be believed.
+def _forwarded_entries(header_values: Sequence[str]) -> Iterator[str]:
+    """The X-Forwarded-For entries from right to left, newest hop first.
 
-    A chain may arrive split across several header fields; they are one ordered
-    list, so all of them are joined before parsing -- reading only the first
-    would let a client hide hops in a second field. A chain that is too long,
-    or that carries one entry which is not a plain IP address, is malformed as
-    a whole: no part of it identifies anybody.
+    A chain may arrive split across several header fields; together they are
+    one ordered list, so the fields are walked back to front as well -- reading
+    only one of them would let a client hide hops in another.
     """
-    joined = ",".join(header_values)
-    if not joined or len(joined) > MAX_FORWARDED_FOR_CHARS:
-        return None
-    entries = joined.split(",")
-    if len(entries) > MAX_FORWARDED_FOR_HOPS:
-        return None
-    hops: list[IpAddress] = []
-    for entry in entries:
-        hop = _canonical_address(entry.strip())
+    for header_value in reversed(header_values):
+        for entry in reversed(header_value.split(",")):
+            yield entry.strip()
+
+
+def _client_from_chain(
+    entries: Iterator[str], trusted_proxies: TrustedProxies,
+) -> IpAddress | None:
+    """The rightmost hop no trusted proxy vouches for, or None when there is none.
+
+    ``entries`` starts at the hop our own proxy appended, and each trusted hop
+    is stepped over until one that is not trusted appears: that is the client.
+    Whatever a client writes into the header itself ends up left of the entry
+    its proxy appended for it, so it is never read -- a poisoned prefix cannot
+    change this answer. An entry that is not an address, or a chain of trusted
+    hops deeper than the deployment can plausibly be, names nobody.
+    """
+    for entry in islice(entries, MAX_FORWARDED_FOR_HOPS):
+        hop = _canonical_address(entry)
         if hop is None:
+            log.warning(
+                "X-Forwarded-For carries %r where the nearest proxy should have "
+                "appended an address; keying this request on the direct peer.", entry,
+            )
             return None
-        hops.append(hop)
-    return tuple(hops)
+        if not trusted_proxies.trusts(hop):
+            return hop
+    if next(entries, None) is not None:
+        log.warning(
+            "X-Forwarded-For names more than %d trusted hops in a row; keying this "
+            "request on the direct peer.", MAX_FORWARDED_FOR_HOPS,
+        )
+    return None
 
 
 def parse_trusted_proxies() -> TrustedProxies:
@@ -159,20 +179,17 @@ def get_client_ip(
     """The client's identity: the rightmost hop no trusted proxy vouches for.
 
     Only a request arriving from a trusted peer may name a client other than
-    the peer itself, and only through a chain whose every hop is a parsable
-    address. Anything else keys on the peer -- a forged, truncated or empty
+    the peer itself, and the chain is then read from the right, where our own
+    proxies appended. A client cannot change that answer by prepending entries
+    of its own: forged or not, they sit left of the one hop that decides. When
+    no hop names anybody the request keys on the peer -- a truncated or empty
     header must never become somebody's identity, because that identity binds
     a session and buys a rate-limit budget.
     """
     if peer not in trusted_proxies:
         return _canonical_host(peer)
-    chain = _forwarded_chain(forwarded_for_fields)
-    if chain is None:
-        return _canonical_host(peer)
-    for hop in reversed(chain):
-        if not trusted_proxies.trusts(hop):
-            return str(hop)
-    return _canonical_host(peer)
+    client = _client_from_chain(_forwarded_entries(forwarded_for_fields), trusted_proxies)
+    return _canonical_host(peer) if client is None else str(client)
 
 
 def _peer_host(request: Request) -> str:

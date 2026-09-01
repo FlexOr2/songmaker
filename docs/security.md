@@ -67,20 +67,33 @@ is not trusted:
 - The same signal emits `Strict-Transport-Security`.
 
 `auth.resolve_client_ip()` and `auth.request_is_https()` own both decisions;
-no endpoint or middleware reads those headers itself. The chain is validated
-before any part of it becomes an identity:
+no endpoint or middleware reads those headers itself. The chain is read from
+the right, where our own proxies appended, and only what it says there can
+become an identity:
 
-- All `X-Forwarded-For` header fields are joined in order — a chain split
-  across several fields is one list, and reading only the first would let a
-  client hide hops in a second field.
-- The joined chain is bounded by `MAX_FORWARDED_FOR_CHARS` (1024) and
-  `MAX_FORWARDED_FOR_HOPS` (16), so a forged header cannot make the server
-  materialize an unbounded list. A real chain here is three hops.
-- Every hop must parse as a plain IP address. One empty, whitespace-only or
-  unparsable entry makes the whole chain malformed and the request keys on the
-  direct peer instead — an empty string or a word like `garbage` can never
-  become a client identity, which would otherwise pool unrelated visitors into
-  one rate-limit budget and one session binding.
+- Every `X-Forwarded-For` header field belongs to one ordered list, so the
+  fields are walked back to front too — reading only one of them would let a
+  client hide hops in another.
+- Starting at the newest hop, each entry a trusted proxy vouches for is
+  stepped over; the first entry that is not trusted is the client. Entries
+  further left are never read, so a client cannot change the answer by
+  prepending its own: `garbage, 203.0.113.7` from the address `203.0.113.7`
+  still keys on `203.0.113.7`. Reading left to right instead would let that
+  client void the chain and spend the gateway's shared budget rather than its
+  own.
+- An entry that is not a plain IP address, right of the client, names nobody:
+  `203.0.113.7, garbage` keys on the direct peer, because an empty string or a
+  word like `garbage` must never become an identity that binds a session and
+  buys a rate-limit budget.
+- At most `MAX_FORWARDED_FOR_HOPS` (16) entries are read; a real chain here is
+  three. Only the hops our own proxies appended are ever examined, so a client
+  cannot reach that bound — hitting it means the deployment stacks more
+  trusted proxies than anyone configured. There is no bound on the chain's
+  total length, because rejecting a long chain would hand a client exactly the
+  peer-key escape that reading from the right removes.
+- Both fallbacks to the peer are logged at `WARNING`. They pool unrelated
+  visitors into one budget, so they are a proxy misconfiguration to see rather
+  than a silent default.
 - Addresses are canonicalized: `::ffff:203.0.113.9` and `203.0.113.9` are one
   identity, so nobody multiplies a budget by switching notation. An address
   carrying an interface zone is treated as no address at all.

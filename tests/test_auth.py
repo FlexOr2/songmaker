@@ -2,13 +2,13 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 import pytest
 
 from songmaker_cli.auth import (
     BCRYPT_ROUNDS,
-    MAX_FORWARDED_FOR_CHARS,
     MAX_FORWARDED_FOR_HOPS,
     MIN_PASSWORD_LENGTH,
     RATE_LIMIT_WINDOW_SECONDS,
@@ -225,59 +225,101 @@ def test_parse_trusted_proxies_rejects_a_zone_scoped_entry(
 
 _PROXY_NETWORK = "172.16.0.0/12"
 _TRUSTED_PEER = "172.18.0.1"
-_MAX_CHAIN = ", ".join(["203.0.113.9"] * MAX_FORWARDED_FOR_HOPS)
-_ONE_HOP_TOO_MANY = ", ".join(["203.0.113.9"] * (MAX_FORWARDED_FOR_HOPS + 1))
-_PADDED_PAST_THE_LENGTH_BOUND = "203.0.113.9" + " " * MAX_FORWARDED_FOR_CHARS
+_TRUSTED_HOP = "172.18.0.9"
+_CLIENT = "203.0.113.7"
+_CLIENT_AT_THE_HOP_BOUND = ", ".join(
+    [_CLIENT, *[_TRUSTED_HOP] * (MAX_FORWARDED_FOR_HOPS - 1)],
+)
+_CLIENT_BEYOND_THE_HOP_BOUND = ", ".join(
+    [_CLIENT, *[_TRUSTED_HOP] * MAX_FORWARDED_FOR_HOPS],
+)
 
 
 @pytest.mark.parametrize(
     ("forwarded_for", "expected"),
     [
         pytest.param([], _TRUSTED_PEER, id="no header at all"),
-        pytest.param(["203.0.113.7"], "203.0.113.7", id="single hop"),
+        pytest.param([_CLIENT], _CLIENT, id="single hop"),
         pytest.param(
-            ["203.0.113.7, 172.18.0.9"], "203.0.113.7", id="rightmost untrusted hop",
+            [f"{_CLIENT}, {_TRUSTED_HOP}"], _CLIENT, id="rightmost untrusted hop",
         ),
         pytest.param(
-            ["203.0.113.7", "172.18.0.9"], "203.0.113.7", id="chain split across fields",
+            [_CLIENT, _TRUSTED_HOP], _CLIENT, id="chain split across fields",
         ),
         pytest.param(
-            ["10.9.9.9", "203.0.113.7"], "203.0.113.7",
-            id="a later field is not hidden by the first",
+            ["10.9.9.9", _CLIENT], _CLIENT, id="a later field is not hidden by the first",
         ),
         pytest.param(
-            ["172.18.0.9, 172.18.0.8"], _TRUSTED_PEER, id="every hop trusted",
+            [f"{_TRUSTED_HOP}, 172.18.0.8"], _TRUSTED_PEER, id="every hop trusted",
         ),
         pytest.param(["   "], _TRUSTED_PEER, id="whitespace only"),
         pytest.param([""], _TRUSTED_PEER, id="empty header"),
-        pytest.param(["203.0.113.9, "], _TRUSTED_PEER, id="trailing empty entry"),
-        pytest.param([", 203.0.113.9"], _TRUSTED_PEER, id="leading empty entry"),
+        pytest.param([f"{_CLIENT}, "], _TRUSTED_PEER, id="empty entry right of the client"),
+        pytest.param([f", {_CLIENT}"], _CLIENT, id="empty entry left of the client"),
         pytest.param(["garbage"], _TRUSTED_PEER, id="not an address"),
         pytest.param(
-            ["203.0.113.9, garbage"], _TRUSTED_PEER, id="one bad hop voids the chain",
+            [f"garbage, {_CLIENT}, {_TRUSTED_HOP}"], _CLIENT,
+            id="poisoned prefix left of a trusted hop",
         ),
-        pytest.param(["203.0.113.9:443"], _TRUSTED_PEER, id="address with a port"),
-        pytest.param(["fe80::1%eth0"], _TRUSTED_PEER, id="zone-scoped hop"),
-        pytest.param(["::ffff:203.0.113.9"], "203.0.113.9", id="IPv4-mapped hop"),
-        pytest.param(["2001:0DB8:0000::0001"], "2001:db8::1", id="uncompressed IPv6 hop"),
-        pytest.param([_MAX_CHAIN], "203.0.113.9", id="chain at the hop bound"),
-        pytest.param([_ONE_HOP_TOO_MANY], _TRUSTED_PEER, id="one hop past the bound"),
         pytest.param(
-            [_PADDED_PAST_THE_LENGTH_BOUND], _TRUSTED_PEER, id="padded past the length bound",
+            ["garbage", _CLIENT], _CLIENT, id="poisoned prefix in an earlier field",
+        ),
+        pytest.param([f"{_CLIENT}:443"], _TRUSTED_PEER, id="address with a port"),
+        pytest.param(["fe80::1%eth0"], _TRUSTED_PEER, id="zone-scoped hop"),
+        pytest.param([f"::ffff:{_CLIENT}"], _CLIENT, id="IPv4-mapped hop"),
+        pytest.param(["2001:0DB8:0000::0001"], "2001:db8::1", id="uncompressed IPv6 hop"),
+        pytest.param([_CLIENT_AT_THE_HOP_BOUND], _CLIENT, id="client at the hop bound"),
+        pytest.param(
+            [_CLIENT_BEYOND_THE_HOP_BOUND], _TRUSTED_PEER, id="client beyond the hop bound",
         ),
     ],
 )
 def test_client_ip_behind_a_trusted_proxy(
     forwarded_for: list[str], expected: str,
 ) -> None:
-    """A forwarded chain names the client only when every hop is an address.
+    """The chain is read from the right, where our own proxies appended.
 
-    Anything else keys on the peer: a malformed chain must never hand its
-    empty or nonsense entry out as an identity, because that identity binds a
-    session and buys a rate-limit budget.
+    The first hop no trusted proxy vouches for is the client; entries further
+    left are never read. When the readable part names nobody the request keys
+    on the peer, because an empty or nonsense identity binds a session and
+    buys a rate-limit budget.
     """
     proxies = TrustedProxies.parse(_PROXY_NETWORK)
     assert get_client_ip(_TRUSTED_PEER, forwarded_for, proxies) == expected
+
+
+def test_a_poisoned_prefix_cannot_move_a_client_onto_the_gateway_identity() -> None:
+    """A client's own address is appended after whatever it sent, never before.
+
+    So junk it writes sits left of that entry and is never read: it keeps its
+    own rate-limit key instead of escaping onto the peer's, which every other
+    visitor behind the same gateway shares. Junk to the right of the client is
+    a different story — there the chain says nothing believable, and the
+    request keys on the peer.
+    """
+    proxies = TrustedProxies.parse(_PROXY_NETWORK)
+    assert get_client_ip(_TRUSTED_PEER, [f"garbage, {_CLIENT}"], proxies) == _CLIENT
+    assert get_client_ip(_TRUSTED_PEER, [f"{_CLIENT}, garbage"], proxies) == _TRUSTED_PEER
+
+
+@pytest.mark.parametrize(
+    "forwarded_for",
+    [
+        pytest.param(["garbage"], id="an entry that is not an address"),
+        pytest.param(
+            [_CLIENT_BEYOND_THE_HOP_BOUND], id="more trusted hops than the bound",
+        ),
+    ],
+)
+def test_a_chain_that_names_nobody_is_logged(
+    forwarded_for: list[str], caplog: pytest.LogCaptureFixture,
+) -> None:
+    """Keying on the peer pools unrelated visitors into one budget, so a chain
+    the proxy should have written correctly is a fault to see, not a default."""
+    proxies = TrustedProxies.parse(_PROXY_NETWORK)
+    with caplog.at_level(logging.WARNING, logger="songmaker_cli.auth"):
+        assert get_client_ip(_TRUSTED_PEER, forwarded_for, proxies) == _TRUSTED_PEER
+    assert [record.levelno for record in caplog.records] == [logging.WARNING]
 
 
 def test_client_ip_ignores_a_chain_from_an_untrusted_peer() -> None:
