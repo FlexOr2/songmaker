@@ -78,7 +78,7 @@ describe('WorkerPoolPanel VRAM measurement', () => {
 	it('marks estimated VRAM usage', async () => {
 		const value = await renderVram(false);
 
-		expect(value).toHaveTextContent('~12.4 / 24.0 GB');
+		expect(value).toHaveTextContent('~12.4 / 24.0 GB est.');
 		expect(value).toHaveAttribute('title', 'Estimated VRAM usage');
 	});
 

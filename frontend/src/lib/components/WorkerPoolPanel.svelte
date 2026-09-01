@@ -135,8 +135,10 @@
 
 	function formatVramUsage(state: WorkerInfoItem['state']): string | null {
 		if (!state || state.vram_used_gb == null || state.vram_total_gb == null) return null;
-		const estimatePrefix = state.vram_measured === false ? '~' : '';
-		return `${estimatePrefix}${state.vram_used_gb.toFixed(1)} / ${state.vram_total_gb.toFixed(1)} GB`;
+		const isEstimate = state.vram_measured === false;
+		const estimatePrefix = isEstimate ? '~' : '';
+		const estimateSuffix = isEstimate ? ' est.' : '';
+		return `${estimatePrefix}${state.vram_used_gb.toFixed(1)} / ${state.vram_total_gb.toFixed(1)} GB${estimateSuffix}`;
 	}
 
 	function isCardBusy(worker: WorkerInfoItem): boolean {
