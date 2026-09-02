@@ -12,11 +12,11 @@
 // that at a real phone viewport, not a kinetic-scrolling proof, since there
 // is nothing of this action's to exercise on that surface yet.
 
-import { expect, request, test, type Page } from '@playwright/test';
+import { expect, test, type Page } from '@playwright/test';
 import { EDITOR_VIEW_COWRITER_LABEL, TRANSPORT_PAUSE_LABEL } from '../src/lib/constants';
 import { nowPlayingTakeLabel } from '../src/lib/constants/now-playing';
 import { DESKTOP_VIEWPORT, FlowGuard, MOBILE_VIEWPORT } from './helpers';
-import { BASE_URL, readSeededLibrary, seedTakeStripSong, STORAGE_STATE_FILE } from './seed';
+import { readSeededLibrary, seedTakeStripSong } from './seed';
 
 /** Its own song (see seedTakeStripSong) rather than one of the base seed's
  *  SONG_TITLES, which other flows in the same run depend on staying at the
@@ -47,27 +47,30 @@ const TAKE_COUNT = 25;
 const ROW_LAYOUT_VIEWPORT = { width: 900, height: 900 };
 
 /**
- * What this spec costs the API per test, measured on a green run against a
- * clean stack: a cold song open, the co-writer toggle, and playing two takes
- * (~31-32 requests for the column and row tests; the mobile-absence check
- * costs ~15 and never comes close). One shared ceiling with headroom — a flow
- * that suddenly needs more round trips is a regression, find the extra
- * requests instead of raising the number.
+ * What this spec costs the API per test, measured over several green runs
+ * against a clean stack (the song's own takes are seeded directly against
+ * the database — see seedTakeStripSong — so none of that setup counts here):
+ * a cold song open, the co-writer toggle, and playing two takes costs 24-28
+ * requests for the column and row tests; the mobile-absence check costs 15
+ * and never comes close. One shared ceiling with headroom — a flow that
+ * suddenly needs more round trips is a regression, find the extra requests
+ * instead of raising the number.
  */
-const KINETIC_STRIP_FLOW_API_REQUEST_BUDGET = 40;
+const KINETIC_STRIP_FLOW_API_REQUEST_BUDGET = 35;
 
 function expectedSongSlug(title: string): string {
 	return title.toLowerCase().replace(/\s+/g, '-');
 }
 
-test.beforeAll(async () => {
+// eslint-disable-next-line no-empty-pattern -- Playwright requires the object-destructuring form even with no fixture named
+test.beforeAll(async ({}, testInfo) => {
+	// beforeAll runs once per Playwright project, not once per file — every
+	// test below skips on mobile (each opens its own desktop-shaped context
+	// regardless of project), so seeding the song there would cost a second
+	// one for nothing.
+	if (testInfo.project.name === 'mobile') return;
 	const library = readSeededLibrary();
-	const api = await request.newContext({ baseURL: BASE_URL, storageState: STORAGE_STATE_FILE });
-	try {
-		await seedTakeStripSong(api, library.albumId, KINETIC_STRIP_SONG_TITLE, TAKE_COUNT);
-	} finally {
-		await api.dispose();
-	}
+	await seedTakeStripSong(library.albumId, KINETIC_STRIP_SONG_TITLE, TAKE_COUNT);
 });
 
 /** Chip labels in the strip's real DOM order: newest take first (TakeStrip.svelte's sort). */
@@ -122,6 +125,98 @@ async function waitForStripScrollSettled(page: Page): Promise<void> {
 	);
 }
 
+/** Waits for the strip's scroll position on `axis` to differ from `from` —
+ *  the first observable sign that something is still moving it after a
+ *  release, rather than an assumed elapsed time. */
+async function waitForScrollChangeFrom(
+	page: Page,
+	axis: 'left' | 'top',
+	from: number
+): Promise<void> {
+	await page.waitForFunction(
+		({ axis, from }) => {
+			const el = document.querySelector('.take-strip') as HTMLElement | null;
+			if (!el) return false;
+			const value = axis === 'left' ? el.scrollLeft : el.scrollTop;
+			return value !== from;
+		},
+		{ axis, from },
+		{ timeout: 2000, polling: 30 }
+	);
+}
+
+/** The strip's average per-chip span on `axis`, measured from its own
+ *  rendered content rather than a guessed pixel constant. */
+async function measureChipSpan(page: Page, axis: 'left' | 'top'): Promise<number> {
+	const size = await page
+		.locator('.take-strip')
+		.evaluate((el, axis) => (axis === 'left' ? el.scrollWidth : el.scrollHeight), axis);
+	return size / TAKE_COUNT;
+}
+
+/**
+ * Waits until the strip has moved more than `thresholdPx` past
+ * `atReleaseValue` — the direct proof of momentum, not an inference drawn
+ * afterwards. `stopMomentum(true)` always ends a drag or a catch by
+ * snapping to the *nearest* item's centre (kineticScroll.ts), whether real
+ * momentum ran or the flick was too gentle to coast at all, so a bare "it
+ * moved after release" cannot tell the two apart — a snap-only settle
+ * moves it too. A snap targets the nearest item, so it can move at most
+ * half the span between two items; passing a full chip span (`thresholdPx`
+ * here) cannot be explained by snapping alone, only by momentum having
+ * carried it there. Waiting for the crossing itself (rather than waiting
+ * for any movement, then separately measuring the eventual settle) also
+ * keeps this from being satisfied by the stop click's own catch-and-snap
+ * that follows it — the threshold is crossed before that click ever fires.
+ */
+async function waitForCoastPastThreshold(
+	page: Page,
+	axis: 'left' | 'top',
+	atReleaseValue: number,
+	thresholdPx: number
+): Promise<void> {
+	await page.waitForFunction(
+		({ axis, atReleaseValue, thresholdPx }) => {
+			const el = document.querySelector('.take-strip') as HTMLElement | null;
+			if (!el) return false;
+			const value = axis === 'left' ? el.scrollLeft : el.scrollTop;
+			return Math.abs(value - atReleaseValue) > thresholdPx;
+		},
+		{ axis, atReleaseValue, thresholdPx },
+		{ timeout: 2000, polling: 20 }
+	);
+}
+
+/**
+ * Captures whether the *next* wheel event dispatched anywhere on the page
+ * was default-prevented — direct proof of whether the action intercepted
+ * it, rather than inferring that from whether the strip moved (native
+ * scrolling and a JS handler emulating it would both move it). The
+ * listener sits on `document` in the bubble phase, so it observes the
+ * event after kineticScroll's own listener — registered directly on
+ * `.take-strip`, deeper in the tree — has already had its chance to call
+ * `preventDefault()`.
+ */
+async function captureNextWheelDefaultPrevented(page: Page): Promise<() => Promise<boolean>> {
+	await page.evaluate(() => {
+		delete document.documentElement.dataset.lastWheelDefaultPrevented;
+		document.addEventListener(
+			'wheel',
+			(e) => {
+				document.documentElement.dataset.lastWheelDefaultPrevented = String(e.defaultPrevented);
+			},
+			{ once: true }
+		);
+	});
+	return async () => {
+		const value = await page.evaluate(
+			() => document.documentElement.dataset.lastWheelDefaultPrevented
+		);
+		if (value === undefined) throw new Error('No wheel event observed on the page');
+		return value === 'true';
+	};
+}
+
 async function expectNothingPlaying(page: Page): Promise<void> {
 	await expect(
 		page.getByRole('contentinfo').getByRole('button', { name: TRANSPORT_PAUSE_LABEL, exact: true })
@@ -147,6 +242,12 @@ test.describe('kinetic take strip', () => {
 		isMobile
 	}) => {
 		test.skip(Boolean(isMobile), 'this test opens its own desktop-width context');
+		// No storageState/baseURL passed here: the `browser` fixture Playwright
+		// Test injects already carries the project's own `use` config (see
+		// playwright.config.ts) as newContext()'s defaults, so the login
+		// session and the relative page.goto() below both still resolve —
+		// checked directly against this stack, not assumed, after an
+		// independent review raised exactly this question.
 		const context = await browser.newContext({ viewport: DESKTOP_VIEWPORT });
 		const page = await context.newPage();
 		guard = new FlowGuard(page);
@@ -159,8 +260,15 @@ test.describe('kinetic take strip', () => {
 		const box = await page.locator('.take-strip').boundingBox();
 		if (!box) throw new Error('take strip did not render a box');
 		const cx = box.x + box.width / 2;
-		const startY = box.y + box.height * 0.85;
-		const endY = box.y + box.height * 0.15;
+		// A moderate span (20% of the box, not edge-to-edge) rather than a
+		// maximal drag — measured directly: an edge-to-edge drag here already
+		// covers most of the container's own scrollable range on its own
+		// (box height 502.5px against a max scroll of 377.5px at 25 takes),
+		// leaving momentum almost no room to coast before hitting the
+		// boundary and snapping immediately, which is indistinguishable from
+		// no momentum at all.
+		const startY = box.y + box.height * 0.65;
+		const endY = box.y + box.height * 0.45;
 
 		await expectNothingPlaying(page);
 		await page.mouse.move(cx, startY);
@@ -168,19 +276,25 @@ test.describe('kinetic take strip', () => {
 		const dragSteps = 6;
 		for (let i = 1; i <= dragSteps; i++) {
 			await page.mouse.move(cx, startY + ((endY - startY) * i) / dragSteps);
-			await page.waitForTimeout(20);
 		}
 		await page.mouse.up();
 
 		const atRelease = await stripScroll(page);
 		expect(atRelease.top).toBeGreaterThan(before.top); // the drag itself moved it
 
-		await page.waitForTimeout(250);
-		const midCoast = await stripScroll(page);
-		expect(midCoast.top).toBeGreaterThan(atRelease.top); // momentum carried it on past the release point
+		// Momentum, proven before the stop click below ever fires — see
+		// waitForCoastPastThreshold's own note on why a full chip span cannot
+		// be explained by the eventual snap-to-nearest alone.
+		const chipSpan = await measureChipSpan(page, 'top');
+		await waitForCoastPastThreshold(page, 'top', atRelease.top, chipSpan);
 
-		// The stop click: while it is still rolling, a click lands on whatever
-		// chip is currently under the pointer and must not open it.
+		// The stop click: fired the instant real momentum is confirmed, not
+		// after an assumed duration — a flick this strong takes the better
+		// part of a second to decay (its capped release velocity and the
+		// friction constant in kineticScroll.ts fix that), comfortably longer
+		// than the reaction time between that confirmation and the click
+		// below. It lands on whatever chip is currently under the pointer
+		// while the strip is still rolling and must not open it.
 		await page.mouse.click(cx, box.y + box.height / 2);
 		await expectNothingPlaying(page);
 
@@ -194,14 +308,22 @@ test.describe('kinetic take strip', () => {
 				.getByRole('button', { name: TRANSPORT_PAUSE_LABEL, exact: true })
 		).toBeVisible();
 
-		// The wheel: a plain vertical tick already scrolls a column natively —
-		// nothing here should ever call preventDefault on it.
+		// The wheel: a plain vertical tick already scrolls a column natively.
+		// Proven directly against the dispatched event, not inferred from
+		// whether the strip moved — a JS handler emulating native scrolling
+		// would move it too, so movement alone cannot show the browser handled
+		// it unassisted (issue #358's own review). Movement is still checked
+		// afterwards, as confirmation that the browser's own scroll actually
+		// ran and nothing else on the page swallowed it — a negative delta
+		// (scroll back toward the start) rather than a positive one, since the
+		// take clicked just above scrolled the strip to its far end, where a
+		// further forward tick would have nowhere left to move it.
 		const beforeWheel = await stripScroll(page);
+		const readWheelDefaultPrevented = await captureNextWheelDefaultPrevented(page);
 		await page.mouse.move(cx, box.y + box.height / 2);
-		await page.mouse.wheel(0, 150);
-		await page.waitForTimeout(80);
-		const afterWheel = await stripScroll(page);
-		expect(afterWheel.top).not.toBe(beforeWheel.top);
+		await page.mouse.wheel(0, -150);
+		expect(await readWheelDefaultPrevented()).toBe(false);
+		await waitForScrollChangeFrom(page, 'top', beforeWheel.top);
 
 		// Home/End and the vertical arrow keys.
 		const firstChip = page.getByRole('button', { name: labels[0], exact: true });
@@ -240,8 +362,10 @@ test.describe('kinetic take strip', () => {
 		const box = await page.locator('.take-strip').boundingBox();
 		if (!box) throw new Error('take strip did not render a box');
 		const cy = box.y + box.height / 2;
-		const startX = box.x + box.width * 0.85;
-		const endX = box.x + box.width * 0.15;
+		// A moderate span, not edge-to-edge — see the column test's own note
+		// on why a maximal drag leaves momentum no room to coast.
+		const startX = box.x + box.width * 0.65;
+		const endX = box.x + box.width * 0.45;
 
 		await expectNothingPlaying(page);
 		await page.mouse.move(startX, cy);
@@ -249,17 +373,21 @@ test.describe('kinetic take strip', () => {
 		const dragSteps = 6;
 		for (let i = 1; i <= dragSteps; i++) {
 			await page.mouse.move(startX + ((endX - startX) * i) / dragSteps, cy);
-			await page.waitForTimeout(20);
 		}
 		await page.mouse.up();
 
 		const atRelease = await stripScroll(page);
-		expect(atRelease.left).toBeGreaterThan(before.left);
+		expect(atRelease.left).toBeGreaterThan(before.left); // the drag itself moved it
 
-		await page.waitForTimeout(250);
-		const midCoast = await stripScroll(page);
-		expect(midCoast.left).toBeGreaterThan(atRelease.left);
+		// Momentum, proven before the stop click below ever fires (see the
+		// column test's own note on waitForCoastPastThreshold).
+		const chipSpan = await measureChipSpan(page, 'left');
+		await waitForCoastPastThreshold(page, 'left', atRelease.left, chipSpan);
 
+		// The stop click (see the column test's own note on timing): fired the
+		// instant real momentum is confirmed, it lands on whatever chip is
+		// currently under the pointer while the strip is still rolling and
+		// must not open it.
 		await page.mouse.click(box.x + box.width / 2, cy);
 		await expectNothingPlaying(page);
 
@@ -273,13 +401,18 @@ test.describe('kinetic take strip', () => {
 
 		// The wheel: a row's own axis is horizontal, so a plain vertical tick
 		// (deltaX 0) has to be converted rather than left to a browser that
-		// would otherwise do nothing useful with it on this axis.
+		// would otherwise do nothing useful with it on this axis. Proven
+		// directly against the dispatched event (see the column test's own
+		// note); movement is still checked afterwards, as confirmation that
+		// the action's own conversion actually ran — a negative delta (see
+		// the column test's own note on why: the take clicked just above
+		// scrolled the strip to its far end).
 		const beforeWheel = await stripScroll(page);
+		const readWheelDefaultPrevented = await captureNextWheelDefaultPrevented(page);
 		await page.mouse.move(box.x + box.width / 2, cy);
-		await page.mouse.wheel(0, 150);
-		await page.waitForTimeout(80);
-		const afterWheel = await stripScroll(page);
-		expect(afterWheel.left).not.toBe(beforeWheel.left);
+		await page.mouse.wheel(0, -150);
+		expect(await readWheelDefaultPrevented()).toBe(true);
+		await waitForScrollChangeFrom(page, 'left', beforeWheel.left);
 
 		// Home/End and the horizontal arrow keys.
 		const firstChip = page.getByRole('button', { name: labels[0], exact: true });
