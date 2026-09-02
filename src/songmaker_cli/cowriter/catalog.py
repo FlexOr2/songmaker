@@ -49,6 +49,17 @@ class ProviderSetupMethod(StrEnum):
     CLAUDE_CLI = "claude_cli"
 
 
+class SupportedCowriterProvider(str):
+    """A co-writer provider that remains available in the current configuration."""
+
+
+class RemovedCowriterProvider(str):
+    """A saved co-writer provider removed from the current configuration."""
+
+
+type CowriterProvider = SupportedCowriterProvider | RemovedCowriterProvider
+
+
 @dataclass(frozen=True)
 class ConfiguredProvider:
     provider: str
@@ -84,33 +95,44 @@ def get_provider_configuration(provider: str) -> ProviderConfiguration:
     return _provider_configuration(provider, get_settings())
 
 
-def list_provider_models(provider: str) -> list[str]:
+def list_provider_models(provider: str | CowriterProvider) -> list[str]:
+    match provider:
+        case SupportedCowriterProvider():
+            provider_name = str(provider)
+        case RemovedCowriterProvider():
+            raise ProviderUnavailableError(
+                str(provider), f"Unknown co-writer provider '{provider}'",
+            )
+        case str():
+            provider_name = provider
+        case _:
+            raise AssertionError(f"unhandled co-writer provider state: {provider!r}")
     settings = get_settings()
-    configuration = _provider_configuration(provider, settings)
+    configuration = _provider_configuration(provider_name, settings)
     if isinstance(configuration, DependencyUnavailableProvider):
         raise ProviderUnavailableError(
-            provider,
-            f"{provider} is unavailable: required dependency "
+            provider_name,
+            f"{provider_name} is unavailable: required dependency "
             f"'{configuration.dependency}' is not installed",
         )
     if isinstance(configuration, UnconfiguredProvider):
         raise ProviderUnavailableError(
-            provider,
-            f"{provider} is not configured: missing "
+            provider_name,
+            f"{provider_name} is not configured: missing "
             f"{configuration.missing_environment_key}",
         )
     if configuration.method is ProviderSetupMethod.CLAUDE_CLI:
         return _list_claude_cli_models()
 
-    key = _secret(_provider_api_credential(provider, settings).secret)
-    if provider == _GROK_PROVIDER:
+    key = _secret(_provider_api_credential(provider_name, settings).secret)
+    if provider_name == _GROK_PROVIDER:
         return _list_grok_models(key)
-    if provider == _CODEX_PROVIDER:
+    if provider_name == _CODEX_PROVIDER:
         return _list_openai_models(key)
-    if provider == _CLAUDE_PROVIDER:
+    if provider_name == _CLAUDE_PROVIDER:
         return _list_claude_models(key)
     raise ProviderUnavailableError(
-        provider, f"Unknown co-writer provider '{provider}'",
+        provider_name, f"Unknown co-writer provider '{provider_name}'",
     )
 
 

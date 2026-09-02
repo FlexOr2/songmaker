@@ -412,8 +412,23 @@ def _models_for_provider(provider: str) -> tuple[list[str], str | None]:
 
 def _cowriter_response(session) -> CowriterSettingsResponse:
     from songmaker_cli.constants import COWRITER_PROVIDERS
+    from songmaker_cli.cowriter.catalog import (
+        RemovedCowriterProvider,
+        SupportedCowriterProvider,
+    )
 
-    provider = get_cowriter_provider(session)
+    saved_provider = get_cowriter_provider(session)
+    match saved_provider:
+        case SupportedCowriterProvider():
+            provider = str(saved_provider)
+        case RemovedCowriterProvider():
+            raise HTTPException(
+                422, f"Unknown co-writer provider '{saved_provider}'",
+            )
+        case _:
+            raise AssertionError(
+                f"unhandled co-writer provider state: {saved_provider!r}",
+            )
     models_by_provider: dict[str, list[str]] = {}
     errors: dict[str, str] = {}
     for name in sorted(COWRITER_PROVIDERS):
@@ -437,10 +452,7 @@ def api_get_cowriter_settings(
     _user: AuthenticatedUser = Depends(get_current_user),
     session: Session = Depends(get_db_session),
 ) -> CowriterSettingsResponse:
-    try:
-        return _cowriter_response(session)
-    except ValueError as exc:
-        raise HTTPException(422, str(exc)) from exc
+    return _cowriter_response(session)
 
 
 @router.put("/settings/cowriter")
@@ -450,16 +462,28 @@ def api_set_cowriter_settings(
     session: Session = Depends(get_db_session),
 ) -> CowriterSettingsResponse:
     from songmaker_cli.constants import COWRITER_PROVIDERS
+    from songmaker_cli.cowriter.catalog import (
+        RemovedCowriterProvider,
+        SupportedCowriterProvider,
+    )
 
     if req.provider not in COWRITER_PROVIDERS:
         raise HTTPException(
             422, f"Unknown co-writer provider '{req.provider}'",
         )
     saved_provider = get_cowriter_provider(session)
-    provider_or_model_changed = (
-        req.provider != saved_provider
-        or req.model != get_cowriter_model(session, saved_provider)
-    )
+    match saved_provider:
+        case SupportedCowriterProvider():
+            provider_or_model_changed = (
+                req.provider != saved_provider
+                or req.model != get_cowriter_model(session, saved_provider)
+            )
+        case RemovedCowriterProvider():
+            provider_or_model_changed = True
+        case _:
+            raise AssertionError(
+                f"unhandled co-writer provider state: {saved_provider!r}",
+            )
     if provider_or_model_changed:
         allowed, catalog_error = _models_for_provider(req.provider)
         if catalog_error:

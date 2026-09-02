@@ -22,6 +22,11 @@ from songmaker_cli.constants import (
     SETTING_JUDGE_MODEL,
     SETTING_JUDGE_PROVIDER,
 )
+from songmaker_cli.cowriter.catalog import (
+    CowriterProvider,
+    RemovedCowriterProvider,
+    SupportedCowriterProvider,
+)
 from songmaker_cli.db.models import AvailableModel, GenerationPreset, RateLimitSetting
 from songmaker_cli.settings import get_settings
 
@@ -229,14 +234,13 @@ def get_claude_scoring_model(session: Session) -> str:
     )
 
 
-def get_cowriter_provider(session: Session) -> str:
+def get_cowriter_provider(session: Session) -> CowriterProvider:
     stored = _get_claude_model_row(session, SETTING_COWRITER_PROVIDER)
     if stored is None:
-        return COWRITER_DEFAULT_PROVIDER
+        return SupportedCowriterProvider(COWRITER_DEFAULT_PROVIDER)
     if stored not in COWRITER_PROVIDERS:
-        msg = f"Unknown co-writer provider '{stored}'"
-        raise ValueError(msg)
-    return stored
+        return RemovedCowriterProvider(stored)
+    return SupportedCowriterProvider(stored)
 
 
 def get_cowriter_model(session: Session, provider: str) -> str:

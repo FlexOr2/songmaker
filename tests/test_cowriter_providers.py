@@ -14,7 +14,11 @@ from fastapi.testclient import TestClient
 
 from songmaker_cli.app_context import AppContext
 from songmaker_cli.claude.provider import FinalEvent, ToolCallEvent
-from songmaker_cli.constants import COWRITER_MAX_TOOL_ROUNDS, SETTING_CLAUDE_SCORING_MODEL
+from songmaker_cli.constants import (
+    COWRITER_MAX_TOOL_ROUNDS,
+    SETTING_CLAUDE_SCORING_MODEL,
+    SETTING_COWRITER_PROVIDER,
+)
 from songmaker_cli.cowriter.errors import (
     ProviderModelCatalogUnavailableError,
     ProviderUnavailableError,
@@ -95,6 +99,50 @@ def test_unknown_provider_rejected_at_settings_boundary(admin_client):
     client, _ = admin_client
     resp = client.put("/api/settings/cowriter", json={"provider": "bob", "model": "x"})
     assert resp.status_code == 422
+
+
+def _save_removed_cowriter_provider(factory) -> None:
+    with factory() as session:
+        set_claude_model(session, SETTING_COWRITER_PROVIDER, "retired-provider")
+        session.commit()
+
+
+def test_get_cowriter_settings_names_a_removed_saved_provider(admin_client):
+    client, factory = admin_client
+    _save_removed_cowriter_provider(factory)
+
+    resp = client.get("/api/settings/cowriter")
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Unknown co-writer provider 'retired-provider'"
+
+
+def test_valid_cowriter_put_replaces_a_removed_saved_provider(admin_client):
+    client, factory = admin_client
+    _save_removed_cowriter_provider(factory)
+
+    resp = client.put(
+        "/api/settings/cowriter",
+        json={"provider": "grok", "model": "grok-4.6"},
+    )
+
+    assert resp.status_code == 200
+    assert resp.json()["provider"] == "grok"
+
+
+def test_invalid_cowriter_put_rejects_a_removed_saved_provider_without_server_error(
+    admin_client,
+):
+    client, factory = admin_client
+    _save_removed_cowriter_provider(factory)
+
+    resp = client.put(
+        "/api/settings/cowriter",
+        json={"provider": "retired-provider", "model": "retired-model"},
+    )
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Unknown co-writer provider 'retired-provider'"
 
 
 def test_model_must_be_in_the_live_catalog(admin_client):
