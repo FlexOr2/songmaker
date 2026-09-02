@@ -1010,14 +1010,21 @@ _SHARED_PLAYLIST_ENTRY_KEYS = {
 def _seed_song_with_two_takes(session) -> None:
     admin = User(username="admin", password_hash=hash_password("admin12345"), role="admin")
     session.add(admin)
-    session.add(Album(id="test_album", title="Test Album", artist="Test Artist"))
+    # list_shared_inventory() (the "share overview") filters strictly on
+    # Album/Playlist.created_by -- flush first so admin.id is assigned and
+    # the album/playlist it seeds are real owned rows, not orphans the
+    # inventory query would exclude regardless of is_shared.
+    session.flush()
+    session.add(Album(
+        id="test_album", title="Test Album", artist="Test Artist", created_by=admin.id,
+    ))
     session.add(
         Song(id="s1", title="Song One", album_id="test_album", track_number=1, slug="song-one"),
     )
     session.add(Version(
         id="v1", song_id="s1", version_number=1, lyrics="the lantern hums", audio_duration=187,
     ))
-    session.add(Playlist(id="pl1", title="My Playlist"))
+    session.add(Playlist(id="pl1", title="My Playlist", created_by=admin.id))
     session.add(Generation(
         id="g1", song_id="s1", version_id="v1", generation_number=1,
         mp3_path="admin_user/g1.mp3", seed=1, is_picked=True,
