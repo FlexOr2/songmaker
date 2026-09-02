@@ -7,10 +7,6 @@ export const API_TIMEOUT_MS = 30_000;
 export const CHAT_TIMEOUT_MS = 600_000;
 
 export class ApiError extends Error {
-	// Raw path + status for logs and debugging; `message` is always a
-	// sentence fit to show the person.
-	public readonly technicalDetail: string;
-
 	constructor(
 		public readonly status: number,
 		public readonly detail: string,
@@ -19,7 +15,6 @@ export class ApiError extends Error {
 	) {
 		super(detail || API_ERROR_GENERIC_MESSAGE);
 		this.name = 'ApiError';
-		this.technicalDetail = `API ${path}: ${status}`;
 	}
 }
 

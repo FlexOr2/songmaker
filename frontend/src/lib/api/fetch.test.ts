@@ -93,13 +93,11 @@ describe('ApiError', () => {
 	it('falls back to a readable sentence when the server sends no detail', () => {
 		const err = new ApiError(500, '', '/api/albums');
 		expect(err.message).toBe(API_ERROR_GENERIC_MESSAGE);
-		expect(err.technicalDetail).toBe('API /api/albums: 500');
 	});
 
 	it('uses the server detail as the message when one is sent', () => {
 		const err = new ApiError(500, 'Album not found', '/api/albums/x');
 		expect(err.message).toBe('Album not found');
-		expect(err.technicalDetail).toBe('API /api/albums/x: 500');
 	});
 });
 
@@ -117,7 +115,6 @@ describe('apiFetch error detail', () => {
 		expect(err).toBeInstanceOf(ApiError);
 		expect((err as ApiError).detail).toBe('');
 		expect((err as ApiError).message).toBe(API_ERROR_GENERIC_MESSAGE);
-		expect((err as ApiError).technicalDetail).toBe('API /api/albums: 500');
 	});
 
 	it('surfaces a readable sentence for a JSON body with no detail field', async () => {
