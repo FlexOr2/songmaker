@@ -1015,26 +1015,52 @@ def _seed_song_with_two_takes(session) -> None:
     # the album/playlist it seeds are real owned rows, not orphans the
     # inventory query would exclude regardless of is_shared.
     session.flush()
-    session.add(Album(
-        id="test_album", title="Test Album", artist="Test Artist", created_by=admin.id,
-    ))
+    session.add(
+        Album(
+            id="test_album",
+            title="Test Album",
+            artist="Test Artist",
+            created_by=admin.id,
+        )
+    )
     session.add(
         Song(id="s1", title="Song One", album_id="test_album", track_number=1, slug="song-one"),
     )
-    session.add(Version(
-        id="v1", song_id="s1", version_number=1, lyrics="the lantern hums", audio_duration=187,
-    ))
+    session.add(
+        Version(
+            id="v1",
+            song_id="s1",
+            version_number=1,
+            lyrics="the lantern hums",
+            audio_duration=187,
+        )
+    )
     session.add(Playlist(id="pl1", title="My Playlist", created_by=admin.id))
-    session.add(Generation(
-        id="g1", song_id="s1", version_id="v1", generation_number=1,
-        mp3_path="admin_user/g1.mp3", seed=1, is_picked=True,
-        whisper_text="the lantern hums", whisper_cues=_SUNG_CUES,
-    ))
-    session.add(Generation(
-        id="g2", song_id="s1", version_id="v1", generation_number=2,
-        mp3_path="admin_user/g2.mp3", seed=2,
-        whisper_text="a different rendition", whisper_cues=_OTHER_TAKE_CUES,
-    ))
+    session.add(
+        Generation(
+            id="g1",
+            song_id="s1",
+            version_id="v1",
+            generation_number=1,
+            mp3_path="admin_user/g1.mp3",
+            seed=1,
+            is_picked=True,
+            whisper_text="the lantern hums",
+            whisper_cues=_SUNG_CUES,
+        )
+    )
+    session.add(
+        Generation(
+            id="g2",
+            song_id="s1",
+            version_id="v1",
+            generation_number=2,
+            mp3_path="admin_user/g2.mp3",
+            seed=2,
+            whisper_text="a different rendition",
+            whisper_cues=_OTHER_TAKE_CUES,
+        )
+    )
     session.add(PlaylistEntry(id="e1", playlist_id="pl1", generation_id="g1", position=0))
 
 
@@ -1133,7 +1159,9 @@ _FOUR_SHARE_ROUTES = [
 
 @pytest.mark.parametrize("share_path", _FOUR_SHARE_ROUTES)
 def test_share_url_carries_https_behind_a_tls_proxy(
-    two_take_app: TestClient, monkeypatch: pytest.MonkeyPatch, share_path: str,
+    two_take_app: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    share_path: str,
 ) -> None:
     """TestClient's connection is plain http -- exactly like the literal
     ASGI transport behind a TLS-terminating proxy (#328) -- yet the share
@@ -1151,7 +1179,9 @@ def test_share_url_carries_https_behind_a_tls_proxy(
 
 @pytest.mark.parametrize("share_path", _FOUR_SHARE_ROUTES)
 def test_share_fails_named_when_public_base_url_is_unconfigured(
-    two_take_app: TestClient, monkeypatch: pytest.MonkeyPatch, share_path: str,
+    two_take_app: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    share_path: str,
 ) -> None:
     """An unresolvable public address fails loudly rather than building a
     share link with a guessed (and possibly wrong) scheme."""
@@ -1206,10 +1236,12 @@ def test_failed_share_leaves_the_resource_private(
 
 
 def test_share_fails_named_when_public_base_url_is_malformed(
-    two_take_app: TestClient, monkeypatch: pytest.MonkeyPatch,
+    two_take_app: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     monkeypatch.setenv("PUBLIC_BASE_URL", "songmaker.example")  # no scheme
     from songmaker_cli.settings import get_settings
+
     get_settings.cache_clear()
 
     resp = two_take_app.post("/api/albums/test_album/share")

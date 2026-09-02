@@ -153,9 +153,8 @@ def resolve_public_base_url() -> str:
             "without knowing the address this server is reachable at.",
         )
     parsed = urlsplit(raw)
-    if (
-        parsed.scheme not in _PUBLIC_BASE_URL_SCHEMES
-        or not _PUBLIC_BASE_URL_NETLOC_RE.match(parsed.netloc)
+    if parsed.scheme not in _PUBLIC_BASE_URL_SCHEMES or not _PUBLIC_BASE_URL_NETLOC_RE.match(
+        parsed.netloc
     ):
         raise HTTPException(
             500,
