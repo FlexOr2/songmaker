@@ -79,3 +79,21 @@ def test_worker_without_gpu_healthy_field_defaults_to_online(health_client) -> N
     body = _get_health(health_client, gpu_healthy=None)
     assert body["acestep_workers_online"] == 1
     assert body["acestep"] == "healthy"
+
+
+def test_metrics_excludes_broken_gpu_worker_from_online_count(health_client) -> None:
+    """The #333 alert (`songmaker_acestep_workers_total{status="online"} == 0`)
+    reads this exact metric — a GPU-broken worker still counted as "online"
+    here is the original incident in new clothes."""
+    import songmaker_cli.arq_pool as arq_mod
+
+    arq_mod._pool.get = AsyncMock(
+        return_value=json.dumps({"loaded": [], "gpu_healthy": False}).encode(),
+    )
+    arq_mod._pool.zcard = AsyncMock(return_value=0)
+
+    resp = health_client.get("/metrics")
+    assert resp.status_code == 200
+    body = resp.text
+    assert 'songmaker_acestep_workers_total{status="online"} 0' in body
+    assert 'songmaker_acestep_workers_total{status="offline"} 1' in body

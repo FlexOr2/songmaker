@@ -142,6 +142,41 @@ def test_pick_worker_no_online_raises(db_session) -> None:
         _run(pick_worker(db_session, redis, "sft"))
 
 
+def test_pick_worker_skips_worker_with_broken_gpu(db_session) -> None:
+    """Issue #367: a worker whose GPU has gone away (NVML present but
+    unreachable) keeps heartbeating fine, so heartbeat presence alone must
+    not make it a candidate. Simulated via gpu_healthy: False in the
+    heartbeat, never a lucky real GPU — the scheduler must route the job to
+    its healthy neighbor instead."""
+    _seed(db_session, "broken-gpu-w", host="h1")
+    _seed(db_session, "healthy-w", host="h2")
+    redis = _InMemoryRedis()
+    _set_state(redis, "broken-gpu-w", {"loaded": ["sft"], "gpu_healthy": False})
+    _set_state(redis, "healthy-w", {"loaded": ["sft"], "gpu_healthy": True})
+
+    picked = _run(pick_worker(db_session, redis, "sft"))
+    assert picked.id == "healthy-w"
+
+
+def test_pick_worker_no_online_when_only_worker_has_broken_gpu(db_session) -> None:
+    _seed(db_session, "broken-gpu-w")
+    redis = _InMemoryRedis()
+    _set_state(redis, "broken-gpu-w", {"loaded": ["sft"], "gpu_healthy": False})
+    with pytest.raises(NoCapacityError):
+        _run(pick_worker(db_session, redis, "sft"))
+
+
+def test_pick_worker_missing_gpu_healthy_field_defaults_to_online(db_session) -> None:
+    """A heartbeat from a worker still on the previous version during a
+    rolling deploy carries no gpu_healthy key at all and must not be
+    misread as broken."""
+    _seed(db_session, "w1")
+    redis = _InMemoryRedis()
+    _set_state(redis, "w1", {"loaded": ["sft"]})
+    picked = _run(pick_worker(db_session, redis, "sft"))
+    assert picked.id == "w1"
+
+
 # ── consume_task_stream ────────────────────────────────────────────
 
 
