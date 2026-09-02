@@ -197,6 +197,19 @@ if ! [[ "$ALERT_REPEAT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
     exit 1
 fi
 DB_CHECK_TIMEOUT_SECONDS="${SONGMAKER_AUTODEPLOY_DB_CHECK_TIMEOUT_SECONDS:-30}"
+CHECK_RUN_LOOKUP_TIMEOUT_SECONDS="${SONGMAKER_AUTODEPLOY_CHECK_RUN_LOOKUP_TIMEOUT_SECONDS:-60}"
+# GitHub normally creates the first check run shortly after a push. Do not
+# treat that ordinary propagation delay as a failed deploy, but do surface a
+# workflow that never starts instead of waiting forever on the same SHA.
+CHECK_RUN_APPEARANCE_GRACE_SECONDS="${SONGMAKER_AUTODEPLOY_CHECK_RUN_APPEARANCE_GRACE_SECONDS:-1800}"
+if ! [[ "$CHECK_RUN_LOOKUP_TIMEOUT_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    log_err "SONGMAKER_AUTODEPLOY_CHECK_RUN_LOOKUP_TIMEOUT_SECONDS must be a positive integer, got '$CHECK_RUN_LOOKUP_TIMEOUT_SECONDS'"
+    exit 1
+fi
+if ! [[ "$CHECK_RUN_APPEARANCE_GRACE_SECONDS" =~ ^[1-9][0-9]*$ ]]; then
+    log_err "SONGMAKER_AUTODEPLOY_CHECK_RUN_APPEARANCE_GRACE_SECONDS must be a positive integer, got '$CHECK_RUN_APPEARANCE_GRACE_SECONDS'"
+    exit 1
+fi
 # Bounds the container-readiness wait of step 10 only; the image build in
 # step 9 stays deliberately unbounded, because a cold-cache build takes
 # 8-15 minutes by design. Without a bound, one service that can never
@@ -429,21 +442,34 @@ log_guard_reason() {
 
 # Prints exactly one of green, waiting, or failed. An API/CLI failure is a
 # named error return because it is not evidence that the fetched commit is
-# safe to deploy. The API's explicit zero-run envelope is waiting: GitHub can
-# take a moment to create the first check run after a push, and the next
-# two-minute tick will ask again without turning normal CI latency into an
-# alert streak. A missing/malformed envelope is never mistaken for zero runs.
+# safe to deploy. The API's explicit zero-run envelope waits only until the
+# commit is old enough that a workflow which never started needs attention.
+# A missing/malformed envelope is never mistaken for zero runs.
 remote_check_status() {
     local commit_sha="$1"
-    local check_runs
+    local commit_timestamp="$2"
+    local check_runs gh_error gh_stderr_file lookup_exit
     if ! command -v gh >/dev/null 2>&1; then
         printf '%s' "GitHub CLI (gh) is unavailable on PATH"
         return 1
     fi
-    if ! check_runs="$(gh api --paginate \
+    if ! gh_stderr_file="$(mktemp "$GIT_ADMIN_DIR/songmaker-autodeploy.gh-stderr.XXXXXX" 2>/dev/null)"; then
+        printf '%s' 'cannot create temporary file for check-run lookup stderr'
+        return 1
+    fi
+    if check_runs="$(timeout "$CHECK_RUN_LOOKUP_TIMEOUT_SECONDS" gh api --paginate \
         "repos/FlexOr2/songmaker/commits/$commit_sha/check-runs?per_page=100" \
-        --jq 'if (type == "object" and (.total_count | type == "number") and (.check_runs | type == "array")) then "envelope\t\(.total_count)", (.check_runs[] | "check\t\(.status // "")\t\(.conclusion // "")") else error("GitHub returned malformed check-runs response") end' 2>&1)"; then
-        printf '%s' "$check_runs"
+        --jq 'if (type == "object" and (.total_count | type == "number") and (.check_runs | type == "array")) then "envelope\t\(.total_count)", (.check_runs[] | "check\t\(.status // "")\t\(.conclusion // "")") else error("GitHub returned malformed check-runs response") end' 2>"$gh_stderr_file")"; then
+        rm -f "$gh_stderr_file"
+    else
+        lookup_exit=$?
+        gh_error="$(<"$gh_stderr_file")"
+        rm -f "$gh_stderr_file"
+        if ((lookup_exit == 124)); then
+            printf '%s' 'check-run lookup timed out'
+        else
+            printf '%s' "$gh_error"
+        fi
         return 1
     fi
 
@@ -504,7 +530,16 @@ remote_check_status() {
         return 1
     fi
     if ((observed_check_count == 0)); then
-        printf 'waiting (GitHub has not reported a check run yet)'
+        local now
+        if ! now="$(now_seconds)" || ! [[ "$now" =~ ^[0-9]+$ ]]; then
+            printf 'cannot determine current time for check-run grace period'
+            return 1
+        fi
+        if ((now - commit_timestamp >= CHECK_RUN_APPEARANCE_GRACE_SECONDS)); then
+            printf 'failed (GitHub has not reported a check run within %ss of its commit)' "$CHECK_RUN_APPEARANCE_GRACE_SECONDS"
+        else
+            printf 'waiting (GitHub has not reported a check run yet)'
+        fi
         return
     fi
 
@@ -670,9 +705,22 @@ fi
 # --- 9. Only pull a commit whose checks are green. A check run that is
 # still queued/in progress is an ordinary wait, not a deploy failure: the
 # next timer tick will query the same fetched SHA again. A completed non-green
-# run, or inability to query GitHub at all, is a named fail-closed refusal.
-if ! REMOTE_CHECK_STATUS="$(remote_check_status "$REMOTE_HEAD")"; then
+# run, an aged SHA with no runs, or inability to query GitHub at all, is a
+# named fail-closed refusal.
+if ! REMOTE_COMMIT_TIMESTAMP="$(safe_git show -s --format=%ct "$REMOTE_HEAD" 2>&1)"; then
+    log_err "cannot determine commit time for verified origin/$DEPLOY_BRANCH commit $REMOTE_HEAD: $REMOTE_COMMIT_TIMESTAMP"
+    fail_tick "cannot determine verified commit time"
+fi
+if ! [[ "$REMOTE_COMMIT_TIMESTAMP" =~ ^[0-9]+$ ]]; then
+    log_err "verified origin/$DEPLOY_BRANCH commit $REMOTE_HEAD has an invalid commit time '$REMOTE_COMMIT_TIMESTAMP'"
+    fail_tick "invalid verified commit time"
+fi
+
+if ! REMOTE_CHECK_STATUS="$(remote_check_status "$REMOTE_HEAD" "$REMOTE_COMMIT_TIMESTAMP")"; then
     log_err "cannot determine GitHub check status for origin/$DEPLOY_BRANCH ($REMOTE_HEAD) — refusing to deploy: $REMOTE_CHECK_STATUS"
+    if [[ "$REMOTE_CHECK_STATUS" == "check-run lookup timed out" ]]; then
+        fail_tick "check-run lookup timed out"
+    fi
     fail_tick "GitHub check status undetermined"
 fi
 
@@ -685,6 +733,9 @@ case "$REMOTE_CHECK_STATUS" in
         ;;
     failed\ *)
         log_err "GitHub checks for origin/$DEPLOY_BRANCH ($REMOTE_HEAD) are not green — refusing to deploy: $REMOTE_CHECK_STATUS"
+        if [[ "$REMOTE_CHECK_STATUS" == "failed (GitHub has not reported a check run within "* ]]; then
+            fail_tick "no GitHub check runs reported within ${CHECK_RUN_APPEARANCE_GRACE_SECONDS}s of commit"
+        fi
         fail_tick "GitHub checks are not green"
         ;;
     *)

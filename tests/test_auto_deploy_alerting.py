@@ -28,6 +28,10 @@ FAILURE_ALERT_THRESHOLD = 3
 # to drive small; what is under test is that the repeat follows this
 # duration rather than a tick count.
 ALERT_REPEAT_SECONDS = 600
+# Match the production defaults while allowing the timeout test to use a
+# short, deterministic deadline.
+CHECK_RUN_LOOKUP_TIMEOUT_SECONDS = 60
+CHECK_RUN_APPEARANCE_GRACE_SECONDS = 30 * 60
 # Any fixed point in time — the script only ever reads differences.
 CLOCK_START_EPOCH = 1_756_000_000
 
@@ -71,6 +75,9 @@ class Checkout:
         self._clock_file = tmp_path / "clock.txt"
         self._clock_file.write_text(str(CLOCK_START_EPOCH))
         self._commits_pushed = 0
+        self.check_runs_stderr = ""
+        self.check_run_lookup_timeout_seconds = CHECK_RUN_LOOKUP_TIMEOUT_SECONDS
+        self.check_run_appearance_grace_seconds = CHECK_RUN_APPEARANCE_GRACE_SECONDS
 
         _git(tmp_path, "init", "--bare", "--initial-branch=main", str(self.origin))
         _git(tmp_path, "clone", str(self.origin), str(self.root))
@@ -128,9 +135,17 @@ class Checkout:
         _write_executable(
             self._bin / "gh",
             "#!/bin/bash\n"
-            'if [[ "$1" != "api" ]]; then\n'
-            '    echo "expected gh api" >&2\n'
+            'expected_url="repos/FlexOr2/songmaker/commits/${GH_EXPECTED_COMMIT_SHA}/check-runs?per_page=100"\n'
+            'if [[ "$1" != "api" || "$2" != "--paginate" ]]; then\n'
+            '    echo "unexpected gh api invocation: $*" >&2\n'
             "    exit 2\n"
+            "fi\n"
+            'if [[ "$3" != "$expected_url" || "$4" != "--jq" ]]; then\n'
+            '    echo "unexpected gh api invocation: $*" >&2\n'
+            "    exit 2\n"
+            "fi\n"
+            'if [[ -n "${GH_CHECK_RUNS_STDERR:-}" ]]; then\n'
+            '    printf "%s\\n" "$GH_CHECK_RUNS_STDERR" >&2\n'
             "fi\n"
             'cat "$GH_CHECK_RUNS_FILE"\n'
             'if [[ -n "${GH_AFTER_CHECK_LOOKUP_SCRIPT:-}" ]]; then\n'
@@ -144,6 +159,13 @@ class Checkout:
             "#!/bin/bash\n"
             'echo "GitHub API unavailable" >&2\n'
             "exit 1\n",
+        )
+
+    def make_check_lookup_hang(self) -> None:
+        _write_executable(
+            self._bin / "gh",
+            "#!/bin/bash\n"
+            'exec sleep "$GH_CHECK_RUN_LOOKUP_HANG_SECONDS"\n',
         )
 
     def write_alert_config(self, content: str = VALID_ALERT_ENV) -> None:
@@ -182,7 +204,8 @@ class Checkout:
             "#!/bin/bash\n"
             "set -euo pipefail\n"
             f"printf 'moved after check lookup\\n' > {readme_text}\n"
-            f"/usr/bin/git -C {clone_text} commit -am 'move main after check lookup' >/dev/null 2>&1\n"
+            f"/usr/bin/git -C {clone_text} commit -am "
+            "'move main after check lookup' >/dev/null 2>&1\n"
             f"/usr/bin/git -C {clone_text} push origin main >/dev/null 2>&1\n",
         )
 
@@ -193,6 +216,13 @@ class Checkout:
             text=True,
         ).split()[0]
 
+    def remote_main_commit_timestamp(self) -> int:
+        return int(subprocess.check_output(
+            ["git", "show", "-s", "--format=%ct", "HEAD"],
+            cwd=self.root.parent / "pusher",
+            text=True,
+        ))
+
     def switch_to_work_branch(self) -> None:
         _git(self.root, "checkout", "-B", "work")
 
@@ -202,6 +232,9 @@ class Checkout:
     def advance_clock(self, seconds: int) -> None:
         """Let time pass for the script without any passing for the test."""
         self._clock_file.write_text(str(int(self._clock_file.read_text()) + seconds))
+
+    def set_clock(self, epoch_seconds: int) -> None:
+        self._clock_file.write_text(str(epoch_seconds))
 
     def adopt_current_head_as_deployed(self) -> None:
         """Skip the first-run adoption tick the script does on a fresh state."""
@@ -219,6 +252,9 @@ class Checkout:
                 "LOG_CAPTURE_FILE": str(self.log_file),
                 "DOCKER_CALLS_FILE": str(self.docker_calls_file),
                 "GH_CHECK_RUNS_FILE": str(self.check_runs_file),
+                "GH_CHECK_RUNS_STDERR": self.check_runs_stderr,
+                "GH_EXPECTED_COMMIT_SHA": self.remote_main_sha(),
+                "GH_CHECK_RUN_LOOKUP_HANG_SECONDS": "2",
                 "GH_AFTER_CHECK_LOOKUP_SCRIPT": (
                     str(self._after_check_lookup_script)
                     if self._after_check_lookup_script is not None
@@ -227,6 +263,12 @@ class Checkout:
                 "FAKE_CLOCK_FILE": str(self._clock_file),
                 "SONGMAKER_AUTODEPLOY_FAILURE_ALERT_THRESHOLD": str(FAILURE_ALERT_THRESHOLD),
                 "SONGMAKER_AUTODEPLOY_ALERT_REPEAT_SECONDS": str(ALERT_REPEAT_SECONDS),
+                "SONGMAKER_AUTODEPLOY_CHECK_RUN_LOOKUP_TIMEOUT_SECONDS": str(
+                    self.check_run_lookup_timeout_seconds,
+                ),
+                "SONGMAKER_AUTODEPLOY_CHECK_RUN_APPEARANCE_GRACE_SECONDS": str(
+                    self.check_run_appearance_grace_seconds,
+                ),
             },
         )
 
@@ -376,7 +418,9 @@ def test_green_checks_allow_the_fetched_commit_to_fast_forward_and_deploy(tmp_pa
     assert "compose build" in checkout.docker_calls
 
 
-def test_origin_advance_after_check_lookup_cannot_change_the_deployed_commit(tmp_path: Path) -> None:
+def test_origin_advance_after_check_lookup_cannot_change_the_deployed_commit(
+    tmp_path: Path,
+) -> None:
     checkout = Checkout(tmp_path)
     checkout.write_alert_config()
     checkout.adopt_current_head_as_deployed()
@@ -476,6 +520,58 @@ def test_no_check_runs_yet_waits_without_incrementing_the_failure_streak(tmp_pat
     assert "compose build" not in checkout.docker_calls
 
 
+def test_no_check_runs_past_the_commit_grace_period_counts_as_a_failed_tick(
+    tmp_path: Path,
+) -> None:
+    checkout = Checkout(tmp_path)
+    checkout.write_alert_config()
+    checkout.adopt_current_head_as_deployed()
+    checkout.move_main_forward()
+    checkout.set_check_runs()
+    checkout.set_clock(
+        checkout.remote_main_commit_timestamp() + CHECK_RUN_APPEARANCE_GRACE_SECONDS,
+    )
+
+    result = checkout.tick()
+
+    assert result.returncode == 0
+    assert "has not reported a check run within 1800s of its commit" in checkout.journal
+    failure_reason = (
+        "failure count now 1 (this tick: no GitHub check runs reported within 1800s of commit)"
+    )
+    assert failure_reason in checkout.journal
+    assert "compose build" not in checkout.docker_calls
+
+
+def test_a_check_run_lookup_timeout_counts_as_a_failed_tick(tmp_path: Path) -> None:
+    checkout = Checkout(tmp_path)
+    checkout.write_alert_config()
+    checkout.adopt_current_head_as_deployed()
+    checkout.move_main_forward()
+    checkout.check_run_lookup_timeout_seconds = 1
+    checkout.make_check_lookup_hang()
+
+    result = checkout.tick()
+
+    assert result.returncode == 0
+    assert "check-run lookup timed out" in checkout.journal
+    assert "failure count now 1 (this tick: check-run lookup timed out)" in checkout.journal
+    assert "compose build" not in checkout.docker_calls
+
+
+def test_gh_stderr_does_not_be_parsed_as_a_check_run(tmp_path: Path) -> None:
+    checkout = Checkout(tmp_path)
+    checkout.write_alert_config()
+    checkout.adopt_current_head_as_deployed()
+    checkout.move_main_forward()
+    checkout.check_runs_stderr = "gh progress notice"
+
+    result = checkout.tick()
+
+    assert result.returncode == 0
+    assert "compose build" in checkout.docker_calls
+
+
 def test_malformed_check_status_refuses_to_pull_with_a_named_failure(tmp_path: Path) -> None:
     checkout = Checkout(tmp_path)
     checkout.write_alert_config()
@@ -503,8 +599,12 @@ def test_post_merge_hook_is_not_run_by_the_deploy_fast_forward(tmp_path: Path) -
         f"printf 'ran' > {shlex.quote(str(checkout.post_merge_marker))}\n",
     )
     checkout.move_main_forward()
+    expected_head = checkout.remote_main_sha()
 
     result = checkout.tick()
 
     assert result.returncode == 0
     assert not checkout.post_merge_marker.exists()
+    assert subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=checkout.root, text=True,
+    ).strip() == expected_head
