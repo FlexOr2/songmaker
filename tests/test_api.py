@@ -1071,6 +1071,56 @@ def _mock_worker(mock_pool=None):
     return _ctx()
 
 
+def _mock_worker_process_health(mock_pool=None):
+    """Like _mock_worker, but leaves _has_online_acestep_worker real — for
+    tests that must exercise its own GPU-health decision rather than have
+    it stubbed away."""
+    from contextlib import contextmanager
+    from unittest.mock import AsyncMock, patch
+
+    if mock_pool is None:
+        mock_pool = AsyncMock()
+
+    @contextmanager
+    def _ctx():
+        with (
+            patch("songmaker_cli.generation_api.get_arq_pool", return_value=mock_pool),
+            patch(
+                "songmaker_cli.generation_api.is_music_worker_healthy",
+                AsyncMock(return_value=True),
+            ),
+            patch(
+                "songmaker_cli.generation_api.is_scoring_worker_healthy",
+                AsyncMock(return_value=True),
+            ),
+        ):
+            yield mock_pool
+
+    return _ctx()
+
+
+def _register_worker_with_broken_gpu(client: TestClient, mock_pool) -> None:
+    """Issue #367 finding 1: a registered worker whose only heartbeat says
+    gpu_healthy: false must never look online to the generate/repaint/cover
+    preflight — simulated NVML failure, not a lucky real GPU."""
+    import json
+    from unittest.mock import AsyncMock
+
+    from songmaker_cli.db.queries import register_worker
+
+    factory = client.app.state.ctx.db
+    with factory() as session:
+        register_worker(
+            session, worker_id="broken-gpu-w", host="h", port=8001,
+            gpu_id=0, vram_total_gb=24.0,
+        )
+        session.commit()
+
+    mock_pool.get = AsyncMock(
+        return_value=json.dumps({"loaded": ["sft"], "gpu_healthy": False}).encode(),
+    )
+
+
 def test_generate_song_submits_job(client: TestClient) -> None:
     with _mock_worker() as mock_pool:
         resp = client.post(
@@ -1361,6 +1411,27 @@ def test_repaint_submits_job(client: TestClient) -> None:
     assert repaint["repainting_end"] == 0.8
 
 
+def test_repaint_returns_503_and_enqueues_nothing_when_worker_gpu_is_broken(
+    client: TestClient,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    mock_pool = AsyncMock()
+    _register_worker_with_broken_gpu(client, mock_pool)
+
+    with _mock_worker_process_health(mock_pool):
+        resp = client.post("/api/generations/g1/repaint", json={
+            "src_generation_id": "g1",
+            "repainting_start": 0.2,
+            "repainting_end": 0.8,
+            "model": "sft",
+        })
+
+    assert resp.status_code == 503
+    assert "No worker can generate music right now" in resp.json()["detail"]
+    mock_pool.enqueue_job.assert_not_called()
+
+
 def test_repaint_invalid_range(client: TestClient) -> None:
     resp = client.post("/api/generations/g1/repaint", json={
         "src_generation_id": "g1",
@@ -1486,6 +1557,27 @@ def test_cover_submits_job(client: TestClient) -> None:
     assert cover["prompt"] == "jazz version"
 
 
+def test_cover_returns_503_and_enqueues_nothing_when_worker_gpu_is_broken(
+    client: TestClient,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    mock_pool = AsyncMock()
+    _register_worker_with_broken_gpu(client, mock_pool)
+
+    with _mock_worker_process_health(mock_pool):
+        resp = client.post("/api/generations/g1/cover", json={
+            "src_generation_id": "g1",
+            "audio_cover_strength": 0.7,
+            "prompt": "jazz version",
+            "model": "sft",
+        })
+
+    assert resp.status_code == 503
+    assert "No worker can generate music right now" in resp.json()["detail"]
+    mock_pool.enqueue_job.assert_not_called()
+
+
 def test_cover_no_audio(client: TestClient) -> None:
     resp = client.post("/api/generations/g2/cover", json={
         "src_generation_id": "g2",
@@ -1609,6 +1701,25 @@ def test_upload_reference_audio_too_small(client: TestClient) -> None:
     )
     assert resp.status_code == 400
     assert "too small" in resp.json()["detail"]
+
+
+def test_generate_song_returns_503_and_enqueues_nothing_when_worker_gpu_is_broken(
+    client: TestClient,
+) -> None:
+    from unittest.mock import AsyncMock
+
+    mock_pool = AsyncMock()
+    _register_worker_with_broken_gpu(client, mock_pool)
+
+    with _mock_worker_process_health(mock_pool):
+        resp = client.post(
+            "/api/songs/s1/generate",
+            json={"count": 1, "model": "sft"},
+        )
+
+    assert resp.status_code == 503
+    assert "No worker can generate music right now" in resp.json()["detail"]
+    mock_pool.enqueue_job.assert_not_called()
 
 
 def test_generate_song_redis_down(client: TestClient) -> None:
@@ -2611,8 +2722,29 @@ def test_stream_job_deadline_closes_a_stream_that_never_reaches_terminal(
 def test_stream_job_lease_is_acquired_and_released_around_the_stream(
     client: TestClient,
 ) -> None:
-    import threading
+    """The lease release (`_schedule_job_stream_lease_release`) is
+    intentionally fire-and-forget -- a background `asyncio.create_task`,
+    off the generator's own execution path, the same way
+    resource_event_api.py's `_schedule_stream_lease_release` is (see that
+    module's `test_disconnect_releases_lease_off_loop_and_contains_failure`:
+    release must not block the stream's own close). That makes
+    TestClient.stream() the wrong tool to observe it with: TestClient never
+    entered via `with TestClient(app) as client:` opens a fresh
+    `anyio.from_thread` portal per call and tears it down the instant that
+    call's response finishes (starlette's ASGITransport.handle_request), so
+    the fire-and-forget task is racing that teardown, not the test's own
+    wait -- no `released.wait(N)` duration, however generous, fixes a task
+    that can be cancelled before it runs. Driving the app directly inside
+    one asyncio.run() (the same technique
+    test_stream_job_does_not_pin_the_only_pool_connection_for_the_stream_lifetime
+    uses, and test_resource_event_api.py's outer-deadline tests) keeps the
+    loop that scheduled the task alive, so the test can wait on the real
+    condition -- the task's own completion, observed via
+    jobs_api._LEASE_RELEASE_TASKS emptying, mirroring
+    test_resource_event_api.py's _wait_for_released_lease."""
+    import asyncio
 
+    from songmaker_cli import jobs_api
     from songmaker_cli.db.queries import create_job, update_job_status
 
     ctx: AppContext = client.app.state.ctx
@@ -2622,7 +2754,6 @@ def test_stream_job_lease_is_acquired_and_released_around_the_stream(
         session.commit()
         job_id = job.id
 
-    released = threading.Event()
     acquire_calls: list[str] = []
     release_calls: list[tuple[str, str]] = []
 
@@ -2633,16 +2764,34 @@ def test_stream_job_lease_is_acquired_and_released_around_the_stream(
 
         def release(self, user_id: str, token: str) -> None:
             release_calls.append((user_id, token))
-            released.set()
 
     client.app.state._job_stream_lease_limiter = _Limiter()
+    cookie = _sign_job_stream_session(ctx, _DEFAULT_USER_ID)
+    app = client.app
 
-    _authenticate_job_stream_client(client)
-    with client.stream("GET", f"/api/jobs/{job_id}/stream") as resp:
-        assert resp.status_code == 200
-        list(resp.iter_lines())
+    async def _drive() -> int:
+        response_status: dict[str, int] = {}
 
-    assert released.wait(1)
+        async def _receive() -> dict:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def _send(message: dict) -> None:
+            if message["type"] == "http.response.start":
+                response_status["status"] = message["status"]
+
+        await app(_job_stream_scope(job_id, cookie=cookie), _receive, _send)
+
+        for _ in range(500):
+            if not jobs_api._LEASE_RELEASE_TASKS:
+                break
+            await asyncio.sleep(0.01)
+
+        return response_status["status"]
+
+    status = asyncio.run(asyncio.wait_for(_drive(), timeout=5))
+
+    assert status == 200
+    assert not jobs_api._LEASE_RELEASE_TASKS
     assert acquire_calls == [_DEFAULT_USER_ID]
     assert release_calls == [(_DEFAULT_USER_ID, "lease-token")]
 
