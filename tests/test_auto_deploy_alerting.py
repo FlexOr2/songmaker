@@ -12,6 +12,7 @@ moving that clock, never by sleeping.
 
 from __future__ import annotations
 
+import shlex
 import stat
 import subprocess
 from pathlib import Path
@@ -62,6 +63,9 @@ class Checkout:
         self.origin = tmp_path / "origin.git"
         self.log_file = tmp_path / "journal.txt"
         self.docker_calls_file = tmp_path / "docker-calls.txt"
+        self.check_runs_file = tmp_path / "check-runs.txt"
+        self.post_merge_marker = tmp_path / "post-merge-ran.txt"
+        self._after_check_lookup_script: Path | None = None
         self._bin = tmp_path / "bin"
         self._bin.mkdir()
         self._clock_file = tmp_path / "clock.txt"
@@ -101,6 +105,7 @@ class Checkout:
             '    exec /usr/bin/date "$@"\n'
             "fi\n",
         )
+        self.set_check_runs(("completed", "success"))
         self.set_active_jobs(0)
 
     def set_active_jobs(self, count: int) -> None:
@@ -108,6 +113,37 @@ class Checkout:
         _write_executable(
             self._bin / "docker",
             f'#!/bin/bash\nprintf "%s\\n" "$*" >> "$DOCKER_CALLS_FILE"\necho {count}\n',
+        )
+
+    def set_check_runs(self, *runs: tuple[str, str]) -> None:
+        """Make GitHub report these status/conclusion pairs for the SHA."""
+        self.set_check_runs_response(
+            f"envelope\t{len(runs)}\n"
+            + "".join(f"check\t{status}\t{conclusion}\n" for status, conclusion in runs),
+        )
+
+    def set_check_runs_response(self, response: str) -> None:
+        """Make the fake gh process return an already-projected API response."""
+        self.check_runs_file.write_text(response)
+        _write_executable(
+            self._bin / "gh",
+            "#!/bin/bash\n"
+            'if [[ "$1" != "api" ]]; then\n'
+            '    echo "expected gh api" >&2\n'
+            "    exit 2\n"
+            "fi\n"
+            'cat "$GH_CHECK_RUNS_FILE"\n'
+            'if [[ -n "${GH_AFTER_CHECK_LOOKUP_SCRIPT:-}" ]]; then\n'
+            '    "$GH_AFTER_CHECK_LOOKUP_SCRIPT"\n'
+            "fi\n",
+        )
+
+    def make_check_lookup_fail(self) -> None:
+        _write_executable(
+            self._bin / "gh",
+            "#!/bin/bash\n"
+            'echo "GitHub API unavailable" >&2\n'
+            "exit 1\n",
         )
 
     def write_alert_config(self, content: str = VALID_ALERT_ENV) -> None:
@@ -134,6 +170,29 @@ class Checkout:
         _git(clone, "commit", "-am", f"move main {self._commits_pushed}")
         _git(clone, "push", "origin", "main")
 
+    def move_main_forward_after_check_lookup(self) -> None:
+        """Advance origin after the deploy script has checked its current SHA."""
+        clone = self.root.parent / "pusher"
+        assert clone.exists()
+        self._after_check_lookup_script = self._bin / "move-main-after-check-lookup"
+        clone_text = shlex.quote(str(clone))
+        readme_text = shlex.quote(str(clone / "README.md"))
+        _write_executable(
+            self._after_check_lookup_script,
+            "#!/bin/bash\n"
+            "set -euo pipefail\n"
+            f"printf 'moved after check lookup\\n' > {readme_text}\n"
+            f"/usr/bin/git -C {clone_text} commit -am 'move main after check lookup' >/dev/null 2>&1\n"
+            f"/usr/bin/git -C {clone_text} push origin main >/dev/null 2>&1\n",
+        )
+
+    def remote_main_sha(self) -> str:
+        return subprocess.check_output(
+            ["git", "ls-remote", "origin", "refs/heads/main"],
+            cwd=self.root,
+            text=True,
+        ).split()[0]
+
     def switch_to_work_branch(self) -> None:
         _git(self.root, "checkout", "-B", "work")
 
@@ -159,6 +218,12 @@ class Checkout:
                 "HOME": str(self.root.parent),
                 "LOG_CAPTURE_FILE": str(self.log_file),
                 "DOCKER_CALLS_FILE": str(self.docker_calls_file),
+                "GH_CHECK_RUNS_FILE": str(self.check_runs_file),
+                "GH_AFTER_CHECK_LOOKUP_SCRIPT": (
+                    str(self._after_check_lookup_script)
+                    if self._after_check_lookup_script is not None
+                    else ""
+                ),
                 "FAKE_CLOCK_FILE": str(self._clock_file),
                 "SONGMAKER_AUTODEPLOY_FAILURE_ALERT_THRESHOLD": str(FAILURE_ALERT_THRESHOLD),
                 "SONGMAKER_AUTODEPLOY_ALERT_REPEAT_SECONDS": str(ALERT_REPEAT_SECONDS),
@@ -292,3 +357,154 @@ def test_a_missing_mount_preflight_is_logged_and_the_deploy_continues(tmp_path: 
     assert result.returncode == 0
     assert "mount preflight not installed, skipping" in checkout.journal
     assert "compose build" in checkout.docker_calls
+
+
+def test_green_checks_allow_the_fetched_commit_to_fast_forward_and_deploy(tmp_path: Path) -> None:
+    checkout = Checkout(tmp_path)
+    checkout.write_alert_config()
+    checkout.adopt_current_head_as_deployed()
+    checkout.move_main_forward()
+
+    result = checkout.tick()
+
+    assert result.returncode == 0
+    assert subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=checkout.root, text=True,
+    ).strip() == subprocess.check_output(
+        ["git", "rev-parse", "origin/main"], cwd=checkout.root, text=True,
+    ).strip()
+    assert "compose build" in checkout.docker_calls
+
+
+def test_origin_advance_after_check_lookup_cannot_change_the_deployed_commit(tmp_path: Path) -> None:
+    checkout = Checkout(tmp_path)
+    checkout.write_alert_config()
+    checkout.adopt_current_head_as_deployed()
+    checkout.move_main_forward()
+    checked_commit = checkout.remote_main_sha()
+    checkout.move_main_forward_after_check_lookup()
+
+    result = checkout.tick()
+
+    assert result.returncode == 0
+    assert subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=checkout.root, text=True,
+    ).strip() == checked_commit
+    assert subprocess.check_output(
+        ["git", "rev-parse", "origin/main"], cwd=checkout.root, text=True,
+    ).strip() == checked_commit
+    assert checkout.remote_main_sha() != checked_commit
+    assert "compose build" in checkout.docker_calls
+
+
+def test_failed_checks_refuse_to_pull_and_increment_the_failure_streak(tmp_path: Path) -> None:
+    checkout = Checkout(tmp_path)
+    checkout.write_alert_config()
+    checkout.adopt_current_head_as_deployed()
+    checkout.move_main_forward()
+    local_head_before = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=checkout.root, text=True,
+    ).strip()
+    checkout.set_check_runs(("completed", "success"), ("completed", "failure"))
+
+    result = checkout.tick()
+
+    assert result.returncode == 0
+    assert "GitHub checks for origin/main" in checkout.journal
+    assert "failure count now 1" in checkout.journal
+    assert subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=checkout.root, text=True,
+    ).strip() == local_head_before
+    assert "compose build" not in checkout.docker_calls
+
+
+def test_unavailable_check_status_refuses_to_pull_with_a_named_failure(tmp_path: Path) -> None:
+    checkout = Checkout(tmp_path)
+    checkout.write_alert_config()
+    checkout.adopt_current_head_as_deployed()
+    checkout.move_main_forward()
+    local_head_before = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=checkout.root, text=True,
+    ).strip()
+    checkout.make_check_lookup_fail()
+
+    result = checkout.tick()
+
+    assert result.returncode == 0
+    assert "cannot determine GitHub check status" in checkout.journal
+    assert "GitHub API unavailable" in checkout.journal
+    assert "failure count now 1" in checkout.journal
+    assert subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=checkout.root, text=True,
+    ).strip() == local_head_before
+    assert "compose build" not in checkout.docker_calls
+
+
+def test_running_checks_wait_without_incrementing_the_failure_streak(tmp_path: Path) -> None:
+    checkout = Checkout(tmp_path)
+    checkout.write_alert_config()
+    checkout.adopt_current_head_as_deployed()
+    checkout.move_main_forward()
+    local_head_before = subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=checkout.root, text=True,
+    ).strip()
+    checkout.set_check_runs(("in_progress", ""))
+
+    result = checkout.tick()
+
+    assert result.returncode == 0
+    assert "are not green yet: waiting" in checkout.journal
+    assert "failure count now" not in checkout.journal
+    assert subprocess.check_output(
+        ["git", "rev-parse", "HEAD"], cwd=checkout.root, text=True,
+    ).strip() == local_head_before
+    assert "compose build" not in checkout.docker_calls
+
+
+def test_no_check_runs_yet_waits_without_incrementing_the_failure_streak(tmp_path: Path) -> None:
+    checkout = Checkout(tmp_path)
+    checkout.write_alert_config()
+    checkout.adopt_current_head_as_deployed()
+    checkout.move_main_forward()
+    checkout.set_check_runs()
+
+    result = checkout.tick()
+
+    assert result.returncode == 0
+    assert "GitHub has not reported a check run yet" in checkout.journal
+    assert "failure count now" not in checkout.journal
+    assert "compose build" not in checkout.docker_calls
+
+
+def test_malformed_check_status_refuses_to_pull_with_a_named_failure(tmp_path: Path) -> None:
+    checkout = Checkout(tmp_path)
+    checkout.write_alert_config()
+    checkout.adopt_current_head_as_deployed()
+    checkout.move_main_forward()
+    checkout.set_check_runs_response("check\tcompleted\tsuccess\n")
+
+    result = checkout.tick()
+
+    assert result.returncode == 0
+    assert "cannot determine GitHub check status" in checkout.journal
+    assert "incomplete check-runs response" in checkout.journal
+    assert "failure count now 1" in checkout.journal
+    assert "compose build" not in checkout.docker_calls
+
+
+def test_post_merge_hook_is_not_run_by_the_deploy_fast_forward(tmp_path: Path) -> None:
+    checkout = Checkout(tmp_path)
+    checkout.write_alert_config()
+    checkout.adopt_current_head_as_deployed()
+    hook = checkout.root / ".git" / "hooks" / "post-merge"
+    _write_executable(
+        hook,
+        "#!/bin/bash\n"
+        f"printf 'ran' > {shlex.quote(str(checkout.post_merge_marker))}\n",
+    )
+    checkout.move_main_forward()
+
+    result = checkout.tick()
+
+    assert result.returncode == 0
+    assert not checkout.post_merge_marker.exists()
