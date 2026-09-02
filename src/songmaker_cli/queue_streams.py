@@ -19,13 +19,13 @@ from typing import Literal
 from fastapi import HTTPException
 from pydantic import BaseModel, ValidationError
 
-from songmaker_cli.audio_paths import resolve_audio_path
 from songmaker_cli.api_models.queue_streams import (
     QueueStreamManifestResponse,
     QueueStreamTrackResponse,
 )
 from songmaker_cli.api_models.songs import generation_version_lyrics
 from songmaker_cli.app_context import AppContext
+from songmaker_cli.audio_paths import resolve_audio_path
 from songmaker_cli.db.models import Generation
 
 log = logging.getLogger(__name__)

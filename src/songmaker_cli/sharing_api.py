@@ -8,7 +8,6 @@ from sqlalchemy.orm import Session
 
 import songmaker_cli.constants as _consts
 from songmaker_cli.api_helpers import enforce_rate_limit, get_cached_limiter
-from songmaker_cli.audio_paths import resolve_audio_path
 from songmaker_cli.api_models import (
     QueueStreamManifestResponse,
     SharedAlbumResponse,
@@ -24,6 +23,7 @@ from songmaker_cli.api_models.songs import (
     share_pick_media,
 )
 from songmaker_cli.app_context import AppContext, get_app_context, get_db_session
+from songmaker_cli.audio_paths import resolve_audio_path
 from songmaker_cli.auth import resolve_client_ip
 from songmaker_cli.constants import (
     AUDIO_MEDIA_TYPES,
