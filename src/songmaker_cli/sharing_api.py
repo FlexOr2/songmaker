@@ -2,15 +2,13 @@
 
 from __future__ import annotations
 
-import logging
-from pathlib import Path
-
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
 from fastapi.responses import FileResponse, JSONResponse
 from sqlalchemy.orm import Session
 
 import songmaker_cli.constants as _consts
 from songmaker_cli.api_helpers import enforce_rate_limit, get_cached_limiter
+from songmaker_cli.audio_paths import resolve_audio_path
 from songmaker_cli.api_models import (
     QueueStreamManifestResponse,
     SharedAlbumResponse,
@@ -65,7 +63,6 @@ from songmaker_cli.queue_streams import (
 from songmaker_cli.redis_client import RedisRateLimiter
 
 router = APIRouter()
-log = logging.getLogger(__name__)
 
 
 # Public, unauthenticated share endpoints fail open: blocking real listeners
@@ -144,16 +141,6 @@ def _picked_filename(song) -> str | None:
     return gen.mp3_path if gen else None
 
 
-def _resolve_audio_path(audio_dir: Path, rel_path: str) -> Path:
-    audio_path = (audio_dir / rel_path).resolve()
-    if not audio_path.is_relative_to(audio_dir.resolve()):
-        log.warning("Audio path traversal denied: %r", rel_path)
-        raise HTTPException(404, "Audio file not found")
-    if not audio_path.exists():
-        raise HTTPException(404, "Audio file not found")
-    return audio_path
-
-
 def _validate_shared_queue_manifest(manifest: QueueStreamManifest, db: Session) -> None:
     scope = manifest.scope
     slug = manifest.scope_id
@@ -196,7 +183,7 @@ async def get_audio(
     if user.role != "admin" and owner_id != user.id:
         raise HTTPException(404, "Audio file not found")
 
-    audio_path = _resolve_audio_path(ctx.audio_dir, f"{owner_id}/{filename}")
+    audio_path = resolve_audio_path(ctx.audio_dir, f"{owner_id}/{filename}")
     media_type = AUDIO_MEDIA_TYPES.get(audio_path.suffix, "application/octet-stream")
     return FileResponse(audio_path, media_type=media_type)
 
@@ -331,7 +318,7 @@ async def get_shared_audio(
     if filename not in valid_filenames:
         raise HTTPException(404, "Not found")
 
-    audio_path = _resolve_audio_path(ctx.audio_dir, filename)
+    audio_path = resolve_audio_path(ctx.audio_dir, filename)
     media_type = AUDIO_MEDIA_TYPES.get(audio_path.suffix, "application/octet-stream")
     return FileResponse(audio_path, media_type=media_type)
 
@@ -417,7 +404,7 @@ async def get_shared_song_audio(
     if not picked_path or filename != picked_path:
         raise HTTPException(404, "Not found")
 
-    audio_path = _resolve_audio_path(ctx.audio_dir, filename)
+    audio_path = resolve_audio_path(ctx.audio_dir, filename)
     media_type = AUDIO_MEDIA_TYPES.get(audio_path.suffix, "application/octet-stream")
     return FileResponse(audio_path, media_type=media_type)
 
@@ -467,7 +454,7 @@ async def get_shared_gen_audio(
     if filename != gen.mp3_path:
         raise HTTPException(404, "Not found")
 
-    audio_path = _resolve_audio_path(ctx.audio_dir, filename)
+    audio_path = resolve_audio_path(ctx.audio_dir, filename)
     media_type = AUDIO_MEDIA_TYPES.get(audio_path.suffix, "application/octet-stream")
     return FileResponse(audio_path, media_type=media_type)
 
@@ -569,7 +556,7 @@ async def get_shared_playlist_audio(
     if filename not in valid_filenames:
         raise HTTPException(404, "Not found")
 
-    audio_path = _resolve_audio_path(ctx.audio_dir, filename)
+    audio_path = resolve_audio_path(ctx.audio_dir, filename)
     media_type = AUDIO_MEDIA_TYPES.get(audio_path.suffix, "application/octet-stream")
     return FileResponse(audio_path, media_type=media_type)
 

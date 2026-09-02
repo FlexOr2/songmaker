@@ -298,7 +298,7 @@ def test_shared_audio_hides_path_traversal_as_a_missing_file(
         })
         session.commit()
 
-    caplog.set_level(logging.WARNING, logger="songmaker_cli.sharing_api")
+    caplog.set_level(logging.WARNING, logger="songmaker_cli.audio_paths")
     traversal_response = unauthed.get(
         f"/shared/{slug}/audio/admin_user/%2E%2E/%2E%2E/outside.mp3",
     )
@@ -311,14 +311,17 @@ def test_shared_audio_hides_path_traversal_as_a_missing_file(
 
     missing_response = unauthed.get(f"/shared/{slug}/audio/admin_user/missing.mp3")
 
-    assert (traversal_response.status_code, traversal_response.text) == (
-        missing_response.status_code,
-        missing_response.text,
-    )
-    assert any(
-        "Audio path traversal denied" in record.getMessage()
-        for record in caplog.records
-    )
+    assert traversal_response.status_code == 404
+    assert traversal_response.json()["detail"] == "Not Found"
+    assert missing_response.status_code == 404
+    assert missing_response.json()["detail"] == "Not Found"
+    assert traversal_response.headers == missing_response.headers
+    traversal_log = next(
+        record for record in caplog.records
+        if record.name == "songmaker_cli.audio_paths"
+    ).getMessage()
+    assert "admin_user/../../outside.mp3" in traversal_log
+    assert str(sharing_app.app.state.ctx.audio_dir) not in traversal_log
 
 
 def test_shared_audio_not_found_bad_slug(sharing_app: TestClient) -> None:
