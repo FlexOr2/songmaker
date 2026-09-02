@@ -105,7 +105,7 @@ def _check_version_lora_ready(
 # Read verbatim by the frontend (ApiError.message -> addToast, issue #359) —
 # never a component name like "No online ACE-Step workers".
 NO_ONLINE_WORKER_DETAIL: Final = (
-    "No worker can generate music right now. Try again in a moment."
+    "No worker can generate music right now. Check the worker pool."
 )
 
 

@@ -114,13 +114,20 @@
 	// Nothing is listening for /restart once the worker process is gone; a
 	// worker whose GPU is broken is a different cause and needs its own
 	// sentence — the process is up but restarting it won't fix a missing
-	// GPU, so name that instead of the wrong "no process running" excuse.
+	// GPU. A worker that never reports gpu_healthy at all is neither of
+	// those: nothing shows the GPU is actually broken, only that this
+	// build predates the check, and restarting the same process changes
+	// nothing — the container needs the current image.
 	function restartDisabledHint(worker: WorkerInfoItem): string {
 		const workerId = worker.identity.id;
-		if (!worker.state) {
+		const state = worker.state;
+		if (!state) {
 			return `Can't restart — no worker process is running to ask. Restart the container running worker "${workerId}" directly.`;
 		}
-		return `Can't restart — its GPU is the problem, not the process. Restart the container running worker "${workerId}" directly, or check the host's NVIDIA driver.`;
+		if (state.gpu_healthy === false) {
+			return `Can't restart — its GPU is the problem, not the process. Restart the container running worker "${workerId}" directly, or check the host's NVIDIA driver.`;
+		}
+		return `Can't restart — this worker build doesn't report GPU health, so it can't be trusted as healthy. Restarting the same process won't add that; update the container running worker "${workerId}" to the current image.`;
 	}
 
 	function describeStatus(worker: WorkerInfoItem): string {
