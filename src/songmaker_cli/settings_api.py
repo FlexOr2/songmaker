@@ -36,7 +36,12 @@ from songmaker_cli.config import (
     load_generation_defaults,
     save_generation_defaults,
 )
-from songmaker_cli.constants import AuditAction, ResourceType
+from songmaker_cli.constants import (
+    SETTING_COWRITER_MODEL,
+    SETTING_COWRITER_PROVIDER,
+    AuditAction,
+    ResourceType,
+)
 from songmaker_cli.db.queries import (
     delete_all_user_rate_limits,
     get_all_global_rate_limits,
@@ -47,6 +52,7 @@ from songmaker_cli.db.queries import (
     upsert_rate_limit_setting,
 )
 from songmaker_cli.db.queries.settings import (
+    _get_claude_model_row,
     create_preset,
     delete_preset,
     get_claude_chat_model,
@@ -412,23 +418,8 @@ def _models_for_provider(provider: str) -> tuple[list[str], str | None]:
 
 def _cowriter_response(session) -> CowriterSettingsResponse:
     from songmaker_cli.constants import COWRITER_PROVIDERS
-    from songmaker_cli.cowriter.catalog import (
-        RemovedCowriterProvider,
-        SupportedCowriterProvider,
-    )
 
-    saved_provider = get_cowriter_provider(session)
-    match saved_provider:
-        case SupportedCowriterProvider():
-            provider = str(saved_provider)
-        case RemovedCowriterProvider():
-            raise HTTPException(
-                422, f"Unknown co-writer provider '{saved_provider}'",
-            )
-        case _:
-            raise AssertionError(
-                f"unhandled co-writer provider state: {saved_provider!r}",
-            )
+    provider = get_cowriter_provider(session)
     models_by_provider: dict[str, list[str]] = {}
     errors: dict[str, str] = {}
     for name in sorted(COWRITER_PROVIDERS):
@@ -452,7 +443,10 @@ def api_get_cowriter_settings(
     _user: AuthenticatedUser = Depends(get_current_user),
     session: Session = Depends(get_db_session),
 ) -> CowriterSettingsResponse:
-    return _cowriter_response(session)
+    try:
+        return _cowriter_response(session)
+    except ValueError as exc:
+        raise HTTPException(422, str(exc)) from exc
 
 
 @router.put("/settings/cowriter")
@@ -462,28 +456,16 @@ def api_set_cowriter_settings(
     session: Session = Depends(get_db_session),
 ) -> CowriterSettingsResponse:
     from songmaker_cli.constants import COWRITER_PROVIDERS
-    from songmaker_cli.cowriter.catalog import (
-        RemovedCowriterProvider,
-        SupportedCowriterProvider,
-    )
 
     if req.provider not in COWRITER_PROVIDERS:
         raise HTTPException(
             422, f"Unknown co-writer provider '{req.provider}'",
         )
-    saved_provider = get_cowriter_provider(session)
-    match saved_provider:
-        case SupportedCowriterProvider():
-            provider_or_model_changed = (
-                req.provider != saved_provider
-                or req.model != get_cowriter_model(session, saved_provider)
-            )
-        case RemovedCowriterProvider():
-            provider_or_model_changed = True
-        case _:
-            raise AssertionError(
-                f"unhandled co-writer provider state: {saved_provider!r}",
-            )
+    saved_provider = _get_claude_model_row(session, SETTING_COWRITER_PROVIDER)
+    saved_model = _get_claude_model_row(session, SETTING_COWRITER_MODEL)
+    provider_or_model_changed = (
+        req.provider != saved_provider or req.model != saved_model
+    )
     if provider_or_model_changed:
         allowed, catalog_error = _models_for_provider(req.provider)
         if catalog_error:

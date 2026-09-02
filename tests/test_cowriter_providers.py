@@ -29,7 +29,7 @@ from songmaker_cli.cowriter.openai_adapter import (
 )
 from songmaker_cli.cowriter.tools import execute_cowriter_tool
 from songmaker_cli.db.engine import init_test_db as init_db
-from songmaker_cli.db.models import Album, AvailableModel, ChatMessage, Song, User
+from songmaker_cli.db.models import Album, AvailableModel, ChatMessage, Job, Song, User
 from songmaker_cli.db.queries.settings import set_claude_model
 from songmaker_cli.mcp_server.tools import tool_create_song
 from songmaker_cli.middleware import AuthenticatedUser, get_current_user
@@ -129,6 +129,11 @@ def test_valid_cowriter_put_replaces_a_removed_saved_provider(admin_client):
     assert resp.status_code == 200
     assert resp.json()["provider"] == "grok"
 
+    saved = client.get("/api/settings/cowriter")
+
+    assert saved.status_code == 200
+    assert saved.json()["provider"] == "grok"
+
 
 def test_invalid_cowriter_put_rejects_a_removed_saved_provider_without_server_error(
     admin_client,
@@ -143,6 +148,18 @@ def test_invalid_cowriter_put_rejects_a_removed_saved_provider_without_server_er
 
     assert resp.status_code == 422
     assert resp.json()["detail"] == "Unknown co-writer provider 'retired-provider'"
+
+
+def test_chat_rejects_a_removed_saved_provider_without_creating_a_job(admin_client):
+    client, factory = admin_client
+    _save_removed_cowriter_provider(factory)
+
+    resp = client.post("/api/chat/turn", json={"message": "hello"})
+
+    assert resp.status_code == 422
+    assert resp.json()["detail"] == "Unknown co-writer provider 'retired-provider'"
+    with factory() as session:
+        assert session.query(Job).count() == 0
 
 
 def test_model_must_be_in_the_live_catalog(admin_client):
