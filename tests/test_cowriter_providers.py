@@ -17,6 +17,7 @@ from songmaker_cli.claude.provider import FinalEvent, ToolCallEvent
 from songmaker_cli.constants import (
     COWRITER_MAX_TOOL_ROUNDS,
     SETTING_CLAUDE_SCORING_MODEL,
+    SETTING_COWRITER_MODEL,
     SETTING_COWRITER_PROVIDER,
 )
 from songmaker_cli.cowriter.errors import (
@@ -30,6 +31,7 @@ from songmaker_cli.cowriter.openai_adapter import (
 from songmaker_cli.cowriter.tools import execute_cowriter_tool
 from songmaker_cli.db.engine import init_test_db as init_db
 from songmaker_cli.db.models import Album, AvailableModel, ChatMessage, Job, Song, User
+from songmaker_cli.db.queries import get_raw_stored_cowriter_settings
 from songmaker_cli.db.queries.settings import set_claude_model
 from songmaker_cli.mcp_server.tools import tool_create_song
 from songmaker_cli.middleware import AuthenticatedUser, get_current_user
@@ -105,6 +107,20 @@ def _save_removed_cowriter_provider(factory) -> None:
     with factory() as session:
         set_claude_model(session, SETTING_COWRITER_PROVIDER, "retired-provider")
         session.commit()
+
+
+def test_raw_stored_cowriter_settings_preserve_the_unresolved_pair(admin_client):
+    _, factory = admin_client
+    with factory() as session:
+        set_claude_model(session, SETTING_COWRITER_PROVIDER, "retired-provider")
+        set_claude_model(session, SETTING_COWRITER_MODEL, "")
+        session.commit()
+
+    with factory() as session:
+        stored = get_raw_stored_cowriter_settings(session)
+
+    assert stored.provider == "retired-provider"
+    assert stored.model == ""
 
 
 def test_get_cowriter_settings_names_a_removed_saved_provider(admin_client):

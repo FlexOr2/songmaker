@@ -37,14 +37,14 @@ from songmaker_cli.config import (
     save_generation_defaults,
 )
 from songmaker_cli.constants import (
-    SETTING_COWRITER_MODEL,
-    SETTING_COWRITER_PROVIDER,
+    COWRITER_PROVIDERS,
     AuditAction,
     ResourceType,
 )
 from songmaker_cli.db.queries import (
     delete_all_user_rate_limits,
     get_all_global_rate_limits,
+    get_raw_stored_cowriter_settings,
     get_user,
     get_user_rate_limits,
     record_audit,
@@ -52,7 +52,6 @@ from songmaker_cli.db.queries import (
     upsert_rate_limit_setting,
 )
 from songmaker_cli.db.queries.settings import (
-    _get_claude_model_row,
     create_preset,
     delete_preset,
     get_claude_chat_model,
@@ -355,7 +354,6 @@ def api_set_claude_models(
 def api_get_provider_status(
     _admin: AuthenticatedUser = Depends(require_admin),
 ) -> list[ProviderStatusResponse]:
-    from songmaker_cli.constants import COWRITER_PROVIDERS
     from songmaker_cli.cowriter.catalog import (
         ConfiguredProvider,
         DependencyUnavailableProvider,
@@ -417,8 +415,6 @@ def _models_for_provider(provider: str) -> tuple[list[str], str | None]:
 
 
 def _cowriter_response(session) -> CowriterSettingsResponse:
-    from songmaker_cli.constants import COWRITER_PROVIDERS
-
     provider = get_cowriter_provider(session)
     models_by_provider: dict[str, list[str]] = {}
     errors: dict[str, str] = {}
@@ -455,16 +451,13 @@ def api_set_cowriter_settings(
     admin: AuthenticatedUser = Depends(require_admin),
     session: Session = Depends(get_db_session),
 ) -> CowriterSettingsResponse:
-    from songmaker_cli.constants import COWRITER_PROVIDERS
-
     if req.provider not in COWRITER_PROVIDERS:
         raise HTTPException(
             422, f"Unknown co-writer provider '{req.provider}'",
         )
-    saved_provider = _get_claude_model_row(session, SETTING_COWRITER_PROVIDER)
-    saved_model = _get_claude_model_row(session, SETTING_COWRITER_MODEL)
+    stored_settings = get_raw_stored_cowriter_settings(session)
     provider_or_model_changed = (
-        req.provider != saved_provider or req.model != saved_model
+        req.provider != stored_settings.provider or req.model != stored_settings.model
     )
     if provider_or_model_changed:
         allowed, catalog_error = _models_for_provider(req.provider)
@@ -493,8 +486,6 @@ def api_set_cowriter_settings(
 
 
 def _judge_response(session: Session) -> JudgeSettingsResponse:
-    from songmaker_cli.constants import COWRITER_PROVIDERS
-
     provider = get_judge_provider(session)
     models_by_provider: dict[str, list[str]] = {}
     errors: dict[str, str] = {}
@@ -530,8 +521,6 @@ def api_set_judge_settings(
     admin: AuthenticatedUser = Depends(require_admin),
     session: Session = Depends(get_db_session),
 ) -> JudgeSettingsResponse:
-    from songmaker_cli.constants import COWRITER_PROVIDERS
-
     if req.provider not in COWRITER_PROVIDERS:
         raise HTTPException(
             422, f"Unknown judge provider '{req.provider}'",
