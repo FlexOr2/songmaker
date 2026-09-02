@@ -2296,6 +2296,195 @@ def test_stream_job_auth_required(unauthed_client: TestClient) -> None:
     assert resp.status_code in (401, 403)
 
 
+# ── #331 Finding 2: off-loop DB reads, a lifetime deadline, a lease ──────
+
+
+def test_stream_job_fetches_status_off_the_event_loop(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The blocking DB read must run through asyncio.to_thread(), not
+    directly on the loop -- proven by observing it execute on a different
+    thread than the one driving the async generator."""
+    import asyncio
+    import threading
+
+    from songmaker_cli import jobs_api
+    from songmaker_cli.db.queries import create_job
+
+    ctx: AppContext = client.app.state.ctx
+    with ctx.db() as session:
+        job = create_job(session, "generate", user_id=_DEFAULT_USER_ID)
+        session.commit()
+        job_id = job.id
+
+    real_fetch = jobs_api._fetch_job_response
+    observed_threads: list[int] = []
+
+    def _observing_fetch(ctx: AppContext, job_id: str):
+        observed_threads.append(threading.get_ident())
+        return real_fetch(ctx, job_id)
+
+    monkeypatch.setattr(jobs_api, "_fetch_job_response", _observing_fetch)
+
+    async def _first_frame() -> None:
+        stream = jobs_api._job_event_generator(ctx, job_id)
+        await anext(stream)
+        await stream.aclose()
+
+    generator_thread = threading.get_ident()
+    asyncio.run(_first_frame())
+
+    assert observed_threads
+    assert observed_threads[0] != generator_thread
+
+
+def test_stream_job_deadline_closes_a_stream_that_never_reaches_terminal(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A job stuck at "running" must not be polled forever -- the stream's
+    own lifetime deadline closes it, letting the frontend's already-handled
+    EventSource reconnect (jobs.ts) pick it back up."""
+    import asyncio
+
+    from songmaker_cli import jobs_api
+    from songmaker_cli.db.queries import create_job, update_job_status
+    from songmaker_cli.jobs_api import _job_event_generator
+
+    monkeypatch.setattr(jobs_api, "JOB_STREAM_CONNECTION_SECONDS", 0.05)
+    monkeypatch.setattr(jobs_api, "SSE_POLL_INTERVAL_SECONDS", 0.01)
+
+    ctx: AppContext = client.app.state.ctx
+    with ctx.db() as session:
+        job = create_job(session, "generate", user_id=_DEFAULT_USER_ID)
+        update_job_status(session, job.id, "running", progress=0.1)
+        session.commit()
+        job_id = job.id
+
+    async def _drain_until_closed() -> int:
+        frame_count = 0
+        async for _frame in _job_event_generator(ctx, job_id):
+            frame_count += 1
+        return frame_count
+
+    frame_count = asyncio.run(asyncio.wait_for(_drain_until_closed(), timeout=5))
+
+    assert frame_count >= 1
+
+
+def test_stream_job_lease_is_acquired_and_released_around_the_stream(
+    client: TestClient,
+) -> None:
+    import threading
+
+    from songmaker_cli.db.queries import create_job, update_job_status
+
+    ctx: AppContext = client.app.state.ctx
+    with ctx.db() as session:
+        job = create_job(session, "generate", user_id=_DEFAULT_USER_ID)
+        update_job_status(session, job.id, "completed", progress=1.0)
+        session.commit()
+        job_id = job.id
+
+    released = threading.Event()
+    acquire_calls: list[str] = []
+    release_calls: list[tuple[str, str]] = []
+
+    class _Limiter:
+        def acquire(self, user_id: str) -> str:
+            acquire_calls.append(user_id)
+            return "lease-token"
+
+        def release(self, user_id: str, token: str) -> None:
+            release_calls.append((user_id, token))
+            released.set()
+
+    client.app.state._job_stream_lease_limiter = _Limiter()
+
+    with client.stream("GET", f"/api/jobs/{job_id}/stream") as resp:
+        assert resp.status_code == 200
+        list(resp.iter_lines())
+
+    assert released.wait(1)
+    assert acquire_calls == [_DEFAULT_USER_ID]
+    assert release_calls == [(_DEFAULT_USER_ID, "lease-token")]
+
+
+def test_stream_job_rejects_when_lease_is_exhausted(client: TestClient) -> None:
+    from songmaker_cli.db.queries import create_job
+
+    ctx: AppContext = client.app.state.ctx
+    with ctx.db() as session:
+        job = create_job(session, "generate", user_id=_DEFAULT_USER_ID)
+        session.commit()
+        job_id = job.id
+
+    class _ExhaustedLimiter:
+        def acquire(self, _user_id: str) -> str | None:
+            return None
+
+    client.app.state._job_stream_lease_limiter = _ExhaustedLimiter()
+
+    resp = client.get(f"/api/jobs/{job_id}/stream")
+    assert resp.status_code == 429
+
+
+def test_stream_job_lease_fails_closed_when_limiter_errors(client: TestClient) -> None:
+    from songmaker_cli.db.queries import create_job
+
+    ctx: AppContext = client.app.state.ctx
+    with ctx.db() as session:
+        job = create_job(session, "generate", user_id=_DEFAULT_USER_ID)
+        session.commit()
+        job_id = job.id
+
+    class _BrokenLimiter:
+        def acquire(self, _user_id: str) -> str:
+            raise ConnectionError("redis unavailable")
+
+    client.app.state._job_stream_lease_limiter = _BrokenLimiter()
+
+    resp = client.get(f"/api/jobs/{job_id}/stream")
+    assert resp.status_code == 503
+
+
+def test_stream_job_heartbeat_survives_the_lease_and_deadline_changes(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#296 regression: a running job with no status/progress change still
+    emits periodic heartbeats rather than going silent, unaffected by the
+    #331 Finding 2 off-loop fetch, deadline, and lease additions."""
+    import asyncio
+
+    from songmaker_cli import jobs_api
+    from songmaker_cli.db.queries import create_job, update_job_status
+    from songmaker_cli.jobs_api import _job_event_generator
+
+    monkeypatch.setattr(jobs_api, "SSE_HEARTBEAT_SECONDS", 0)
+    monkeypatch.setattr(jobs_api, "SSE_POLL_INTERVAL_SECONDS", 0)
+
+    ctx: AppContext = client.app.state.ctx
+    with ctx.db() as session:
+        job = create_job(session, "generate", user_id=_DEFAULT_USER_ID)
+        update_job_status(session, job.id, "running", progress=0.1)
+        session.commit()
+        job_id = job.id
+
+    async def _collect_frames() -> list[str]:
+        stream = _job_event_generator(ctx, job_id)
+        first = await anext(stream)
+        second = await anext(stream)
+        await stream.aclose()
+        return [first, second]
+
+    frames = asyncio.run(_collect_frames())
+
+    assert frames[0].startswith("data: ")
+    assert frames[1] == ": heartbeat\n\n"
+
+
 # ── Coverage gap tests ───────────────────────────────────────────────
 
 

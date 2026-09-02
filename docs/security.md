@@ -218,6 +218,28 @@ crashed process cannot retain a slot beyond 65 seconds. Lease release runs off t
 Redis client bounds connect and socket waits to two seconds, with expiry as the final
 fallback. Redis failure returns 503 rather than opening an unbounded poller.
 
+### Job streams
+
+`GET /api/jobs/{id}/stream` polls a job's status once per second. It used
+to do that with blocking psycopg2 calls directly on the event loop — one
+waiting generation meant one blocking round trip per second on the loop,
+and an exhausted DB pool could stall it for up to 30 seconds. The poll now
+runs through `asyncio.to_thread()`, matching the resource-event stream's
+off-loop pattern, and the stream has the same kind of bounded lifetime: a
+60-second wall (`JOB_STREAM_CONNECTION_SECONDS`) after which it closes; the
+frontend's `EventSource` reconnect with backoff (`jobs.ts`) already handles
+the drop and resets its retry count on the next message. A Redis lease
+(`RedisConcurrentLeaseLimiter`, the same class the resource-event stream
+uses) caps concurrent job streams per user (`job_stream_lease_max_per_user`,
+default 10 — matches `max_user_active_jobs`) and globally
+(`job_stream_lease_max_global`, default 40). Unlike the resource-event
+lease, this one is not sized against spare DB pool capacity: each poll's
+`to_thread()` checkout is a brief round trip, not a connection held for the
+stream's whole lifetime, so the cap is a backstop against a runaway client
+opening far more streams than any real page load does, not a pool
+reservation. Redis failure fails closed (503), matching the resource-event
+lease.
+
 ## Security Headers
 
 All responses include:
@@ -293,6 +315,14 @@ emits 15-second comment heartbeats so a correctly configured proxy sees activity
 before the deliberate reconnect. The library page's native EventSource probes
 `/api/auth/me` on `onerror`; 401/403 stop the stream and clear auth, and logout
 closes the owner before the logout request.
+
+The job-progress SSE (`/api/jobs/{id}/stream`) has the same monotonic 60-second wall
+and off-loop DB polling, and the same 15-second comment heartbeats. It does not have
+the resource-event stream's outer ASGI-level send wall (`ResourceStreamDeadlineMiddleware`
+governs only the resource-event path) — a reader so slow its TCP window blocks the
+next `send()` can still hold the connection past the in-generator deadline check. The
+Redis lease still bounds how many such connections can accumulate; see "Job streams"
+above.
 
 ## Claude Chat Security
 
