@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from pathlib import Path
 
-from fastapi import APIRouter, Depends, HTTPException, Query, Request, UploadFile
+from fastapi import APIRouter, Depends, HTTPException, Query, UploadFile
 from fastapi.responses import FileResponse
 from sqlalchemy.orm import Session
 
@@ -18,6 +18,7 @@ from songmaker_cli.api_helpers import (
     owner_filter,
     page_has_more,
     parse_optional_search_query,
+    resolve_public_base_url,
     unique_song_slug,
 )
 from songmaker_cli.api_models import (
@@ -290,7 +291,6 @@ def api_cleanup_song(
 @router.post("/songs/{song_id}/share")
 def api_share_song(
     song_id: str,
-    request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
     session: Session = Depends(get_db_session),
 ) -> ShareResponse:
@@ -301,7 +301,7 @@ def api_share_song(
         raise HTTPException(404, "Song not found")
     record_audit(session, user.id, AuditAction.SHARE, ResourceType.SONG, song_id)
     session.commit()
-    base_url = str(request.base_url).rstrip("/")
+    base_url = resolve_public_base_url()
     return ShareResponse(
         share_url=f"{base_url}/share/song/{song.share_slug}",
         share_slug=song.share_slug,

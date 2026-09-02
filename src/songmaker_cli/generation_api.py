@@ -22,6 +22,7 @@ from songmaker_cli.api_helpers import (
     check_song_access,
     cleanup_generation_files,
     create_job_with_rate_limit,
+    resolve_public_base_url,
 )
 from songmaker_cli.api_models import (
     BulkDeleteRequest,
@@ -589,7 +590,6 @@ def api_unarchive_generation(
 @router.post("/generations/{gen_id}/share")
 def api_share_generation(
     gen_id: str,
-    request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
     session: Session = Depends(get_db_session),
 ) -> ShareResponse:
@@ -600,7 +600,7 @@ def api_share_generation(
         raise HTTPException(404, "Generation not found")
     record_audit(session, user.id, AuditAction.SHARE, ResourceType.GENERATION, gen_id)
     session.commit()
-    base_url = str(request.base_url).rstrip("/")
+    base_url = resolve_public_base_url()
     return ShareResponse(
         share_url=f"{base_url}/share/gen/{gen.share_slug}",
         share_slug=gen.share_slug,

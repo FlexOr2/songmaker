@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -16,6 +17,13 @@ from songmaker_cli.app_context import AppContext
 from songmaker_cli.auth import TrustedProxies, hash_password, sign_session_id
 from songmaker_cli.db.engine import init_test_db as init_db
 from songmaker_cli.db.models import Album, Generation, Playlist, PlaylistEntry, Song, User, Version
+
+# The four share endpoints require PUBLIC_BASE_URL (#339) -- resolved lazily
+# per request, so a module-level default (mirrors conftest.py's pattern for
+# other required env vars) is enough for every test in this file that only
+# cares about the share flow, not the URL's exact value. Tests that pin the
+# PUBLIC_BASE_URL contract itself override it via monkeypatch + cache_clear().
+os.environ.setdefault("PUBLIC_BASE_URL", "https://songmaker.test")
 
 _PROXY_NETWORK = "172.16.0.0/12"
 _TRUSTED_PEER = "172.18.0.1"
@@ -1097,3 +1105,83 @@ def test_share_payloads_expose_only_the_contract_fields(two_take_app: TestClient
     assert set(generation) == _SHARED_GENERATION_KEYS
     assert set(playlist) == {"title", "entries"}
     assert set(playlist["entries"][0]) == _SHARED_PLAYLIST_ENTRY_KEYS
+
+
+# ── Public base URL (#339) ───────────────────────────────────────────
+#
+# Share links no longer trust request.base_url. In the Docker + Cloudflare
+# Tunnel deployment, TLS terminates at the Cloudflare edge and uvicorn runs
+# with proxy_headers=False (#328) so nothing rewrites the ASGI scope's
+# scheme -- request.base_url reports "http" even when the request actually
+# arrived over https (see auth.request_is_https(), which resolves the same
+# case correctly via the trusted-proxy-verified X-Forwarded-Proto, and
+# docs/security.md "Proxy trust"). PUBLIC_BASE_URL is the one, validated
+# owner of "what address am I reachable at from outside" instead; all four
+# share endpoints call api_helpers.resolve_public_base_url().
+
+_FOUR_SHARE_ROUTES = [
+    "/api/albums/test_album/share",
+    "/api/songs/s1/share",
+    "/api/generations/g1/share",
+    "/api/playlists/pl1/share",
+]
+
+
+@pytest.mark.parametrize("share_path", _FOUR_SHARE_ROUTES)
+def test_share_url_carries_https_behind_a_tls_proxy(
+    two_take_app: TestClient, monkeypatch: pytest.MonkeyPatch, share_path: str,
+) -> None:
+    """TestClient's connection is plain http -- exactly like the literal
+    ASGI transport behind a TLS-terminating proxy (#328) -- yet the share
+    link must carry https, because that is the configured public address."""
+    from songmaker_cli.settings import get_settings
+
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://songmaker.example")
+    get_settings.cache_clear()
+
+    resp = two_take_app.post(share_path)
+
+    assert resp.status_code == 200
+    assert resp.json()["share_url"].startswith("https://songmaker.example/share/")
+
+
+@pytest.mark.parametrize("share_path", _FOUR_SHARE_ROUTES)
+def test_share_fails_named_when_public_base_url_is_unconfigured(
+    two_take_app: TestClient, monkeypatch: pytest.MonkeyPatch, share_path: str,
+) -> None:
+    """An unresolvable public address fails loudly rather than building a
+    share link with a guessed (and possibly wrong) scheme."""
+    from songmaker_cli.settings import get_settings
+
+    monkeypatch.setenv("PUBLIC_BASE_URL", "")
+    get_settings.cache_clear()
+
+    resp = two_take_app.post(share_path)
+
+    assert resp.status_code == 500
+    assert "PUBLIC_BASE_URL" in resp.json()["detail"]
+
+
+def test_share_fails_named_when_public_base_url_is_malformed(
+    two_take_app: TestClient, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setenv("PUBLIC_BASE_URL", "songmaker.example")  # no scheme
+    from songmaker_cli.settings import get_settings
+    get_settings.cache_clear()
+
+    resp = two_take_app.post("/api/albums/test_album/share")
+
+    assert resp.status_code == 500
+    assert "PUBLIC_BASE_URL" in resp.json()["detail"]
+
+
+def test_resolve_public_base_url_strips_path_and_query(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from songmaker_cli.api_helpers import resolve_public_base_url
+    from songmaker_cli.settings import get_settings
+
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://songmaker.example/some/path?x=1")
+    get_settings.cache_clear()
+
+    assert resolve_public_base_url() == "https://songmaker.example"

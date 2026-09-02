@@ -7,6 +7,7 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Annotated, TypeVar
+from urllib.parse import urlsplit
 
 from fastapi import Depends, HTTPException, Query, Request
 from slugify import slugify as _slugify
@@ -98,6 +99,41 @@ def check_redis_health(request) -> None:
     cache: SessionCache | None = getattr(request.app.state, "session_cache", None)
     if cache and cache.consecutive_failures >= REDIS_DEGRADED_THRESHOLD:
         raise HTTPException(503, "Service temporarily degraded — try again shortly")
+
+
+_PUBLIC_BASE_URL_SCHEMES = frozenset({"http", "https"})
+
+
+def resolve_public_base_url() -> str:
+    """The one owner of "what address am I reachable at from outside".
+
+    Every share endpoint (album/song/generation/playlist) calls this instead
+    of trusting ``request.base_url``. ``base_url`` reflects the scheme of the
+    literal ASGI transport — always ``http`` behind a TLS-terminating proxy
+    (Cloudflare Tunnel today), because ``run_server()`` intentionally runs
+    uvicorn with ``proxy_headers=False`` (see #328 and ``auth.py``) so no
+    second, unaudited trust decision rewrites it. A deployment's public
+    address does not change per request, so there is nothing to negotiate at
+    request time: it is validated configuration, the same way
+    ``TRUSTED_PROXIES`` and ``ALLOWED_HOSTS`` are.
+
+    Raises ``HTTPException(500)`` — named, not a half-built link — when
+    ``PUBLIC_BASE_URL`` is unset or is not an absolute ``http(s)`` URL.
+    """
+    raw = get_settings().public_base_url
+    if not raw:
+        raise HTTPException(
+            500,
+            "PUBLIC_BASE_URL is not configured — cannot build a share link "
+            "without knowing the address this server is reachable at.",
+        )
+    parsed = urlsplit(raw)
+    if parsed.scheme not in _PUBLIC_BASE_URL_SCHEMES or not parsed.netloc:
+        raise HTTPException(
+            500,
+            f"PUBLIC_BASE_URL={raw!r} is not an absolute http:// or https:// URL.",
+        )
+    return f"{parsed.scheme}://{parsed.netloc}"
 
 
 def _job_type_rate_limits(job_type: JobType) -> tuple[int, int, str]:
