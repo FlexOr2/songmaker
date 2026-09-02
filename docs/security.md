@@ -227,13 +227,25 @@ and an exhausted DB pool could stall it for up to 30 seconds. The poll now
 runs through `asyncio.to_thread()`, bounded by `asyncio.wait_for()` to the
 stream's remaining lifetime so a poll cannot itself outrun the deadline by
 waiting on an exhausted pool, matching the resource-event stream's
-`_read_event_page_before` pattern exactly. The endpoint also takes **no**
-`Depends(get_db_session)`: a FastAPI yield-dependency session stays open
-until the whole response finishes, which for a `StreamingResponse` means
-the full stream lifetime — so the access check and every poll each open and
-close their own short-lived session instead (review 2026-09-01, #331
-Finding 1), and no open job stream pins a pool connection for longer than
-one query.
+`_read_event_page_before` pattern exactly.
+
+The endpoint also takes **no request-scoped `Depends()` at all** — matching
+`api_stream_resource_events` exactly, not just in spirit. A first attempt
+(review 2026-09-01) only dropped `Depends(get_db_session)` from the
+endpoint's own signature but kept `Depends(get_current_user)`; a second,
+independent review (2026-09-02) found that `get_current_user` itself takes
+`Depends(get_db_session)`, and FastAPI keeps a yield dependency open until
+the whole *response* finishes — for a `StreamingResponse` that's the full
+stream lifetime, so the connection was still pinned one level up (measured:
+`enter=1, exit=0` after the first body chunk, `exit=1` only once the stream
+closed). `api_stream_job` is now a plain (non-`async`) `def`, so FastAPI
+thread-offloads the whole handler body, exactly like
+`api_stream_resource_events`; auth (`get_current_user(request, session)`)
+and the access check run as plain function calls against one short-lived
+`ctx.db()` session that closes before the lease is acquired or the
+`StreamingResponse` is even constructed, and every poll opens and closes
+its own short-lived session the same way. No open job stream pins a pool
+connection for longer than one query, at any point in the request.
 
 The stream has the same kind of bounded lifetime as the resource-event
 stream: a 60-second wall (`JOB_STREAM_CONNECTION_SECONDS`) after which it
@@ -332,13 +344,17 @@ It does not have the resource-event stream's outer ASGI-level send wall
 (`ResourceStreamDeadlineMiddleware` governs only the resource-event path) — a reader
 so slow its TCP window blocks the next `send()` can still hold the connection past
 the in-generator deadline check. This gap is narrower than it looks: the endpoint
-takes no `Depends(get_db_session)` and no poll holds a DB session across a `send()`
-or a sleep (see "Job streams" above), so a stuck slow-reader `send()` pins neither a
-pool connection nor a blocked thread — only the ASGI connection itself, capped in
-turn by the Redis lease's concurrent-stream ceiling. Before that (`Depends` held a
-session for the whole stream), the same gap would also have let a slow reader pin a
-pool connection for as long as it stayed stuck, which is why the lease's own sizing
-docs (see "Job streams" above) depend on this fix being in place.
+takes no request-scoped `Depends()` at all (neither `get_db_session` nor
+`get_current_user`, which itself takes `get_db_session` — see "Job streams" above)
+and no poll holds a DB session across a `send()` or a sleep, so a stuck slow-reader
+`send()` pins neither a pool connection nor a blocked thread — only the ASGI
+connection itself, capped in turn by the Redis lease's concurrent-stream ceiling.
+Two earlier attempts (2026-09-01 and 2026-09-02) still had a `Depends()`-held
+session somewhere in the request -- first directly, then one level up through
+`get_current_user` -- and each would have let this same slow-reader gap also pin a
+pool connection for as long as the reader stayed stuck, which is why the lease's
+own sizing docs (see "Job streams" above) depend on this fix, in its final form,
+being in place.
 
 ## Claude Chat Security
 

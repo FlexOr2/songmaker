@@ -14,7 +14,7 @@ from sqlalchemy.orm import Session
 
 from songmaker_cli.api_helpers import get_cached_limiter
 from songmaker_cli.api_models import JobResponse
-from songmaker_cli.app_context import AppContext, get_app_context, get_db_session
+from songmaker_cli.app_context import AppContext, get_db_session
 from songmaker_cli.auth import ROLE_ADMIN
 from songmaker_cli.constants import (
     JOB_ACTIVE_STATUSES,
@@ -63,32 +63,36 @@ def api_get_job(
 
 
 @router.get("/jobs/{job_id}/stream")
-async def api_stream_job(
-    job_id: str,
-    request: Request,
-    user: AuthenticatedUser = Depends(get_current_user),
-    ctx: AppContext = Depends(get_app_context),
-) -> StreamingResponse:
-    # No `Depends(get_db_session)` here on purpose (#331 Finding 1, review
-    # 2026-09-01): a yield-dependency session stays open until the whole
-    # *response* is done, which for a StreamingResponse means the full
-    # stream lifetime (now up to JOB_STREAM_CONNECTION_SECONDS) -- every
-    # open job stream would pin a pool connection for that whole time,
-    # regardless of how brief each individual poll is. The access check
-    # instead opens and closes its own short-lived session, the same way
-    # _fetch_job_response does for each poll, off the loop via to_thread.
-    await asyncio.to_thread(_check_job_stream_access, ctx, job_id, user)
+def api_stream_job(job_id: str, request: Request) -> StreamingResponse:
+    # No `Depends()` at all here on purpose (#331 Findings 1/2, review
+    # round 2, 2026-09-02): the first attempt only dropped
+    # `Depends(get_db_session)` from this function's own signature, but
+    # `Depends(get_current_user)` itself takes `Depends(get_db_session)` --
+    # a yield dependency FastAPI keeps open until the whole *response* is
+    # done, which for a StreamingResponse is the full stream lifetime. That
+    # still pinned a pool connection one level up, and adding a second
+    # short-lived session on top of the still-held one made a tight pool
+    # (e.g. pool_size=1) fail admission outright.
+    #
+    # Fix: follow resource_event_api.py's api_stream_resource_events
+    # exactly -- no request-scoped dependency at all. This is a plain
+    # (non-async) `def`, so FastAPI thread-offloads the whole handler body
+    # (unlike an `async def`, whose body runs directly on the loop); auth
+    # and the access check run as plain function calls against ONE
+    # short-lived `ctx.db()` session that closes before the lease is
+    # acquired or the StreamingResponse is even constructed -- nothing left
+    # tied to the response lifecycle holds a connection.
+    ctx: AppContext = request.app.state.ctx
+    with ctx.db() as session:
+        user = get_current_user(request, session)
+        _check_job_access(session, job_id, user)
+        session.commit()
     limiter, lease_token = _acquire_job_stream_lease(request, user.id)
     return StreamingResponse(
         _leased_job_event_generator(ctx, limiter, lease_token, user.id, job_id),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
-
-
-def _check_job_stream_access(ctx: AppContext, job_id: str, user: AuthenticatedUser) -> None:
-    with ctx.db() as session:
-        _check_job_access(session, job_id, user)
 
 
 def _fetch_job_response(ctx: AppContext, job_id: str) -> JobResponse | None:

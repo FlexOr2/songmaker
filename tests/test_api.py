@@ -26,6 +26,7 @@ from songmaker_cli.db.models import (
     Version,
 )
 from songmaker_cli.middleware import (
+    SESSION_COOKIE,
     AuthenticatedUser,
     SelectiveGZipMiddleware,
     get_current_user,
@@ -2172,6 +2173,40 @@ def test_cancel_job_other_user_blocked(tmp_path: Path) -> None:
 
 
 # ── Job SSE streaming ─────────────────────────────────────────────────
+#
+# api_stream_job calls get_current_user directly rather than through
+# Depends() (#331 Findings 1/2, review round 2, 2026-09-02 -- see the
+# function's own comment block), matching resource_event_api.py's
+# api_stream_resource_events. That means `app.dependency_overrides[
+# get_current_user]`, which every other endpoint's tests in this file rely
+# on, does NOT apply to it: it needs a real, signed session cookie, the
+# same way test_resource_event_api.py's _authenticated_clients builds one.
+# Tests that hit the real route (client.stream/.get on /jobs/{id}/stream)
+# call _authenticate_job_stream_client first; tests that drive
+# _job_event_generator directly never go through auth at all and don't
+# need it.
+
+
+def _sign_job_stream_session(ctx: AppContext, user_id: str) -> str:
+    from datetime import timedelta
+
+    from songmaker_cli.auth import sign_session_id
+    from songmaker_cli.db.queries import create_session
+
+    expires_at = datetime.now(timezone.utc) + timedelta(days=1)
+    with ctx.db() as session:
+        user_session = create_session(session, user_id, expires_at)
+        session.commit()
+        session_id = user_session.id
+    return sign_session_id(session_id, ctx.session_secret)
+
+
+def _authenticate_job_stream_client(
+    client: TestClient, user_id: str = _DEFAULT_USER_ID,
+) -> None:
+    client.cookies.set(
+        SESSION_COOKIE, _sign_job_stream_session(client.app.state.ctx, user_id),
+    )
 
 
 def test_stream_job_initial_state(client: TestClient) -> None:
@@ -2186,6 +2221,7 @@ def test_stream_job_initial_state(client: TestClient) -> None:
         session.commit()
         job_id = job.id
 
+    _authenticate_job_stream_client(client)
     events = []
     with client.stream("GET", f"/api/jobs/{job_id}/stream") as resp:
         assert resp.status_code == 200
@@ -2275,6 +2311,7 @@ def test_stream_job_closes_on_terminal_status(client: TestClient) -> None:
         session.commit()
         job_id = job.id
 
+    _authenticate_job_stream_client(client)
     events = []
     with client.stream("GET", f"/api/jobs/{job_id}/stream") as resp:
         for line in resp.iter_lines():
@@ -2287,6 +2324,7 @@ def test_stream_job_closes_on_terminal_status(client: TestClient) -> None:
 
 
 def test_stream_job_not_found(client: TestClient) -> None:
+    _authenticate_job_stream_client(client)
     resp = client.get("/api/jobs/nonexistent/stream")
     assert resp.status_code == 404
 
@@ -2347,12 +2385,16 @@ def _make_pool_capacity_limited_client(
     )
     app = FastAPI()
     app.state.ctx = ctx
-    app.dependency_overrides[get_current_user] = _fake_user(_DEFAULT_USER_ID, "test_user", "user")
     app.include_router(router)
+    # No app.dependency_overrides[get_current_user] here on purpose (#331
+    # Findings 1/2, review round 2): api_stream_job calls get_current_user
+    # directly, not through Depends(), so an override would never reach it
+    # anyway -- and the whole point of this client is to exercise the real
+    # auth path, the same one production traffic goes through.
     return TestClient(app), factory
 
 
-def _job_stream_scope(job_id: str) -> dict:
+def _job_stream_scope(job_id: str, *, cookie: str) -> dict:
     path = f"/api/jobs/{job_id}/stream"
     return {
         "type": "http",
@@ -2364,7 +2406,10 @@ def _job_stream_scope(job_id: str) -> dict:
         "raw_path": path.encode(),
         "query_string": b"",
         "root_path": "",
-        "headers": [(b"host", b"testserver")],
+        "headers": [
+            (b"host", b"testserver"),
+            (b"cookie", f"{SESSION_COOKIE}={cookie}".encode()),
+        ],
         "client": ("testclient", 50_000),
         "server": ("testserver", 80),
     }
@@ -2399,6 +2444,7 @@ def test_stream_job_does_not_pin_the_only_pool_connection_for_the_stream_lifetim
     )
     app = client.app
     ctx: AppContext = app.state.ctx
+    cookie = _sign_job_stream_session(ctx, _DEFAULT_USER_ID)
 
     with factory() as session:
         job_a = create_job(session, "generate", user_id=_DEFAULT_USER_ID)
@@ -2409,16 +2455,24 @@ def test_stream_job_does_not_pin_the_only_pool_connection_for_the_stream_lifetim
 
     async def _drive():
         first_frame_sent = asyncio.Event()
+        response_status: dict[str, int] = {}
 
         async def _receive() -> dict:
             return {"type": "http.request", "body": b"", "more_body": False}
 
         async def _send(message: dict) -> None:
-            if message["type"] == "http.response.body" and message.get("body"):
-                first_frame_sent.set()
+            if message["type"] == "http.response.start":
+                response_status["status"] = message["status"]
+            elif message["type"] == "http.response.body" and message.get("body"):
+                # Only a genuine 200 SSE frame counts as "the stream is live" --
+                # an auth failure also sends a body, and must not be mistaken
+                # for one (that was a real bug in the first version of this
+                # test: it asserted nothing about response_status at all).
+                if response_status.get("status") == 200:
+                    first_frame_sent.set()
 
         stream_task = asyncio.create_task(
-            app(_job_stream_scope(job_a_id), _receive, _send),
+            app(_job_stream_scope(job_a_id, cookie=cookie), _receive, _send),
         )
         await asyncio.wait_for(first_frame_sent.wait(), timeout=5)
 
@@ -2434,9 +2488,11 @@ def test_stream_job_does_not_pin_the_only_pool_connection_for_the_stream_lifetim
             update_job_status(session, job_a_id, "completed", progress=1.0)
             session.commit()
         await asyncio.wait_for(stream_task, timeout=5)
-        return response_b
+        return response_status["status"], response_b
 
-    response_b = asyncio.run(_drive())
+    status_a, response_b = asyncio.run(_drive())
+
+    assert status_a == 200
 
     assert response_b is not None
     assert response_b.status == "queued"
@@ -2581,6 +2637,7 @@ def test_stream_job_lease_is_acquired_and_released_around_the_stream(
 
     client.app.state._job_stream_lease_limiter = _Limiter()
 
+    _authenticate_job_stream_client(client)
     with client.stream("GET", f"/api/jobs/{job_id}/stream") as resp:
         assert resp.status_code == 200
         list(resp.iter_lines())
@@ -2605,6 +2662,7 @@ def test_stream_job_rejects_when_lease_is_exhausted(client: TestClient) -> None:
 
     client.app.state._job_stream_lease_limiter = _ExhaustedLimiter()
 
+    _authenticate_job_stream_client(client)
     resp = client.get(f"/api/jobs/{job_id}/stream")
     assert resp.status_code == 429
 
@@ -2624,6 +2682,7 @@ def test_stream_job_lease_fails_closed_when_limiter_errors(client: TestClient) -
 
     client.app.state._job_stream_lease_limiter = _BrokenLimiter()
 
+    _authenticate_job_stream_client(client)
     resp = client.get(f"/api/jobs/{job_id}/stream")
     assert resp.status_code == 503
 
