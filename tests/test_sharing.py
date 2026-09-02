@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import os
 from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -18,12 +17,10 @@ from songmaker_cli.auth import TrustedProxies, hash_password, sign_session_id
 from songmaker_cli.db.engine import init_test_db as init_db
 from songmaker_cli.db.models import Album, Generation, Playlist, PlaylistEntry, Song, User, Version
 
-# The four share endpoints require PUBLIC_BASE_URL (#339) -- resolved lazily
-# per request, so a module-level default (mirrors conftest.py's pattern for
-# other required env vars) is enough for every test in this file that only
-# cares about the share flow, not the URL's exact value. Tests that pin the
-# PUBLIC_BASE_URL contract itself override it via monkeypatch + cache_clear().
-os.environ.setdefault("PUBLIC_BASE_URL", "https://songmaker.test")
+# The four share endpoints require PUBLIC_BASE_URL (#339); conftest.py sets
+# the test-wide default ("Required env vars for Settings construction at
+# module-import time"). Tests that pin the PUBLIC_BASE_URL contract itself
+# override it via monkeypatch + get_settings.cache_clear().
 
 _PROXY_NETWORK = "172.16.0.0/12"
 _TRUSTED_PEER = "172.18.0.1"
