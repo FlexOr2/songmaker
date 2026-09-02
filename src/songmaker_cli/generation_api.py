@@ -14,7 +14,7 @@ from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from pydantic import BaseModel
 from sqlalchemy.orm import Session
 
-from songmaker_cli.acestep_state import read_worker_state
+from songmaker_cli.acestep_state import read_worker_state, worker_is_online
 from songmaker_cli.api_helpers import (
     check_generation_access,
     check_lora_ready_for_generation,
@@ -106,7 +106,7 @@ async def _has_online_acestep_worker(session: Session) -> bool:
 
     pool = get_arq_pool()
     for w in list_worker_identities(session):
-        if await read_worker_state(pool, w.id) is not None:
+        if worker_is_online(await read_worker_state(pool, w.id)):
             return True
     return False
 

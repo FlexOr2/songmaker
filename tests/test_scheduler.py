@@ -82,8 +82,19 @@ def _seed(session, worker_id: str, *, host="h", port=8001):
     session.commit()
 
 
-def _set_state(redis, worker_id: str, state: dict) -> None:
-    redis.store[worker_state_key(worker_id)] = json.dumps(state)
+def _set_state(
+    redis, worker_id: str, state: dict, *, gpu_healthy: bool | None = True,
+) -> None:
+    """Write a worker heartbeat. Defaults to a healthy GPU so the many tests
+    unrelated to issue #367 don't need to know about it; pass
+    gpu_healthy=None to omit the key entirely (simulating an old worker
+    build) or gpu_healthy=False to simulate a broken one — the latter reads
+    more naturally as an explicit "gpu_healthy": False in the state dict,
+    which this never overrides."""
+    payload = dict(state)
+    if gpu_healthy is not None:
+        payload.setdefault("gpu_healthy", gpu_healthy)
+    redis.store[worker_state_key(worker_id)] = json.dumps(payload)
 
 
 def _set_queue(redis, worker_id: str, depth: int) -> None:
@@ -166,15 +177,15 @@ def test_pick_worker_no_online_when_only_worker_has_broken_gpu(db_session) -> No
         _run(pick_worker(db_session, redis, "sft"))
 
 
-def test_pick_worker_missing_gpu_healthy_field_defaults_to_online(db_session) -> None:
-    """A heartbeat from a worker still on the previous version during a
-    rolling deploy carries no gpu_healthy key at all and must not be
-    misread as broken."""
+def test_pick_worker_missing_gpu_healthy_field_is_treated_as_not_online(db_session) -> None:
+    """Fail-closed: a heartbeat with no gpu_healthy key at all (an old or
+    broken worker build that never learned to publish it) must never be
+    routed a job on the silent assumption that it is fine."""
     _seed(db_session, "w1")
     redis = _InMemoryRedis()
-    _set_state(redis, "w1", {"loaded": ["sft"]})
-    picked = _run(pick_worker(db_session, redis, "sft"))
-    assert picked.id == "w1"
+    _set_state(redis, "w1", {"loaded": ["sft"]}, gpu_healthy=None)
+    with pytest.raises(NoCapacityError):
+        _run(pick_worker(db_session, redis, "sft"))
 
 
 # ── consume_task_stream ────────────────────────────────────────────

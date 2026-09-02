@@ -72,13 +72,13 @@ def test_worker_with_healthy_gpu_is_counted_online(health_client) -> None:
     assert body["status"] == "ok"
 
 
-def test_worker_without_gpu_healthy_field_defaults_to_online(health_client) -> None:
-    """A heartbeat published by a not-yet-upgraded worker (rolling deploy)
-    carries no ``gpu_healthy`` key at all — it must not be misread as a
-    GPU failure."""
+def test_worker_without_gpu_healthy_field_is_treated_as_not_online(health_client) -> None:
+    """Fail-closed: a heartbeat with no ``gpu_healthy`` key at all (an old
+    or broken worker build that never learned to publish it) must never
+    count as online on a silent "assume fine forever" default."""
     body = _get_health(health_client, gpu_healthy=None)
-    assert body["acestep_workers_online"] == 1
-    assert body["acestep"] == "healthy"
+    assert body["acestep_workers_online"] == 0
+    assert body["acestep"] == "unhealthy"
 
 
 def test_metrics_excludes_broken_gpu_worker_from_online_count(health_client) -> None:
