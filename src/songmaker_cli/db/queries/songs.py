@@ -164,9 +164,13 @@ def get_song(
     # reference for as long as it's used, so the weak-identity-map pitfall
     # in list_songs() (#340) -- where a *list* of parents going out of scope
     # silently turns a back-populate access into a lazy query per row --
-    # does not apply here; nothing on this path reads the
-    # Generation.song/.version back-populate direction (see
-    # tests/test_song_api.py for the query-count proof).
+    # does not apply here. SongResponse.from_orm does read gen.version, but
+    # that's the forward relation (Generation -> Version), populated
+    # directly in the same generations-selectin row via the joinedload
+    # above -- not an identity-map lookup, so it's unaffected by parent
+    # lifetime either way. Nothing on this path reads the Generation.song
+    # back-populate, which is the direction #340's pitfall actually depends
+    # on (see tests/test_song_api.py for the query-count proof).
     query = session.query(Song).options(
         selectinload(Song.versions),
         selectinload(Song.generations).selectinload(Generation.scores),

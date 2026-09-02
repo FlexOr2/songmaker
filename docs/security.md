@@ -224,21 +224,31 @@ fallback. Redis failure returns 503 rather than opening an unbounded poller.
 to do that with blocking psycopg2 calls directly on the event loop — one
 waiting generation meant one blocking round trip per second on the loop,
 and an exhausted DB pool could stall it for up to 30 seconds. The poll now
-runs through `asyncio.to_thread()`, matching the resource-event stream's
-off-loop pattern, and the stream has the same kind of bounded lifetime: a
-60-second wall (`JOB_STREAM_CONNECTION_SECONDS`) after which it closes; the
-frontend's `EventSource` reconnect with backoff (`jobs.ts`) already handles
-the drop and resets its retry count on the next message. A Redis lease
-(`RedisConcurrentLeaseLimiter`, the same class the resource-event stream
-uses) caps concurrent job streams per user (`job_stream_lease_max_per_user`,
-default 10 — matches `max_user_active_jobs`) and globally
-(`job_stream_lease_max_global`, default 40). Unlike the resource-event
-lease, this one is not sized against spare DB pool capacity: each poll's
-`to_thread()` checkout is a brief round trip, not a connection held for the
-stream's whole lifetime, so the cap is a backstop against a runaway client
-opening far more streams than any real page load does, not a pool
-reservation. Redis failure fails closed (503), matching the resource-event
-lease.
+runs through `asyncio.to_thread()`, bounded by `asyncio.wait_for()` to the
+stream's remaining lifetime so a poll cannot itself outrun the deadline by
+waiting on an exhausted pool, matching the resource-event stream's
+`_read_event_page_before` pattern exactly. The endpoint also takes **no**
+`Depends(get_db_session)`: a FastAPI yield-dependency session stays open
+until the whole response finishes, which for a `StreamingResponse` means
+the full stream lifetime — so the access check and every poll each open and
+close their own short-lived session instead (review 2026-09-01, #331
+Finding 1), and no open job stream pins a pool connection for longer than
+one query.
+
+The stream has the same kind of bounded lifetime as the resource-event
+stream: a 60-second wall (`JOB_STREAM_CONNECTION_SECONDS`) after which it
+closes; the frontend's `EventSource` reconnect with backoff (`jobs.ts`)
+already handles the drop and resets its retry count on the next message. A
+Redis lease (`RedisConcurrentLeaseLimiter`, the same class the
+resource-event stream uses) caps concurrent job streams per user
+(`job_stream_lease_max_per_user`, default 10 — matches
+`max_user_active_jobs`) and globally (`job_stream_lease_max_global`,
+default 40). Unlike the resource-event lease, this one is not sized against
+spare DB pool capacity — precisely because no job stream holds a pool
+connection for its lifetime, there is no pool share to compute. It is a
+flat, hard concurrency cap against a runaway client opening far more
+streams than any real page load does. Redis failure fails closed (503),
+matching the resource-event lease.
 
 ## Security Headers
 
@@ -317,12 +327,18 @@ before the deliberate reconnect. The library page's native EventSource probes
 closes the owner before the logout request.
 
 The job-progress SSE (`/api/jobs/{id}/stream`) has the same monotonic 60-second wall
-and off-loop DB polling, and the same 15-second comment heartbeats. It does not have
-the resource-event stream's outer ASGI-level send wall (`ResourceStreamDeadlineMiddleware`
-governs only the resource-event path) — a reader so slow its TCP window blocks the
-next `send()` can still hold the connection past the in-generator deadline check. The
-Redis lease still bounds how many such connections can accumulate; see "Job streams"
-above.
+and off-loop, deadline-bounded DB polling, and the same 15-second comment heartbeats.
+It does not have the resource-event stream's outer ASGI-level send wall
+(`ResourceStreamDeadlineMiddleware` governs only the resource-event path) — a reader
+so slow its TCP window blocks the next `send()` can still hold the connection past
+the in-generator deadline check. This gap is narrower than it looks: the endpoint
+takes no `Depends(get_db_session)` and no poll holds a DB session across a `send()`
+or a sleep (see "Job streams" above), so a stuck slow-reader `send()` pins neither a
+pool connection nor a blocked thread — only the ASGI connection itself, capped in
+turn by the Redis lease's concurrent-stream ceiling. Before that (`Depends` held a
+session for the whole stream), the same gap would also have let a slow reader pin a
+pool connection for as long as it stayed stuck, which is why the lease's own sizing
+docs (see "Job streams" above) depend on this fix being in place.
 
 ## Claude Chat Security
 

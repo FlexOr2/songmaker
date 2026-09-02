@@ -2296,7 +2296,186 @@ def test_stream_job_auth_required(unauthed_client: TestClient) -> None:
     assert resp.status_code in (401, 403)
 
 
-# ── #331 Finding 2: off-loop DB reads, a lifetime deadline, a lease ──────
+# ── #331 Findings 1 & 2: no held connection, off-loop reads, a deadline,
+# a lease (review 2026-09-01 corrected the original lease-sizing rationale
+# for Finding 1: api_stream_job took Depends(get_db_session), which FastAPI
+# keeps open for a StreamingResponse's whole body -- every open job stream
+# pinned a pool connection for up to JOB_STREAM_CONNECTION_SECONDS
+# regardless of how brief each poll was) ──────────────────────────────────
+
+
+def _make_pool_capacity_limited_client(
+    tmp_path: Path, *, pool_size: int, max_overflow: int, pool_timeout: float,
+):
+    """A stripped-down app like the `client` fixture, but bound to a real
+    (non-test-default) QueuePool sized down to `pool_size`/`max_overflow`.
+
+    Lets a test prove an endpoint does or doesn't pin a connection for its
+    whole lifetime by actually exhausting a real pool, rather than only
+    instrumenting checkout/checkin events.
+    """
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker
+
+    from songmaker_cli.api import router
+    from songmaker_cli.db.engine import _enable_sqlite_pragmas, _seed_available_models
+    from songmaker_cli.db.models import Base
+
+    data_dir = tmp_path / "data"
+    data_dir.mkdir(parents=True, exist_ok=True)
+    url = f"sqlite:///{data_dir / 'songmaker.db'}"
+    engine = create_engine(
+        url, echo=False, connect_args={"timeout": 30},
+        pool_size=pool_size, max_overflow=max_overflow, pool_timeout=pool_timeout,
+    )
+    _enable_sqlite_pragmas(engine)
+    Base.metadata.create_all(engine)
+    _seed_available_models(engine)
+    factory = sessionmaker(bind=engine)
+
+    with factory() as session:
+        session.add(User(
+            id=_DEFAULT_USER_ID, username="test_user", password_hash="unused", role="user",
+        ))
+        session.commit()
+
+    audio_dir = tmp_path / "audio"
+    audio_dir.mkdir(parents=True, exist_ok=True)
+    ctx = AppContext(
+        db=factory, audio_dir=audio_dir, data_dir=data_dir,
+        session_secret=TEST_SECRET, redis=make_fake_redis(),
+    )
+    app = FastAPI()
+    app.state.ctx = ctx
+    app.dependency_overrides[get_current_user] = _fake_user(_DEFAULT_USER_ID, "test_user", "user")
+    app.include_router(router)
+    return TestClient(app), factory
+
+
+def _job_stream_scope(job_id: str) -> dict:
+    path = f"/api/jobs/{job_id}/stream"
+    return {
+        "type": "http",
+        "asgi": {"version": "3.0", "spec_version": "2.4"},
+        "http_version": "1.1",
+        "method": "GET",
+        "scheme": "http",
+        "path": path,
+        "raw_path": path.encode(),
+        "query_string": b"",
+        "root_path": "",
+        "headers": [(b"host", b"testserver")],
+        "client": ("testclient", 50_000),
+        "server": ("testserver", 80),
+    }
+
+
+def test_stream_job_does_not_pin_the_only_pool_connection_for_the_stream_lifetime(
+    tmp_path: Path,
+) -> None:
+    """#331 Finding 1 (review 2026-09-01): api_stream_job must not hold a
+    Depends(get_db_session) session open for the whole StreamingResponse --
+    FastAPI keeps a yield-dependency open until the whole response finishes,
+    which for a StreamingResponse is the full stream lifetime. With a real
+    pool of exactly one connection and no overflow, a job stream that is
+    still live (a "running" job, not yet at a terminal status) must not
+    starve a second, completely unrelated request that also needs the DB --
+    before the fix, the second request would have blocked for pool_timeout
+    and then failed, because the still-open stream's Depends session would
+    already own the pool's only connection.
+
+    Drives the real ASGI app directly (bypassing TestClient's request/
+    response cycle, which fully drains a streaming response before
+    returning control -- it cannot observe an in-progress stream) so the
+    two requests genuinely run concurrently on one event loop, the same
+    technique test_resource_event_api.py's outer-deadline test uses."""
+    import asyncio
+
+    from songmaker_cli import jobs_api
+    from songmaker_cli.db.queries import create_job, update_job_status
+
+    client, factory = _make_pool_capacity_limited_client(
+        tmp_path, pool_size=1, max_overflow=0, pool_timeout=2,
+    )
+    app = client.app
+    ctx: AppContext = app.state.ctx
+
+    with factory() as session:
+        job_a = create_job(session, "generate", user_id=_DEFAULT_USER_ID)
+        update_job_status(session, job_a.id, "running", progress=0.1)
+        job_b = create_job(session, "generate", user_id=_DEFAULT_USER_ID)
+        session.commit()
+        job_a_id, job_b_id = job_a.id, job_b.id
+
+    async def _drive():
+        first_frame_sent = asyncio.Event()
+
+        async def _receive() -> dict:
+            return {"type": "http.request", "body": b"", "more_body": False}
+
+        async def _send(message: dict) -> None:
+            if message["type"] == "http.response.body" and message.get("body"):
+                first_frame_sent.set()
+
+        stream_task = asyncio.create_task(
+            app(_job_stream_scope(job_a_id), _receive, _send),
+        )
+        await asyncio.wait_for(first_frame_sent.wait(), timeout=5)
+
+        # Stream A is live (first "running" frame sent, generator now
+        # sleeping between polls). Job B's status must still be fetchable
+        # through the same one-connection pool right now, not after A closes.
+        response_b = await asyncio.wait_for(
+            asyncio.to_thread(jobs_api._fetch_job_response, ctx, job_b_id),
+            timeout=2,
+        )
+
+        with ctx.db() as session:
+            update_job_status(session, job_a_id, "completed", progress=1.0)
+            session.commit()
+        await asyncio.wait_for(stream_task, timeout=5)
+        return response_b
+
+    response_b = asyncio.run(_drive())
+
+    assert response_b is not None
+    assert response_b.status == "queued"
+
+
+def test_fetch_job_response_before_bounds_a_slow_poll_to_the_remaining_deadline(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#331 Finding 2 (review 2026-09-01): a bare `await
+    asyncio.to_thread(_fetch_job_response, ...)` can still run past the
+    stream's own deadline if it starts right before the wall and then
+    blocks (e.g. on an exhausted DB pool, up to pool_timeout -- 60s could
+    become 90s). asyncio.wait_for(remaining) bounds it to the deadline
+    instead, returning None (closing the stream) rather than waiting out
+    the full block."""
+    import asyncio
+    import time
+    from time import monotonic
+
+    from songmaker_cli import jobs_api
+
+    def _slow_fetch(_ctx: AppContext, _job_id: str):
+        time.sleep(5)
+        return None
+
+    monkeypatch.setattr(jobs_api, "_fetch_job_response", _slow_fetch)
+    ctx: AppContext = client.app.state.ctx
+
+    async def _bounded_poll() -> tuple[float, object]:
+        deadline = monotonic() + 0.2
+        started = monotonic()
+        result = await jobs_api._fetch_job_response_before(ctx, "any-job", deadline)
+        return monotonic() - started, result
+
+    elapsed, result = asyncio.run(asyncio.wait_for(_bounded_poll(), timeout=5))
+
+    assert result is None
+    assert elapsed < 1.0
 
 
 def test_stream_job_fetches_status_off_the_event_loop(

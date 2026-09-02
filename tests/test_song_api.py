@@ -215,8 +215,10 @@ def test_get_song_issues_one_flat_query_per_collection_not_a_cross_join(
     generations, and generations.scores -- never a single query whose row
     count multiplies across all three collections, and never a query per
     row (which would also prove the #340 weak-identity-map pitfall doesn't
-    apply here, since nothing on this path reads Generation.song/.version
-    back-populate off a parent list that has gone out of scope)."""
+    apply here: gen.version is read, but it's the forward relation loaded
+    directly per-row, not a Generation.song back-populate off a parent list
+    that has gone out of scope, and nothing on this path reads that
+    direction at all)."""
     client, factory = worked_through_song_client
     with factory() as probe_session:
         engine = probe_session.get_bind()

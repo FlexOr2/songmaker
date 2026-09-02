@@ -154,17 +154,20 @@ class Settings(BaseSettings):
     # per-user budget in a way production traffic across many real users
     # never is.
     resource_event_stream_open_limit: int = 12
-    # Concurrency lease for GET /api/jobs/{id}/stream (#331 Finding 2): a
-    # per-poll asyncio.to_thread() checkout/release is brief (one round trip),
-    # unlike the resource-event stream, which reasons about connections held
-    # for its whole lifetime -- so this is not sized as leftover
-    # database_pool_size/max_overflow capacity, but as a concurrency backstop
-    # against a runaway client (bug or storm) opening far more job streams
-    # than any real page load does. max_per_user mirrors max_user_active_jobs
-    # above (a user cannot legitimately watch more job streams than active
-    # jobs); max_global matches the already-vetted worst case in
-    # stream_rate_limit's comment (one resource stream + one job stream per
-    # active job, several page loads within a minute).
+    # Concurrency lease for GET /api/jobs/{id}/stream (#331 Finding 2, and
+    # review 2026-09-01 on Finding 1 below). The endpoint takes no
+    # `Depends(get_db_session)` -- its access check and every poll each open
+    # and close their own short-lived session (see jobs_api.py) -- so unlike
+    # the resource-event stream, no single job stream pins a pool connection
+    # for its lifetime. This lease is therefore NOT a share of
+    # database_pool_size/max_overflow the way the resource-event lease is; it
+    # is a flat, hard concurrency cap against a runaway client (bug or storm)
+    # opening far more job streams than any real page load does. max_per_user
+    # mirrors max_user_active_jobs above (a user cannot legitimately watch
+    # more job streams than active jobs); max_global matches the
+    # already-vetted worst case in stream_rate_limit's comment (one resource
+    # stream + one job stream per active job, several page loads within a
+    # minute).
     job_stream_lease_max_per_user: int = 10
     job_stream_lease_max_global: int = 40
 

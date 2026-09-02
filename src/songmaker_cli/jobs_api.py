@@ -67,16 +67,28 @@ async def api_stream_job(
     job_id: str,
     request: Request,
     user: AuthenticatedUser = Depends(get_current_user),
-    session: Session = Depends(get_db_session),
     ctx: AppContext = Depends(get_app_context),
 ) -> StreamingResponse:
-    _check_job_access(session, job_id, user)
+    # No `Depends(get_db_session)` here on purpose (#331 Finding 1, review
+    # 2026-09-01): a yield-dependency session stays open until the whole
+    # *response* is done, which for a StreamingResponse means the full
+    # stream lifetime (now up to JOB_STREAM_CONNECTION_SECONDS) -- every
+    # open job stream would pin a pool connection for that whole time,
+    # regardless of how brief each individual poll is. The access check
+    # instead opens and closes its own short-lived session, the same way
+    # _fetch_job_response does for each poll, off the loop via to_thread.
+    await asyncio.to_thread(_check_job_stream_access, ctx, job_id, user)
     limiter, lease_token = _acquire_job_stream_lease(request, user.id)
     return StreamingResponse(
         _leased_job_event_generator(ctx, limiter, lease_token, user.id, job_id),
         media_type="text/event-stream",
         headers={"Cache-Control": "no-cache", "X-Accel-Buffering": "no"},
     )
+
+
+def _check_job_stream_access(ctx: AppContext, job_id: str, user: AuthenticatedUser) -> None:
+    with ctx.db() as session:
+        _check_job_access(session, job_id, user)
 
 
 def _fetch_job_response(ctx: AppContext, job_id: str) -> JobResponse | None:
@@ -87,13 +99,43 @@ def _fetch_job_response(ctx: AppContext, job_id: str) -> JobResponse | None:
     meant N blocking round trips per second on the loop, and an exhausted
     connection pool could stall it for up to 30s. asyncio.to_thread() moves
     the blocking call off the loop, matching resource_event_api.py's
-    _read_event_page/_read_event_page_before split.
+    _read_event_page/_read_event_page_before split. Opens and closes its
+    own session (never Depends(get_db_session) -- see api_stream_job), so
+    no connection is held between polls or across the sleep.
     """
     with ctx.db() as db_session:
         job = get_job(db_session, job_id)
         if not job:
             return None
         return JobResponse.from_orm(job)
+
+
+async def _fetch_job_response_before(
+    ctx: AppContext, job_id: str, deadline: float,
+) -> JobResponse | None:
+    """Bound one poll to the remaining stream lifetime.
+
+    #331 Finding 2 (review 2026-09-01): a bare `await
+    asyncio.to_thread(_fetch_job_response, ...)` can still block past the
+    stream's own deadline if it starts right before the wall and then waits
+    on an exhausted DB pool (up to `pool_timeout`, 30s) -- a 60s deadline
+    could become 90s. Wrapping it in `asyncio.wait_for(remaining)` bounds
+    it the same way resource_event_api.py's `_read_event_page_before` does;
+    a timeout here returns None and the generator closes the stream, same
+    as a job that has disappeared -- both cases want the connection closed
+    so the frontend's already-handled EventSource reconnect picks it back
+    up.
+    """
+    remaining = deadline - monotonic()
+    if remaining <= 0:
+        return None
+    try:
+        return await asyncio.wait_for(
+            asyncio.to_thread(_fetch_job_response, ctx, job_id),
+            timeout=remaining,
+        )
+    except TimeoutError:
+        return None
 
 
 async def _job_event_generator(ctx: AppContext, job_id: str) -> AsyncGenerator[str, None]:
@@ -103,7 +145,7 @@ async def _job_event_generator(ctx: AppContext, job_id: str) -> AsyncGenerator[s
     last_emit = monotonic()
     try:
         while monotonic() < deadline:
-            response = await asyncio.to_thread(_fetch_job_response, ctx, job_id)
+            response = await _fetch_job_response_before(ctx, job_id, deadline)
             if response is None:
                 return
 
