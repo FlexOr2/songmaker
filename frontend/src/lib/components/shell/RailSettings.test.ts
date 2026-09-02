@@ -1,8 +1,8 @@
 import { mount, tick, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
-import { RAIL_SETTINGS_OPEN_STORAGE_KEY } from '$lib/constants';
 import { currentUser } from '$lib/stores/auth';
+import { requireElement } from './rail-test-fixtures';
 
 // A genuine `$state` proxy, not a plain object: Rail.svelte (and the real
 // root layout) never remounts across a route change, so the fix this file
@@ -27,12 +27,6 @@ const ADMIN = { id: 'u1', username: 'felix', role: 'admin' as const };
 const USER = { id: 'u2', username: 'jane', role: 'user' as const };
 
 let mounted: ReturnType<typeof mount> | undefined;
-
-function requireElement<T extends Element>(root: ParentNode, selector: string): T {
-	const element = root.querySelector<T>(selector);
-	if (!element) throw new Error(`Expected ${selector} to be rendered`);
-	return element;
-}
 
 async function render(): Promise<HTMLElement> {
 	const target = document.createElement('div');
@@ -107,41 +101,9 @@ describe('RailSettings', () => {
 		expect(itemLabels(target)).toEqual(['Generation', 'Playback', 'Voices', 'Account', 'Legal']);
 	});
 
-	it('remembers an open disclosure across a fresh mount via localStorage', async () => {
-		const first = await render();
-		requireElement<HTMLButtonElement>(first, 'button.disclose').click();
-		await tick();
-		const firstInstance = mounted;
-		if (firstInstance) await unmount(firstInstance);
-		mounted = undefined;
-		document.body.replaceChildren();
-
-		expect(localStorage.getItem(RAIL_SETTINGS_OPEN_STORAGE_KEY)).toBe('true');
-
-		const second = await render();
-		expect(
-			requireElement<HTMLButtonElement>(second, 'button.disclose').getAttribute('aria-expanded')
-		).toBe('true');
-	});
-
-	it('still renders and toggles when localStorage throws', async () => {
-		const getItem = vi.spyOn(Storage.prototype, 'getItem').mockImplementation(() => {
-			throw new Error('blocked in private mode');
-		});
-		const setItem = vi.spyOn(Storage.prototype, 'setItem').mockImplementation(() => {
-			throw new Error('blocked in private mode');
-		});
-
-		const target = await render();
-		const toggle = requireElement<HTMLButtonElement>(target, 'button.disclose');
-		expect(toggle.getAttribute('aria-expanded')).toBe('false');
-		toggle.click();
-		await tick();
-		expect(toggle.getAttribute('aria-expanded')).toBe('true');
-
-		getItem.mockRestore();
-		setItem.mockRestore();
-	});
+	// The disclosure's own open/persist/localStorage-failure behavior is
+	// RailGroup's contract, not this wrapper's -- pinned once in
+	// RailGroup.test.ts rather than duplicated here.
 
 	// Regression coverage for the reviewer's throwaway probe: the force-open
 	// effect used to read `open` as well as write it, so it re-ran on every
