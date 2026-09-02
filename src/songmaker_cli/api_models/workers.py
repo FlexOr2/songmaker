@@ -66,11 +66,7 @@ class WorkerEphemeralState(BaseModel):
 
 WorkerStatus = Literal["online", "loading", "offline"]
 
-# A model's download state has three outcomes, not two: known downloaded,
-# known not downloaded, and unknown because no worker is online to report it.
-# Collapsing the third into "not downloaded" is exactly the bug this type
-# exists to prevent (issue #252) — every model reads as missing the moment
-# the last worker goes offline, even though nothing is known about the files.
+# No worker online means unknown, not "not downloaded" — a third outcome.
 ModelAvailability = Literal["downloaded", "not_downloaded", "unknown_no_worker"]
 
 

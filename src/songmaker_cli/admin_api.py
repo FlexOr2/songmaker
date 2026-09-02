@@ -563,11 +563,7 @@ async def restart_worker_endpoint(
     try:
         response = await _post_to_worker(worker.host, worker.port, "/restart")
     except httpx.HTTPError as exc:
-        # Restart asks the *running* worker process to end itself so its
-        # container's restart policy brings it back — there is nothing to
-        # ask when no such process is reachable. Say that, not the raw
-        # connection error, so the one button someone reaches for on a dead
-        # worker explains itself instead of just returning 502 (issue #252).
+        # Restart asks the running worker process to end itself; nothing is listening to ask.
         raise HTTPException(
             502,
             f"Worker '{worker_id}' isn't responding, so it can't be asked to "

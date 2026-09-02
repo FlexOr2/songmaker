@@ -128,7 +128,11 @@ describe('WorkerPoolPanel with no heartbeat', () => {
 		if (!restartButton) throw new Error('Expected a Restart button to be rendered');
 
 		expect(restartButton.disabled).toBe(true);
+		// The hint must name which worker's container is meant -- there can be
+		// several -- not just say "its container" in the abstract.
+		expect(restartButton.title).toContain('acestep-worker-0');
 		expect(target.textContent).toContain('no worker process is running');
+		expect(target.textContent).toContain('worker "acestep-worker-0"');
 	});
 });
 

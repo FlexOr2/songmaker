@@ -16,12 +16,6 @@
 
 	const POLL_INTERVAL_MS = 3000;
 	const LOAD_JOB_TYPE = 'load_model_on_worker';
-	// Restart asks the worker's own running process to end itself so its
-	// container's restart policy brings it back; there is nothing to ask
-	// once that process is gone, so the button is disabled and explains why
-	// instead of being clicked into a 502 (issue #252).
-	const RESTART_NEEDS_RUNNING_WORKER_HINT =
-		"Can't restart — no worker process is running to ask. Restart its container directly.";
 
 	interface Props {
 		availableModes: string[];
@@ -102,6 +96,11 @@
 
 	function describeOffline(identity: WorkerInfoItem['identity']): string {
 		return `Offline — last registered ${formatLastSeen(identity.last_register_at)}`;
+	}
+
+	// Nothing is listening for /restart once the worker process is gone, so name that instead of erroring.
+	function restartNeedsRunningWorkerHint(workerId: string): string {
+		return `Can't restart — no worker process is running to ask. Restart the container running worker "${workerId}" directly.`;
 	}
 
 	function describeStatus(worker: WorkerInfoItem): string {
@@ -319,7 +318,7 @@
 							<span class="row-value dim">{describeOffline(worker.identity)}</span>
 						</div>
 						<div class="card-row">
-							<span class="row-value dim">{RESTART_NEEDS_RUNNING_WORKER_HINT}</span>
+							<span class="row-value dim">{restartNeedsRunningWorkerHint(worker.identity.id)}</span>
 						</div>
 					{/if}
 
@@ -368,7 +367,7 @@
 							class="action-btn danger"
 							onclick={() => handleRestart(worker.identity.id)}
 							disabled={offline || busyAction[`${worker.identity.id}:restart`]}
-							title={offline ? RESTART_NEEDS_RUNNING_WORKER_HINT : undefined}
+							title={offline ? restartNeedsRunningWorkerHint(worker.identity.id) : undefined}
 						>
 							{busyAction[`${worker.identity.id}:restart`] ? 'Restarting…' : 'Restart'}
 						</button>

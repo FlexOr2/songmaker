@@ -99,16 +99,7 @@ def build_env(
         env["CUDA_VISIBLE_DEVICES"] = str(gpu_id)
     for secret in SECRET_ENV_KEYS:
         env.pop(secret, None)
-    # This worker's own venv (the parent process's VIRTUAL_ENV, e.g.
-    # /app/.venv) has nothing to do with the ACE-Step subprocess, which uv
-    # runs from `checkpoint_dir` against that project's own environment. If
-    # VIRTUAL_ENV survives into the child, uv notices the mismatch and warns
-    # "VIRTUAL_ENV=... does not match the project environment path" on every
-    # line of subprocess startup — the noise that showed up in the admin
-    # panel's "Log:" line as if it were load progress (issue #252). Dropping
-    # the stale var removes the mismatch (and the warning) outright; uv
-    # already ignores it and uses the project's own venv regardless, so
-    # behavior is unchanged.
+    # Inherited VIRTUAL_ENV doesn't apply to the child's project; it only makes uv warn.
     env.pop("VIRTUAL_ENV", None)
     return env
 
