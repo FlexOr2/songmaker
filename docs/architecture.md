@@ -895,8 +895,8 @@ Health endpoint at `/health` reports:
 - `music_worker`: running/stopped
 - `scoring_worker`: running/stopped
 - `music_queue_depth`, `scoring_queue_depth`: jobs waiting per queue
-- `db`, `redis`, `acestep`: component health
-- `status`: "ok" or "degraded" (degraded if both workers down, DB down, or Redis down)
+- `db`, `redis`, `acestep`: component health. An ACE-Step worker only counts as online if its heartbeat both exists in Redis *and* reports `gpu_healthy: true` — a worker whose GPU has gone away (NVML present but unreachable: a driver/GPU mismatch, a vanished device) keeps heartbeating just fine, so heartbeat presence alone is not enough (issue #367).
+- `status`: "ok" or "degraded" (degraded if both workers down, DB down, Redis down, or `acestep` is unhealthy). The HTTP status code stays 200 even when degraded: a 503 here would fail `songmaker-web`'s own Docker healthcheck over a *different* container's GPU going away, and auto-deploy's `--wait` would then refuse every deploy for the exact duration of the outage a fix is meant to end. `songmaker_acestep_workers_total{status="online"} == 0` (issue #333) carries the alert instead — the Docker healthcheck answers "is this container alive", not "is the fleet healthy".
 
 ### Alerting (issue #333)
 

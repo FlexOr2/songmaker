@@ -289,7 +289,8 @@ async def health_check(request: Request) -> JSONResponse:
     workers_total = len(acestep_workers)
     workers_online = 0
     for w in acestep_workers:
-        if await read_worker_state(pool, w.id) is not None:
+        state = await read_worker_state(pool, w.id)
+        if state is not None and state.get("gpu_healthy", True):
             workers_online += 1
 
     if workers_online > 0:
@@ -311,6 +312,7 @@ async def health_check(request: Request) -> JSONResponse:
         not db_ok
         or (not music_running and not scoring_running)
         or not redis_ok
+        or acestep == "unhealthy"
     )
     return JSONResponse({
         "status": "degraded" if degraded else "ok",
