@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from collections.abc import Callable
 from contextlib import contextmanager
 from datetime import datetime, timedelta, timezone
@@ -281,6 +282,43 @@ def test_shared_audio_not_found_wrong_file(sharing_app: TestClient) -> None:
     unauthed = TestClient(sharing_app.app, cookies={})
     resp = unauthed.get(f"/shared/{slug}/audio/nonexistent.mp3")
     assert resp.status_code == 404
+
+
+def test_shared_audio_hides_path_traversal_as_a_missing_file(
+    sharing_app: TestClient,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    slug = sharing_app.post("/api/albums/test_album/share").json()["share_slug"]
+    factory = sharing_app.app.state.ctx.db
+    unauthed = TestClient(sharing_app.app, cookies={})
+
+    with factory() as session:
+        session.query(Generation).filter_by(id="g1").update({
+            "mp3_path": "admin_user/../../outside.mp3",
+        })
+        session.commit()
+
+    caplog.set_level(logging.WARNING, logger="songmaker_cli.sharing_api")
+    traversal_response = unauthed.get(
+        f"/shared/{slug}/audio/admin_user/%2E%2E/%2E%2E/outside.mp3",
+    )
+
+    with factory() as session:
+        session.query(Generation).filter_by(id="g1").update({
+            "mp3_path": "admin_user/missing.mp3",
+        })
+        session.commit()
+
+    missing_response = unauthed.get(f"/shared/{slug}/audio/admin_user/missing.mp3")
+
+    assert (traversal_response.status_code, traversal_response.text) == (
+        missing_response.status_code,
+        missing_response.text,
+    )
+    assert any(
+        "Audio path traversal denied" in record.getMessage()
+        for record in caplog.records
+    )
 
 
 def test_shared_audio_not_found_bad_slug(sharing_app: TestClient) -> None:

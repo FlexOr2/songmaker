@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 from pathlib import Path
 
 from fastapi import APIRouter, Depends, HTTPException, Query, Request
@@ -64,6 +65,7 @@ from songmaker_cli.queue_streams import (
 from songmaker_cli.redis_client import RedisRateLimiter
 
 router = APIRouter()
+log = logging.getLogger(__name__)
 
 
 # Public, unauthenticated share endpoints fail open: blocking real listeners
@@ -145,7 +147,8 @@ def _picked_filename(song) -> str | None:
 def _resolve_audio_path(audio_dir: Path, rel_path: str) -> Path:
     audio_path = (audio_dir / rel_path).resolve()
     if not audio_path.is_relative_to(audio_dir.resolve()):
-        raise HTTPException(403, "Path traversal denied")
+        log.warning("Audio path traversal denied: %r", rel_path)
+        raise HTTPException(404, "Audio file not found")
     if not audio_path.exists():
         raise HTTPException(404, "Audio file not found")
     return audio_path
