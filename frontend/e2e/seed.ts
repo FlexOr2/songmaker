@@ -264,6 +264,38 @@ function takeId(takes: Map<string, string>, songTitle: string): string {
 }
 
 /**
+ * A song of its own, seeded with `takeCount` takes reimported from the same
+ * fixture as the base seed — for a flow that needs a strip of many takes to
+ * genuinely overflow its container (`kinetic-strip.spec.ts`, issue #358).
+ * Its own song rather than piling extra generations onto one of the base
+ * seed's `SONG_TITLES`: those are shared across every flow in the run, and
+ * more than one of them (`library.spec.ts`'s own `takeLabel`, `takeId`
+ * above) depends on the base seed's one-take-per-song count staying exactly
+ * one.
+ */
+export async function seedTakeStripSong(
+	api: APIRequestContext,
+	albumId: string,
+	title: string,
+	takeCount: number
+): Promise<string> {
+	const seed = await SeedApi.fromSession(api);
+	const song = await seed.postJson<CreatedResource>('/api/songs', {
+		title,
+		album_id: albumId,
+		lyrics: `${title} — seeded lyrics`,
+		prompt: 'calm test tone'
+	});
+	const takeAudio = readFileSync(TAKE_FIXTURE);
+	for (let i = 0; i < takeCount; i++) {
+		await seed.postFile(`/api/songs/${song.id}/reimport`, {
+			mp3: { name: 'take.mp3', mimeType: 'audio/mpeg', buffer: takeAudio }
+		});
+	}
+	return song.id;
+}
+
+/**
  * A fresh playlist for one test attempt. The flow adds, reorders and removes
  * entries, so a retry must not inherit the previous attempt's order.
  */
