@@ -287,11 +287,11 @@ def api_share_album(
 ) -> ShareResponse:
     album = get_album(session, album_id)
     check_album_access(album, user)
+    base_url = resolve_public_base_url()
     album = enable_album_sharing(session, album_id)
     missing = songs_without_playable_take(session, album_id)
     record_audit(session, user.id, AuditAction.SHARE, ResourceType.ALBUM, album_id)
     session.commit()
-    base_url = resolve_public_base_url()
     return ShareResponse(
         share_url=f"{base_url}/share/{album.share_slug}",
         share_slug=album.share_slug,

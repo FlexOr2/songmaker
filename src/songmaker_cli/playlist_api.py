@@ -264,13 +264,13 @@ def api_share_playlist(
     session: Session = Depends(get_db_session),
 ) -> ShareResponse:
     _check_playlist_access(session, playlist_id, user)
+    base_url = resolve_public_base_url()
     try:
         playlist = enable_playlist_sharing(session, playlist_id)
     except ValueError:
         raise HTTPException(404, "Playlist not found")
     record_audit(session, user.id, AuditAction.SHARE, ResourceType.PLAYLIST, playlist_id)
     session.commit()
-    base_url = resolve_public_base_url()
     return ShareResponse(
         share_url=f"{base_url}/share/playlist/{playlist.share_slug}",
         share_slug=playlist.share_slug,

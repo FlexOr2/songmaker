@@ -295,13 +295,13 @@ def api_share_song(
     session: Session = Depends(get_db_session),
 ) -> ShareResponse:
     check_song_access(session, song_id, user)
+    base_url = resolve_public_base_url()
     try:
         song = enable_song_sharing(session, song_id)
     except ValueError:
         raise HTTPException(404, "Song not found")
     record_audit(session, user.id, AuditAction.SHARE, ResourceType.SONG, song_id)
     session.commit()
-    base_url = resolve_public_base_url()
     return ShareResponse(
         share_url=f"{base_url}/share/song/{song.share_slug}",
         share_slug=song.share_slug,

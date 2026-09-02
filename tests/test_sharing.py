@@ -1159,6 +1159,45 @@ def test_share_fails_named_when_public_base_url_is_unconfigured(
     assert "PUBLIC_BASE_URL" in resp.json()["detail"]
 
 
+_FOUR_SHARE_TARGETS = [
+    ("/api/albums/test_album/share", Album, "test_album"),
+    ("/api/songs/s1/share", Song, "s1"),
+    ("/api/generations/g1/share", Generation, "g1"),
+    ("/api/playlists/pl1/share", Playlist, "pl1"),
+]
+
+
+@pytest.mark.parametrize(("share_path", "model_class", "entity_id"), _FOUR_SHARE_TARGETS)
+def test_failed_share_leaves_the_resource_private(
+    two_take_app: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+    share_path: str,
+    model_class: type,
+    entity_id: str,
+) -> None:
+    """A share attempt that fails to resolve a public address must not leave
+    the resource public (#339 finding 1). Before the fix, enable_*_sharing()
+    ran and committed before resolve_public_base_url() got a chance to raise
+    -- a musician who saw "Share failed" actually had their album, song,
+    take, or playlist sitting world-readable with a live slug."""
+    from songmaker_cli.settings import get_settings
+
+    monkeypatch.setenv("PUBLIC_BASE_URL", "")
+    get_settings.cache_clear()
+
+    resp = two_take_app.post(share_path)
+    assert resp.status_code == 500
+
+    factory = two_take_app.app.state.ctx.db
+    with factory() as session:
+        entity = session.query(model_class).filter_by(id=entity_id).one()
+        assert entity.is_shared is False
+        assert entity.share_slug is None
+
+    shares = two_take_app.get("/api/library/shares").json()["items"]
+    assert entity_id not in {item["id"] for item in shares}
+
+
 def test_share_fails_named_when_public_base_url_is_malformed(
     two_take_app: TestClient, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -1172,13 +1211,68 @@ def test_share_fails_named_when_public_base_url_is_malformed(
     assert "PUBLIC_BASE_URL" in resp.json()["detail"]
 
 
-def test_resolve_public_base_url_strips_path_and_query(
+def test_resolve_public_base_url_strips_query_and_fragment(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from songmaker_cli.api_helpers import resolve_public_base_url
     from songmaker_cli.settings import get_settings
 
-    monkeypatch.setenv("PUBLIC_BASE_URL", "https://songmaker.example/some/path?x=1")
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://songmaker.example?x=1#frag")
     get_settings.cache_clear()
 
     assert resolve_public_base_url() == "https://songmaker.example"
+
+
+def test_resolve_public_base_url_rejects_a_path(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Unlike a query string or fragment, a path is not discarded -- a value
+    like ``https://domain/app`` means someone intended a subdirectory
+    deployment, and silently dropping it would build exactly the half-link
+    this function exists to prevent (#339 finding 2)."""
+    from fastapi import HTTPException
+
+    from songmaker_cli.api_helpers import resolve_public_base_url
+    from songmaker_cli.settings import get_settings
+
+    monkeypatch.setenv("PUBLIC_BASE_URL", "https://songmaker.example/app")
+    get_settings.cache_clear()
+
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_public_base_url()
+    assert exc_info.value.status_code == 500
+    assert "PUBLIC_BASE_URL" in exc_info.value.detail
+
+
+def test_resolve_public_base_url_trims_surrounding_whitespace(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """PUBLIC_BASE_URL=https://host<trailing space> is the single most common
+    .env typo -- urlsplit would otherwise fold the space into the netloc and
+    hand back a broken link with a 200 (#339 finding 2)."""
+    from songmaker_cli.api_helpers import resolve_public_base_url
+    from songmaker_cli.settings import get_settings
+
+    monkeypatch.setenv("PUBLIC_BASE_URL", " https://songmaker.example \n")
+    get_settings.cache_clear()
+
+    assert resolve_public_base_url() == "https://songmaker.example"
+
+
+def test_resolve_public_base_url_rejects_an_embedded_scheme(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """``http://https://host`` parses as scheme="http", netloc="https:" --
+    a non-empty netloc that is not a host. A looser "netloc is non-empty"
+    check would let this through (#339 finding 2)."""
+    from fastapi import HTTPException
+
+    from songmaker_cli.api_helpers import resolve_public_base_url
+    from songmaker_cli.settings import get_settings
+
+    monkeypatch.setenv("PUBLIC_BASE_URL", "http://https://host")
+    get_settings.cache_clear()
+
+    with pytest.raises(HTTPException) as exc_info:
+        resolve_public_base_url()
+    assert exc_info.value.status_code == 500

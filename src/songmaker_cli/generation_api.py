@@ -594,13 +594,13 @@ def api_share_generation(
     session: Session = Depends(get_db_session),
 ) -> ShareResponse:
     check_generation_access(session, gen_id, user)
+    base_url = resolve_public_base_url()
     try:
         gen = enable_generation_sharing(session, gen_id)
     except ValueError:
         raise HTTPException(404, "Generation not found")
     record_audit(session, user.id, AuditAction.SHARE, ResourceType.GENERATION, gen_id)
     session.commit()
-    base_url = resolve_public_base_url()
     return ShareResponse(
         share_url=f"{base_url}/share/gen/{gen.share_slug}",
         share_slug=gen.share_slug,
