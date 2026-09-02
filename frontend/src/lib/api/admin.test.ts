@@ -77,7 +77,12 @@ describe('admin worker pool API', () => {
 	it('getRegistry calls GET /api/admin/registry', async () => {
 		mockOk({
 			models: [
-				{ mode: 'sft', availability: 'downloaded', loaded_on: ['acestep-worker-0'], loading_on: [] },
+				{
+					mode: 'sft',
+					availability: 'downloaded',
+					loaded_on: ['acestep-worker-0'],
+					loading_on: []
+				},
 				{ mode: 'xl-base', availability: 'not_downloaded', loaded_on: [], loading_on: [] }
 			]
 		});
