@@ -1428,7 +1428,7 @@ def test_repaint_returns_503_and_enqueues_nothing_when_worker_gpu_is_broken(
         })
 
     assert resp.status_code == 503
-    assert "No online ACE-Step workers" in resp.json()["detail"]
+    assert "No worker can generate music right now" in resp.json()["detail"]
     mock_pool.enqueue_job.assert_not_called()
 
 
@@ -1574,7 +1574,7 @@ def test_cover_returns_503_and_enqueues_nothing_when_worker_gpu_is_broken(
         })
 
     assert resp.status_code == 503
-    assert "No online ACE-Step workers" in resp.json()["detail"]
+    assert "No worker can generate music right now" in resp.json()["detail"]
     mock_pool.enqueue_job.assert_not_called()
 
 
@@ -1718,7 +1718,7 @@ def test_generate_song_returns_503_and_enqueues_nothing_when_worker_gpu_is_broke
         )
 
     assert resp.status_code == 503
-    assert "No online ACE-Step workers" in resp.json()["detail"]
+    assert "No worker can generate music right now" in resp.json()["detail"]
     mock_pool.enqueue_job.assert_not_called()
 
 

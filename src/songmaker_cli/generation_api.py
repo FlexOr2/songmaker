@@ -9,6 +9,7 @@ import uuid
 from collections.abc import Callable
 from datetime import datetime, timezone
 from pathlib import Path
+from typing import Final
 
 from fastapi import APIRouter, Depends, HTTPException, Request, UploadFile
 from pydantic import BaseModel
@@ -99,6 +100,13 @@ def _check_version_lora_ready(
     except Exception:
         return
     check_lora_ready_for_generation(session, params.user_lora_id, user)
+
+
+# Read verbatim by the frontend (ApiError.message -> addToast, issue #359) —
+# never a component name like "No online ACE-Step workers".
+NO_ONLINE_WORKER_DETAIL: Final = (
+    "No worker can generate music right now. Try again in a moment."
+)
 
 
 async def _has_online_acestep_worker(session: Session) -> bool:
@@ -288,7 +296,7 @@ async def api_generate_song(
             raise HTTPException(503, "Worker not running")
         if not await _has_online_acestep_worker(session):
             _fail_job(ctx, job.id)
-            raise HTTPException(503, "No online ACE-Step workers")
+            raise HTTPException(503, NO_ONLINE_WORKER_DETAIL)
         await pool.enqueue_job(
             JobFunction.GENERATE, job.id, song_id, version.id, req.count, user.id, req.seed,
             req.model,
@@ -381,7 +389,7 @@ async def api_repaint_generation(
             raise HTTPException(503, "Worker not running")
         if not await _has_online_acestep_worker(session):
             _fail_job(ctx, job.id)
-            raise HTTPException(503, "No online ACE-Step workers")
+            raise HTTPException(503, NO_ONLINE_WORKER_DETAIL)
         repaint_task = RepaintTaskParams(
             src_wav_path=str(wav_path),
             src_generation_id=gen_id,
@@ -453,7 +461,7 @@ async def api_cover_generation(
             raise HTTPException(503, "Worker not running")
         if not await _has_online_acestep_worker(session):
             _fail_job(ctx, job.id)
-            raise HTTPException(503, "No online ACE-Step workers")
+            raise HTTPException(503, NO_ONLINE_WORKER_DETAIL)
         cover_task = CoverTaskParams(
             src_wav_path=str(wav_path),
             src_generation_id=gen_id,

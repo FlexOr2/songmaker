@@ -352,6 +352,8 @@ def _state_from_dict(state: dict | None, queue_depth: int) -> WorkerEphemeralSta
         available_modes=list(state.get("available_modes", [])),
         pinned=list(state.get("pinned", [])),
         last_heartbeat_at=state.get("last_heartbeat_at"),
+        gpu_healthy=state.get("gpu_healthy"),
+        gpu_health_detail=state.get("gpu_health_detail"),
     )
 
 

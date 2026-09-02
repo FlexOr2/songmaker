@@ -136,6 +136,93 @@ describe('WorkerPoolPanel with no heartbeat', () => {
 	});
 });
 
+function heartbeatingButOfflineWorkerPool(
+	gpuHealthy: boolean | null,
+	gpuHealthDetail: string | null
+): WorkerPoolResponse {
+	return {
+		workers: [
+			{
+				identity: {
+					id: 'acestep-worker-0',
+					host: 'worker',
+					port: 8100,
+					gpu_id: 0,
+					vram_total_gb: 24,
+					registered_at: '2026-08-24T11:10:00Z',
+					last_register_at: '2026-09-02T09:00:00Z'
+				},
+				state: {
+					loaded: [{ mode: 'sft', size_gb: 6 }],
+					target_loading: null,
+					loading_started_at: null,
+					loading_last_log_line: null,
+					queue_depth: 0,
+					vram_used_gb: null,
+					vram_total_gb: 24,
+					vram_measured: null,
+					available_modes: ['sft'],
+					pinned: [],
+					last_heartbeat_at: new Date().toISOString(),
+					gpu_healthy: gpuHealthy,
+					gpu_health_detail: gpuHealthDetail
+				},
+				status: 'offline'
+			}
+		]
+	};
+}
+
+async function renderHeartbeatingButOffline(
+	gpuHealthy: boolean | null,
+	gpuHealthDetail: string | null
+): Promise<HTMLElement> {
+	api.listWorkers.mockResolvedValue(heartbeatingButOfflineWorkerPool(gpuHealthy, gpuHealthDetail));
+	const target = document.createElement('div');
+	document.body.append(target);
+	mounted = mount(WorkerPoolPanel, { target, props: { availableModes: [] } });
+	await tick();
+	await Promise.resolve();
+	await tick();
+	return target;
+}
+
+describe('WorkerPoolPanel with a heartbeating but GPU-broken worker', () => {
+	// Issue #367: a worker whose GPU has gone away keeps heartbeating just
+	// fine, so the API correctly marks it "offline" while state stays
+	// non-null. The panel must not read state-presence as "Idle" — the red
+	// status icon and the row text must agree, and nothing must be
+	// clickable.
+	it('names the GPU failure from the heartbeat and disables every action', async () => {
+		const target = await renderHeartbeatingButOffline(false, 'Driver/library version mismatch');
+
+		expect(target.textContent).toContain('GPU unavailable — Driver/library version mismatch');
+		expect(target.textContent).not.toContain('Idle');
+		expect(target.textContent).not.toContain('just now');
+
+		const buttons = Array.from(target.querySelectorAll<HTMLButtonElement>('button'));
+		expect(buttons.length).toBeGreaterThan(0);
+		for (const button of buttons) {
+			expect(button.disabled).toBe(true);
+		}
+		const select = target.querySelector<HTMLSelectElement>('select.mode-select');
+		expect(select?.disabled).toBe(true);
+	});
+
+	it('names an old worker build that never learned to report GPU health', async () => {
+		const target = await renderHeartbeatingButOffline(null, null);
+
+		expect(target.textContent).toContain('GPU health not reported');
+		expect(target.textContent).not.toContain('Idle');
+
+		const buttons = Array.from(target.querySelectorAll<HTMLButtonElement>('button'));
+		expect(buttons.length).toBeGreaterThan(0);
+		for (const button of buttons) {
+			expect(button.disabled).toBe(true);
+		}
+	});
+});
+
 describe('WorkerPoolPanel VRAM measurement', () => {
 	it('marks estimated VRAM usage', async () => {
 		const value = await renderVram(false);

@@ -94,18 +94,38 @@
 		return `${hours}h ${remMinutes}m`;
 	}
 
-	function describeOffline(identity: WorkerInfoItem['identity']): string {
-		return `Offline — last registered ${formatLastSeen(identity.last_register_at)}`;
+	// Three ways a worker can be non-operable, each needing its own honest
+	// sentence (issue #367): no heartbeat at all, a heartbeat reporting a
+	// broken GPU (NVML present but unreachable), or an old worker build
+	// whose heartbeat predates the GPU health field entirely.
+	function describeOffline(worker: WorkerInfoItem): string {
+		const state = worker.state;
+		if (!state) {
+			return `Offline — last registered ${formatLastSeen(worker.identity.last_register_at)}`;
+		}
+		if (state.gpu_healthy === false) {
+			return state.gpu_health_detail
+				? `GPU unavailable — ${state.gpu_health_detail}`
+				: 'GPU unavailable';
+		}
+		return 'GPU health not reported — worker build predates GPU health checks';
 	}
 
-	// Nothing is listening for /restart once the worker process is gone, so name that instead of erroring.
-	function restartNeedsRunningWorkerHint(workerId: string): string {
-		return `Can't restart — no worker process is running to ask. Restart the container running worker "${workerId}" directly.`;
+	// Nothing is listening for /restart once the worker process is gone; a
+	// worker whose GPU is broken is a different cause and needs its own
+	// sentence — the process is up but restarting it won't fix a missing
+	// GPU, so name that instead of the wrong "no process running" excuse.
+	function restartDisabledHint(worker: WorkerInfoItem): string {
+		const workerId = worker.identity.id;
+		if (!worker.state) {
+			return `Can't restart — no worker process is running to ask. Restart the container running worker "${workerId}" directly.`;
+		}
+		return `Can't restart — its GPU is the problem, not the process. Restart the container running worker "${workerId}" directly, or check the host's NVIDIA driver.`;
 	}
 
 	function describeStatus(worker: WorkerInfoItem): string {
 		const state = worker.state;
-		if (!state) return describeOffline(worker.identity);
+		if (!state) return describeOffline(worker);
 		if (state.target_loading) {
 			const elapsed = formatElapsed(state.loading_started_at);
 			return elapsed
@@ -255,7 +275,7 @@
 			{#each workers as worker (worker.identity.id)}
 				{@const busy = isCardBusy(worker)}
 				{@const trackedJob = loadingByWorker.get(worker.identity.id)}
-				{@const offline = worker.state === null}
+				{@const offline = worker.status === 'offline'}
 				{@const vramUsage = formatVramUsage(worker.state)}
 				<div class="card" class:busy>
 					<div class="card-header">
@@ -266,7 +286,7 @@
 						</span>
 					</div>
 
-					{#if worker.state}
+					{#if worker.state && !offline}
 						<div class="card-row">
 							<span class="row-label">Loaded:</span>
 							{#if worker.state.loaded.length === 0}
@@ -315,10 +335,10 @@
 						</div>
 					{:else}
 						<div class="card-row">
-							<span class="row-value dim">{describeOffline(worker.identity)}</span>
+							<span class="row-value dim">{describeOffline(worker)}</span>
 						</div>
 						<div class="card-row">
-							<span class="row-value dim">{restartNeedsRunningWorkerHint(worker.identity.id)}</span>
+							<span class="row-value dim">{restartDisabledHint(worker)}</span>
 						</div>
 					{/if}
 
@@ -343,7 +363,7 @@
 						>
 							{busyAction[worker.identity.id] ? 'Loading…' : 'Load'}
 						</button>
-						{#if worker.state && worker.state.loaded.length > 0}
+						{#if !offline && worker.state && worker.state.loaded.length > 0}
 							{#each worker.state.loaded as loadedDetail (loadedDetail.mode)}
 								{@const isPinned = (worker.state?.pinned ?? []).includes(loadedDetail.mode)}
 								<button
@@ -367,7 +387,7 @@
 							class="action-btn danger"
 							onclick={() => handleRestart(worker.identity.id)}
 							disabled={offline || busyAction[`${worker.identity.id}:restart`]}
-							title={offline ? restartNeedsRunningWorkerHint(worker.identity.id) : undefined}
+							title={offline ? restartDisabledHint(worker) : undefined}
 						>
 							{busyAction[`${worker.identity.id}:restart`] ? 'Restarting…' : 'Restart'}
 						</button>
