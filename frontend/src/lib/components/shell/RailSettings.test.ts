@@ -1,6 +1,7 @@
 import { mount, tick, unmount } from 'svelte';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { RAIL_SETTINGS_OPEN_STORAGE_KEY } from '$lib/constants';
 import { currentUser } from '$lib/stores/auth';
 import { requireElement } from './rail-test-fixtures';
 
@@ -101,9 +102,12 @@ describe('RailSettings', () => {
 		expect(itemLabels(target)).toEqual(['Generation', 'Playback', 'Voices', 'Account', 'Legal']);
 	});
 
-	// The disclosure's own open/persist/localStorage-failure behavior is
-	// RailGroup's contract, not this wrapper's -- pinned once in
-	// RailGroup.test.ts rather than duplicated here.
+	it('persists its open state under RAIL_SETTINGS_OPEN_STORAGE_KEY', async () => {
+		const target = await render();
+		requireElement<HTMLButtonElement>(target, 'button.disclose').click();
+		await tick();
+		expect(localStorage.getItem(RAIL_SETTINGS_OPEN_STORAGE_KEY)).toBe('true');
+	});
 
 	// Regression coverage for the reviewer's throwaway probe: the force-open
 	// effect used to read `open` as well as write it, so it re-ran on every

@@ -12,12 +12,10 @@ import type {
 // RailPlaylistsGroup, RailSettings, RailGroup) so a shell test does not carry
 // its own copy of the same lookup helper, domain builders, and page shapes.
 //
-// `vi.mock(...)` factories themselves are NOT shared here, deliberately: a
-// static import in a test file resolves before that file's own top-level
-// code runs, so a factory that dereferences an imported helper's return
-// value hits a TDZ the moment Vitest hoists the vi.mock(...) call above the
-// import (see https://vitest.dev/api/vi.html#vi-mock). Each test file keeps
-// its own literal vi.mock(...) bodies for that reason.
+// vi.mock(...) factories are hoisted above this file's own imports, so a
+// factory that reads a plain re-exported binding by value can hit a TDZ;
+// each *.test.ts's own vi.mock(...) bodies stay inline for that reason
+// (see https://vitest.dev/api/vi.html#vi-mock).
 
 export function requireElement<T extends Element>(root: ParentNode, selector: string): T {
 	const element = root.querySelector<T>(selector);

@@ -13,12 +13,6 @@ import {
 	requireElement
 } from './rail-test-fixtures';
 
-// A vi.mock(...) factory can only return self-contained values or wrapper
-// functions that defer reading an outer binding until actually called --
-// every static import in this file (fixtures included) resolves before this
-// file's own top-level statements run, so a factory that reads an imported
-// helper's return value directly hits a TDZ. See
-// https://vitest.dev/api/vi.html#vi-mock.
 vi.mock('$app/navigation', () => ({
 	goto: vi.fn().mockResolvedValue(undefined),
 	afterNavigate: vi.fn()
