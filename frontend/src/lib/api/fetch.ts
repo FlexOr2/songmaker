@@ -1,20 +1,25 @@
 import { get } from 'svelte/store';
 import type { JobItem } from './types';
-import { RATE_LIMITED_TOAST_MESSAGE } from '$lib/constants';
+import { API_ERROR_GENERIC_MESSAGE, RATE_LIMITED_TOAST_MESSAGE } from '$lib/constants';
 import { addToast, toasts } from '$lib/stores/toast';
 
 export const API_TIMEOUT_MS = 30_000;
 export const CHAT_TIMEOUT_MS = 600_000;
 
 export class ApiError extends Error {
+	// Raw path + status for logs and debugging; `message` is always a
+	// sentence fit to show the person.
+	public readonly technicalDetail: string;
+
 	constructor(
 		public readonly status: number,
 		public readonly detail: string,
 		public readonly path: string,
 		public readonly retryAfterSeconds: number | null = null
 	) {
-		super(detail || `API ${path}: ${status}`);
+		super(detail || API_ERROR_GENERIC_MESSAGE);
 		this.name = 'ApiError';
+		this.technicalDetail = `API ${path}: ${status}`;
 	}
 }
 

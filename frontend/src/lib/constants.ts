@@ -1,5 +1,11 @@
 export const APP_NAME = 'Hallucinai';
 
+// Shown in place of a server error response that carries no readable
+// `detail` (a non-JSON body, or JSON without that field) -- the raw
+// `API /path: 500` form stays out of view, in `ApiError.technicalDetail`,
+// for logs and debugging instead.
+export const API_ERROR_GENERIC_MESSAGE = 'Something went wrong. Try again.';
+
 // The share succeeded server-side even when the follow-up clipboard write
 // throws (no permission, no focus, etc.) — that toast must never read as a
 // share failure, since the link exists and only the copy step didn't.
