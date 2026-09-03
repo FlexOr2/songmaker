@@ -57,6 +57,23 @@ ARQ-Slot mit dem Training.
   Das ist nötig, weil LoRA heute noch vor jeder Workerwahl `RUNNING` setzt und
   den Dataset-Ordner materialisiert (`lora_training.py:424-455`).
 
+- **Ein Generate-Job kann mehrere Takes umfassen.** `GenerateRequest.count` ist
+  auf 1–10 begrenzt (`src/songmaker_cli/api_models/songs.py:557-560`), und
+  `run_generation_job()` ruft `dispatch_generation()` im `for i in
+  range(count)`-Loop auf (`src/songmaker_cli/jobs/generation.py:736-781`).
+  `dispatch_generation()` wählt derzeit jedes Mal neu und macht direkt danach
+  `INCR`, mit `DECR` im `finally` (`src/songmaker_cli/scheduler.py:427-453`).
+  Nach Take 1 ist `queue_depth` deshalb kurz 0; LoRA könnte reservieren und
+  Take 2 würde erst nach `RUNNING` in den bestehenden
+  `NoCapacityError`/`WorkerTaskFailed`- oder allgemeinen Fehlerpfad fallen.
+  Dasselbe Rennen entsteht bei einem Lua-Admit-409 zwischen Pick und Admit.
+  Der Generate-Job muss daher genau eine Occupancy für die ganze Take-Serie
+  halten: einmal atomar admitten/`INCR` **vor** dem Loop und erst im finalen
+  Cleanup nach dem letzten Take oder Abbruch `DECR`; zwischen Takes gibt es
+  kein `DECR`. Ein Admit-409 vor dem ersten `RUNNING` ist ein nichtfehlerhafter
+  Defer mit DB-Status `queued` und neuem ARQ-Umschlag; nach erfolgreichem
+  Serien-Admit kann dieser Konflikt innerhalb des Jobs nicht mehr auftreten.
+
 ## S4a — Redis-Occupancy, Hold und Scheduling
 
 ### Vertrag
@@ -103,17 +120,23 @@ ARQ-Slot mit dem Training.
    vor. Der neue All-held-Ausgang setzt niemals einen Fehler; er führt in den
    Defer-Pfad. Der Wait-Pfad setzt `Job.queue_reason` auf `Waiting for LoRA
    training on this GPU.` und löscht ihn bei Admit, echtem Fehler oder Cancel.
-6. Generate wählt/admittiert vor dem heutigen ersten
+6. Generate wählt/admittiert **einmal pro Job** vor dem heutigen ersten
    `_update_job(..., RUNNING)` in `run_generation_job()` und vor dem
-   arbeitsintensiven Aufbau. `AllWorkersHeld` setzt den Grund, enqueuet
-   `JobFunction.GENERATE` mit den vollständigen ursprünglichen Argumenten und
-   `_queue_name=ARQ_MUSIC_QUEUE_NAME, _defer_by=GPU_HOLD_POLL_INTERVAL_SECONDS`
-   (ohne `_job_id`) und kehrt zurück. Der neue Umschlag gibt den ARQ-Slot frei;
-   der DB-Job bleibt `queued`. Nur ein erfolgreicher Lua-Admit erhöht atomar
-   den Queue-Zähler und erlaubt anschließend `RUNNING`; ein wirklich leerer
-   Online-Pool folgt weiterhin dem bestehenden `NoCapacityError`-Fehlerpfad.
-   `music_max_jobs` und `arq_job_timeout` gelten damit nur für echte Arbeit,
-   nicht für Hold-Warten.
+   arbeitsintensiven Aufbau. Der atomare Lua-Admit erhöht die Queue-Occupancy
+   einmal vor dem `for i in range(count)`-Loop; dieselbe Occupancy bleibt für
+   alle Takes bestehen und wird im finalen Cleanup erst nach dem letzten Take
+   bzw. bei Abbruch einmalig freigegeben. Es gibt kein `DECR` zwischen Takes,
+   sodass ein gleichzeitig wartendes LoRA-Training nicht zwischen Take 1 und
+   Take 2 reservieren kann. `AllWorkersHeld` oder ein Lua-Admit-409 **vor dem
+   ersten `RUNNING`** setzt den Grund, enqueuet `JobFunction.GENERATE` mit den
+   vollständigen ursprünglichen Argumenten und
+   `_queue_name=ARQ_MUSIC_QUEUE_NAME,
+   _defer_by=GPU_HOLD_POLL_INTERVAL_SECONDS` (ohne `_job_id`) und kehrt
+   nichtfehlerhaft zurück; der DB-Job bleibt `queued`. Nach erfolgreichem
+   Serien-Admit kann ein Admit-Konflikt im selben Job nicht mehr auftreten.
+   Ein wirklich leerer Online-Pool folgt weiterhin dem bestehenden
+   `NoCapacityError`-Fehlerpfad. `music_max_jobs` und `arq_job_timeout` gelten
+   damit nur für echte Arbeit, nicht für Hold-Warten.
 
 ### Dateien und Umsetzung
 
@@ -131,10 +154,14 @@ ARQ-Slot mit dem Training.
   Reserve/Renew/Release-Endpoints, tokengebundenes `train_lora`, 409-Generate,
   Startup-DEL und Worker-Renewal nur während des gebundenen Tasks.
 - `src/songmaker_cli/jobs/lora_training.py`, `jobs/generation.py`,
-  `music_worker.py`, `constants.py`: queued Drain und Generate-Defer als
+  `music_worker.py`, `constants.py`: `GPU_HOLD_POLL_INTERVAL_SECONDS = 5`
+  Sekunden wird als Konstante im `constants.py`-Owner definiert (belegt durch
+  die 5-s-Heartbeat-Kadenz); queued Drain und Generate-Defer als
   frische `enqueue_job(..., _defer_by=...)`-Umschläge, nie als `Retry`;
   Token-Handover mit parallelem Job-Renewal über `load_model`, Worker-Renewal
-  nur für den gebundenen Train-Task, und Admit-vor-RUNNING. Der LoRA-Defer ist
+  nur für den gebundenen Train-Task, und Admit-vor-RUNNING. Generate hält eine
+  Queue-Occupancy über die ganze `count`-Serie und gibt sie nur im finalen
+  Cleanup frei; ein Admit-409 vor RUNNING ist ein Defer. Der LoRA-Defer ist
   vor der heutigen `_update_job(..., RUNNING)` und `_materialize_dataset`, der
   Generate-Defer vor der heutigen Zeile 701; #479s eigene Uhren bleiben dort.
 - `src/songmaker_cli/db/models.py`, `db/migrations/versions/*`,
@@ -165,7 +192,12 @@ ARQ-Slot mit dem Training.
   `asyncio.sleep` noch `Retry`, keinen belegten ARQ-Slot und keinen
   `arq_job_timeout`/`max_tries`-Abbruch. Der Ein-GPU-Hold lässt Generate
   `queued` (nicht `FAILED`) und startet sie nach Release; beide Jobarten werden
-  erst nach erfolgreichem Admit/Reserve `RUNNING`.
+  erst nach erfolgreichem Admit/Reserve `RUNNING`. Ein Job mit `count=3` hält
+  dabei eine einzige Queue-Occupancy vom Serien-Admit bis zum finalen Cleanup:
+  ein gleichzeitig wartendes Training wird zwischen den Takes nicht
+  zugelassen und startet erst nach dem dritten Take. Ein Lua-Admit-409 vor dem
+  ersten `RUNNING` bleibt ebenfalls `queued` und erzeugt einen neuen Defer-
+  Umschlag statt `FAILED`/`PARTIAL`.
 - Done when: alle sechs Vertragssätze, einschließlich Ein-GPU-Fall, sind an
   realen Grenzstellen bewiesen; der Reaper, `worker_liveness.py`, Cache-Schutz
   und #479s Konfiguration sind unverändert.
@@ -223,3 +255,6 @@ ARQ-Slot mit dem Training.
 8. Einarbeitet: fakeredis/eval- und Lifecycle-/Defer-Testmatrix (S4a Tests).
 9. Einarbeitet: beide genannten Doku-Deltas je Scheibe.
 10. Einarbeitet: exakte Queue-/Drain-Definition in „Grenzen“ und S4a 4.
+11. Einarbeitet: Mehrfach-Takes halten eine Occupancy über die gesamte Serie;
+    Admit-409 vor `RUNNING` ist Defer. Codebeleg und Vertragstest stehen in
+    „Grenzen“, S4a 6 und den S4a-Tests.
