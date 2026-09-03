@@ -48,6 +48,7 @@ from songmaker_cli.constants import (
     ACESTEP_SSE_READ_TIMEOUT_SECONDS,
     GENERATE_LOAD_MODEL_TIMEOUT_SECONDS,
     GENERATE_SUBMIT_TIMEOUT_SECONDS,
+    JOB_ERROR_WORKER_STREAM_SILENT,
 )
 from songmaker_cli.db.queries import list_worker_identities
 from songmaker_cli.internal_api import INTERNAL_TOKEN_HEADER
@@ -57,7 +58,7 @@ log = logging.getLogger(__name__)
 
 ProgressCallback = Callable[[float], Awaitable[None] | None]
 HeartbeatCallback = Callable[[], Awaitable[None] | None]
-WORKER_STREAM_WENT_SILENT = "Worker stream went silent"
+WORKER_STREAM_WENT_SILENT = JOB_ERROR_WORKER_STREAM_SILENT
 
 
 class NoCapacityError(RuntimeError):

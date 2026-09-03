@@ -304,12 +304,12 @@ All responses include:
 
 ## Error Handling
 
-- **Job errors**: Sanitized before storing in DB. Internal exception details logged server-side only; clients see generic messages like "Internal error during processing".
-- **API errors**: HTTPException messages on ordinary validation paths are human-readable strings with no internal paths or stack traces (`settings_api.py:463-467`, `chat_api.py:266-269`); the model-catalog failure path is an exception tracked in #476 (`settings_api.py:577-578,658-659`).
-- **Validation errors**: Custom `RequestValidationError` handler returns only affected field names, not full Pydantic error details (constraints, expected types, internal schema).
-- **ACE-Step errors**: `_sanitize_error` maps known exception types to fixed messages, but passes `WorkerGenerationFailed` through verbatim (`jobs/_runtime.py:26-59`); this sanitization gap is tracked as #327 Finding 9.
-- **Claude CLI errors**: Chat paths log the exit code and stderr length, not stderr itself (`claude/provider.py:297-305,1829-1835,1889-1895`). The live co-writer emits an SSE event with `status: 503` and `<provider> is currently unavailable` on an otherwise HTTP 200 response (`conversation_api.py:556-564,620-625`), while the legacy chat endpoint returns HTTP 503 with `Claude is currently unavailable` (`chat_api.py:266-269`). The model catalog remains a gap: `list_cli_model_aliases` includes CLI stderr in its exception (`claude/provider.py:550-553`), which reaches `models_errors` on settings GET and can become the HTTP 503 detail on settings PUT (`cowriter/catalog.py:155-170,428-440`; `settings_api.py:485-503,570-578,605-622,651-659`); see #476.
-- **OpenAPI/docs**: Disabled (`docs_url=None, redoc_url=None, openapi_url=None`).
+- **Generation and scoring job errors**: `_sanitize_error` returns fixed musician-facing messages and logs raw failures with the job ID only on the server; generation and scoring store that returned message in `job.error` (`jobs/_runtime.py:53-67`; `jobs/generation.py:473-483`; `jobs/scoring.py:194-213`).
+- **API errors**: HTTPException messages on ordinary validation paths are human-readable strings with no internal paths or stack traces (`settings_api.py:463-467`, `chat_api.py:266-269`); the model-catalog failure path now uses a fixed message (`settings_api.py:577-578,658-659`; #476 closed).
+- **Validation errors**: The custom `RequestValidationError` handler returns only affected field names, not full Pydantic error details (constraints, expected types, internal schema) (`server.py:273-290`).
+- **ACE-Step errors**: Worker failures reach the same fixed-message sanitizer before the generation job persists `job.error` (`jobs/generation.py:469-480`; `jobs/_runtime.py:46-59`).
+- **Claude CLI errors**: Chat paths log the exit code and stderr length, not stderr itself (`claude/provider.py:297-305,1829-1835,1889-1895`). The live co-writer emits an SSE event with `status: 503` and `<provider> is currently unavailable` on an otherwise HTTP 200 response (`conversation_api.py:556-564,620-625`), while the legacy chat endpoint returns HTTP 503 with `Claude is currently unavailable` (`chat_api.py:266-269`). The model catalog uses a fixed response after #476 closed (`claude/provider.py:550-553`; `cowriter/catalog.py:155-170,428-440`; `settings_api.py:485-503,570-578,605-622,651-659`).
+- **OpenAPI/docs**: Disabled (`server.py:167`).
 
 ## Request Size Limits
 
