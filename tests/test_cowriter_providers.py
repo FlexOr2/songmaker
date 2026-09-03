@@ -292,6 +292,26 @@ def test_model_must_be_in_the_live_catalog(admin_client, every_provider_is_confi
     assert ok.json()["model"] == "grok-4.6"
 
 
+def test_codex_cli_catalog_is_returned_and_can_be_saved(admin_client, monkeypatch):
+    client, _ = admin_client
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "songmaker_cli.cowriter.catalog.codex_cli_access_token_is_present", lambda: True,
+    )
+    refresh_provider_snapshots()
+
+    settings = client.get("/api/settings/cowriter")
+
+    assert settings.status_code == 200
+    assert settings.json()["models_by_provider"]["codex"] == ["gpt-5.4"]
+    assert settings.json()["models_sources"]["codex"] == "known models for the CLI route"
+    saved = client.put(
+        "/api/settings/cowriter", json={"provider": "codex", "model": "gpt-5.4"},
+    )
+    assert saved.status_code == 200
+    assert saved.json()["provider"] == "codex"
+
+
 def test_cowriter_rejects_unknown_and_cross_provider_models_before_and_after_saving(
     admin_client, every_provider_is_configured,
 ):
