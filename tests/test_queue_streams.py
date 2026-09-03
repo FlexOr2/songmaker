@@ -545,6 +545,43 @@ def test_shared_playlist_queue_stream_snapshot_and_audio(
 
 
 @pytest.mark.parametrize(
+    ("share_endpoint", "stream_endpoint"),
+    [
+        ("/api/albums/a1/share", "/shared/{slug}/stream"),
+        ("/api/playlists/pl1/share", "/shared/playlist/{slug}/stream"),
+    ],
+)
+def test_shared_stream_manifests_only_playable_takes(
+    tmp_path: Path,
+    monkeypatch,
+    share_endpoint: str,
+    stream_endpoint: str,
+) -> None:
+    _patch_audio_build(monkeypatch)
+    client, factory = make_test_app(tmp_path, seed_db=_seed_queue_data)
+    _write_audio_files(tmp_path)
+    login_and_csrf(client, "owner", "pass1234")
+
+    with factory() as session:
+        archived = session.get(Generation, "g1")
+        assert archived is not None
+        archived.is_archived = True
+        session.add(PlaylistEntry(
+            id="pe3", playlist_id="pl1", generation_id="g2", position=2,
+        ))
+        session.commit()
+
+    slug = client.post(share_endpoint).json()["share_slug"]
+    public = TestClient(client.app, cookies={})
+    response = public.post(stream_endpoint.format(slug=slug))
+
+    assert response.status_code == 200
+    tracks = response.json()["tracks"]
+    assert {track["generation_id"] for track in tracks} == {"g2"}
+    assert all(public.get(track["audio_url"]).status_code == 200 for track in tracks)
+
+
+@pytest.mark.parametrize(
     ("share_endpoint", "stream_url"),
     [
         ("/api/albums/a1/share", "/shared/{slug}/stream"),
@@ -617,6 +654,31 @@ def test_shared_playlist_queue_stream_revalidates_entries(
     audio = public.get(data["stream_url"], headers={"Range": "bytes=0-3"})
 
     assert audio.status_code == 404
+
+
+def test_shared_playlist_queue_stream_revalidates_archived_takes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_audio_build(monkeypatch)
+    client, factory = make_test_app(tmp_path, seed_db=_seed_queue_data)
+    _write_audio_files(tmp_path)
+    login_and_csrf(client, "owner", "pass1234")
+    slug = client.post("/api/playlists/pl1/share").json()["share_slug"]
+    public = TestClient(client.app, cookies={})
+
+    response = public.post(f"/shared/playlist/{slug}/stream")
+    assert response.status_code == 200
+    manifest = response.json()
+
+    with factory() as session:
+        generation = session.get(Generation, "g1")
+        assert generation is not None
+        generation.is_archived = True
+        session.commit()
+
+    assert public.get(manifest["tracks"][0]["audio_url"]).status_code == 404
+    assert public.get(manifest["stream_url"]).status_code == 404
 
 
 def test_queue_stream_cache_quota_keeps_new_snapshot(
