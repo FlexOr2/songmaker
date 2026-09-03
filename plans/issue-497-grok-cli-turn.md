@@ -55,20 +55,27 @@ Sicherheitsrahmen: #321; Sicherheits-Owner: `docs/security.md`.
    `--prompt-file` allein ist Single-Turn, daher ist `-p` verboten. Der Runner
    startet Grok außerhalb des App-Trees (wie das Flag-Experiment in `/tmp`).
    Grok-spezifisch bleiben Flags und NDJSON-Parser; Gedanken-, Nutzungs- und
-   Signaturinhalte erreichen weder Chat noch Log. Grok übergibt
-   `stderr="devnull"`; stderr erreicht damit nie Chat oder Log.
+   Signaturinhalte erreichen weder Chat noch Log. Der Runner erfasst Grok-
+   `stderr` intern getrennt von stdout, ausschließlich für die
+   Fehlerklassifikation; sein Rohinhalt erreicht weder Chat, SSE/Exception
+   noch Log. Bei einem CLI-Fehler darf ein Log – wie bei Claude – nur
+   Returncode und stderr-Länge enthalten.
 4. **NDJSON-Vertrag und Werkzeug-Gate:** Jede Zeile muss UTF-8-JSON-Objekt
    mit String-`type` sein. Akzeptiert sind `text` mit String-`data` (wird
    `AssistantTextEvent`), `end` mit String-`stopReason` sowie korrekt
    geformte, ignorierte `thought`, `usage`, `available_commands` und
    `plan`-Beobachtungen. Ein `error` braucht String-`message` und ist kein
-   Beobachtungs-Event: ein `error`-Event oder unvollständiger Lauf mit
-   401/OIDC/`unauthenticated` wird
-   `ProviderUnavailableError("grok", "cli_login_expired")`; jeder andere
-   CLI-Fehler wird
-   `ProviderUnavailableError("grok", "grok_cli_error")`. Genau ein `end`
-   plus erfolgreicher vollständiger Runner-Abschluss erzeugt danach ein
-   `FinalEvent`. Ungültige Form, unbekannter Typ oder zweites `end` sind
+   Beobachtungs-Event. Enthält seine `message` **oder** das intern erfasste,
+   unstrukturierte stderr 401, OIDC oder `unauthenticated`, wirft der Adapter
+   `ProviderUnavailableError("grok", "cli_login_expired")`; jedes andere
+   `error`-Event und jeder andere CLI-Fehler wird
+   `ProviderUnavailableError("grok", "grok_cli_error")`. Die geprüften
+   Diagnosetexte werden dabei nie weitergegeben. Genau ein `end` plus
+   erfolgreicher vollständiger Runner-Abschluss erzeugt danach ein
+   `FinalEvent`; ein vollständiger oder unvollständiger Lauf ohne `end` ist
+   niemals erfolgreich, sondern derselbe benannte Fehler (`cli_login_expired`
+   bei Auth-Markierung, sonst `grok_cli_error`). Ungültige Form, unbekannter
+   Typ oder zweites `end` sind
    `ProviderUnavailableError("grok", "grok_cli_stream_protocol_error")`:
    Abbruch anfordern, reapen lassen, nie ein Finale. Jedes `tool_call` oder
    `tool_call_update` – auch mit sonst fehlerhafter Nutzlast – ist
@@ -110,10 +117,14 @@ Sicherheitsrahmen: #321; Sicherheits-Owner: `docs/security.md`.
   NDJSON wird Text plus genau ein Finale. `tool_call` und
   `tool_call_update` werfen `ProviderUnavailableError("grok", "<code>")`, reapen
   und liefern kein `FinalEvent`; ebenso ungültige/unklare Events, zwei `end`,
-  Timeout und Abbruch. `error` oder ein unvollständiger 401/OIDC-Lauf werden
+  Timeout und Abbruch. Ein NDJSON-`error` mit Auth-Markierung oder ein
+  unvollständiger Lauf mit 401/OIDC/`unauthenticated`-Markierung wird
   `ProviderUnavailableError("grok", "cli_login_expired")`, andere
-  Fehler `ProviderUnavailableError("grok", "grok_cli_error")`; kein
-  Secret- oder stderr-Leak.
+  `error`-Events, CLI-Fehler und ein Lauf ohne `end` werden
+  `ProviderUnavailableError("grok", "grok_cli_error")`. E2 deckt die
+  Mischform aus NDJSON-`error` und unstrukturierter stderr-401-Zeile ab: sie
+  endet als `cli_login_expired`, ohne dass ihr Inhalt in Chat, SSE/Exception
+  oder Logs erscheint (im Log höchstens Returncode und stderr-Länge).
 - `tests/test_cowriter_dispatch.py`: Ein nichtleeres `key`-Token im
   gemounteten `auth.json` geht Key vor; `{}`/fehlendes Token nimmt den Key,
   fehlende beide ergeben den benannten Fehler. Ein vorhandenes abgelaufenes
@@ -155,12 +166,18 @@ ist deshalb zwingend.
    eigene Prompt-Option ist; das Live-Gegenexperiment oben belegt ihre
    Unvereinbarkeit mit `--prompt-file`. Der Grok-Plan pinnt deshalb die
    vollständige Single-Turn-Argumentliste ohne `-p`.
-3. **NDJSON-Fehler und stderr:** `agent_cli.run_cli_bounded` trennt stdout
-   und stderr und unterstützt schon `stderr="devnull"`
-   (`src/songmaker_cli/agent_cli.py`); der neue Grok-Pfad nutzt das, statt
-   stderr weiterzureichen. `conversation_api.py` behandelt die vorhandene
-   `ProviderUnavailableError` bereits generisch als 503, daher bleibt die
-   Fehlersignatur zweistellig und der Code in der Exception/Log-Nachricht.
+3. **NDJSON-Fehler und stderr:** `agent_cli.run_cli_bounded` startet bei
+   `stderr="capture"` mit getrennten stdout-/stderr-Pipes und gibt beide
+   getrennt im `CliRunOutcome` zurück; `_combined_cli_output` fasst sie nur
+   für die Statusprobe zusammen (`src/songmaker_cli/agent_cli.py`). Der
+   Grok-Adapter darf diese Zusammenführung nicht verwenden: Er klassifiziert
+   die intern gehaltenen Diagnosen und verwirft ihren Text. Der bestehende
+   Claude-Fehlerpfad protokolliert bei nichtnull Returncode ausschließlich
+   `rc` und `len(stderr_bytes)` (`claude/provider.py`, ca. Zeilen 297–305);
+   Grok übernimmt genau diese Nicht-Leak-Regel. `conversation_api.py`
+   behandelt die vorhandene `ProviderUnavailableError` bereits generisch als
+   503, daher bleibt die Fehlersignatur zweistellig und der Code in der
+   Exception/Log-Nachricht.
 4. **Spawn und Flatten:** `run_cli_bounded` besitzt heute `read="all"` und
    `read="first_line"` sowie `Popen(..., env=scrubbed_env(),
    start_new_session=True)` und den Gruppen-Reap (`agent_cli.py`);
@@ -173,9 +190,10 @@ ist deshalb zwingend.
    `ProviderUnavailableError("grok", "<code>")`, nicht als umgebaute Klasse
    oder einzelnes Argument.
 
-**Abweichungen vom Review:** keine. Die aus dem Review zusätzlich abgeleitete
-Unterscheidung `{}`/fehlendes Token gegen vorhandenes abgelaufenes Token ist
-als Dispatch- und Testvertrag festgeschrieben.
+**Abweichungen vom zweiten Review:** keine. Die aus dem Review zusätzlich
+abgeleitete Unterscheidung `{}`/fehlendes Token gegen vorhandenes abgelaufenes
+Token ist als Dispatch- und Testvertrag festgeschrieben; die E2-Mischform
+NDJSON-`error` plus stderr-401 ist nun ebenfalls explizit abgenommen.
 
 ## Dateien
 
