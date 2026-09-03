@@ -1,107 +1,145 @@
 # #480 — GPU-Hold während LoRA-Training
 
-Leser: die Person, die S4 implementiert; Entscheidung: eine LoRA darf die GPU
-erst nach der vorhandenen Generierungsarbeit exklusiv nutzen, ohne wartende
-Musiker oder den Worker-Status anzulügen. Grundlage ist Ruling B in #480.
+Entscheidung: Ein ACE-Step-Worker lässt LoRA erst nach seinen bereits
+zugelassenen Generierungen exklusiv trainieren. Während des Holds bleibt jede
+nicht zugelassene Generierung ehrlich `queued`; sie teilt weder GPU noch
+ARQ-Slot mit dem Training.
 
-## Ein Owner, keine zweite Wahrheit
+## Grenzen und belegte Ausgangslage
 
-Der **ACE-Step-Worker** besitzt eine pro Worker in Redis abgelegte
-Training-Hold-Lease. Nur seine interne Reserve-/Train-Ausführung darf sie
-anlegen, verlängern oder mit ihrem Token freigeben. Der Scheduler ist Leser und
-Zulasser, nicht zweiter Besitzer: Heartbeat und `/loaded_models` spiegeln
-dieselbe Lease nur. Das ist belastbarer als ein Scheduler-Flag: Der Worker weiß
-auch nach einem verlorenen SSE-Consumer, ob sein Subprozess noch trainiert.
-`ModelCache.acquire_for_use()` bleibt Eviction-Schutz; es wird nicht als Lock
-umdefiniert.
+- Redis ist Owner der Occupancy. Der neue Hold ist
+  `songmaker:acestep:hold:{worker_id}`; Heartbeat, `/loaded_models`, Admin und
+  UI sind ausschließlich Projektionen. Kein Flag im Heartbeat-JSON und kein
+  fusionierter Queue-/Hold-Key: `publish_once()` überschreibt das JSON alle 5 s
+  (`src/acestep_worker/heartbeat.py:54-58`), der Queue-Key ist ein Integer
+  ohne TTL (`src/songmaker_cli/acestep_state.py:76-87`).
+- Es gibt keinen zweiten Reaper und keine S3-Timeränderung. Der einzige
+  periodische Job-Reaper ist `stale_job_reaper_loop`
+  (`src/songmaker_cli/lifecycle.py:434-437`); `ModelCache.acquire_for_use()`
+  bleibt allein Eviction-Schutz (`src/acestep_worker/model_cache.py:208-215`).
+- „Queue leer“ vor dem Training heißt exakt `queue_depth` des gewählten
+  Workers ist 0; DB-/ARQ-queued Generierungen zählen nicht. Danach wartet nur
+  eine Generate ohne erfolgreiches Admit.
+- S4a baut nach #479, weil es dessen stabilen LoRA-Langläufervertrag konsumiert,
+  ohne Zeitgrenzen, Heartbeat-Kadenz oder Epochen zu kopieren. S4b baut nach
+  S4a und #481, weil #481 die Queued-Flächen in `SongDetailView`/`TakesList`
+  verändert; es übernimmt deren gelandete Beschriftung statt sie zu duplizieren.
 
-Die Lease enthält eine nicht erratbare Inhaberkennung und hat eine kurze,
-worker-seitig erneuerte TTL, abgeleitet von der bestehenden Heartbeat-Expiry
-(heute 15 s). Beim Worker-Neustart wird sie zusammen mit dem bereits bereinigten
-Queue-Zähler gelöscht. TTL ist nur das Netz für Prozessverlust, keine zweite
-Trainings-Zeitgrenze.
+## S4a — Redis-Occupancy, Hold und Scheduling
 
-## Ablauf
+### Vertrag
 
-1. Das LoRA-Job wählt nach der vorhandenen Pool-Politik einen Online-Worker;
-   es lädt noch kein Modell und startet noch kein Training. Es ruft dafür einen
-   neuen authentisierten Worker-Reserve-Schritt **vor** `/load_model` und
-   `/tasks/train_lora` auf; der heutige Train-Endpunkt käme dafür zu spät.
-2. Der Job fragt diese Reservierung periodisch ab. Der Worker führt eine
-   Redis-atomare Operation aus: nur wenn seine `queue_depth` null und keine
-   Hold-Lease existiert, setzt er die Lease und gibt deren Token zurück. Die
-   Generation-Zulassung benutzt denselben atomaren Schlüssel: entweder erhöht
-   sie zuerst den Queue-Zähler (dann kann Reservierung nicht gewinnen), oder
-   die Reservierung gewinnt zuerst (dann bleibt die Generation ohne INCR in
-   Wartestellung). Damit gibt es kein Check-then-act-Fenster.
-3. Polling (kein Pub/Sub) ist absichtlich: Redis hat heute kein zuverlässiges
-   Frei-Ereignis, und ein kurzer benannter Poll-Intervall bleibt nach einem
-   verlorenen Wake-up korrekt. Die Drain-Wartezeit ist genau die vorhandene
-   `STALE_JOB_THRESHOLDS[JobType.LORA_TRAINING].queued_seconds`-Grenze (heute
-   1100 s), kein S4-Timeout. Läuft sie aus, werden LoRA und Job mit „Generation
-   queue did not drain before LoRA training could start“ fehlgeschlagen, ohne
-   Lease; Generierungen laufen weiter. #479 behält seine getrennte Grenze und
-   Heartbeat-Kadenz für einen bereits gestarteten Langläufer.
-4. Nach Reservierung lädt der Job das Modell, übergibt den Token an
-   `/tasks/train_lora` und konsumiert dessen Stream. Der Worker hält die Lease
-   während Load und Task, erneuert sie lokal und gibt sie im `finally` bei Erfolg,
-   Workerfehler oder Abbruch frei. Scheitert der Übergang davor, gibt der Job
-   ausschließlich mit seinem Token frei. Ein Neustart löscht die alte Lease;
-   falls er ohne sauberen Start verschwindet, verfällt sie.
-5. Die Generation-Zulassung überspringt gehaltene Worker zugunsten anderer
-   Kandidaten. Ist der gewählte Worker gehalten (oder der einzige), bleibt der
-   Job `queued`, bis die atomare Zulassung gelingt; erst dann wird er `running`.
-   Er erhält im bestehenden Job-Stream ein neues, nicht terminales
-   `queue_reason`-Feld: `Waiting for LoRA training on this GPU.` Die UI zeigt
-   diesen Grund neben dem vorhandenen Queued-Label/der Position, nicht im
-   Fehlerfeld. Nach Zulassung wird der Grund gelöscht.
+1. Reserve gewinnt nur atomar, wenn der Queue-Zähler des Workers fehlt oder 0
+   und kein Hold besteht. Admit gewinnt nur atomar, wenn kein Hold besteht;
+   es erhöht dann den Queue-Zähler. Zwei konkurrierende Aufrufe können nicht
+   beide gewinnen.
+2. `POST /gpu_hold/reserve` liefert `{token}` oder 409; `renew` und `release`
+   akzeptieren nur denselben Token. Der Hold-Key enthält den nicht erratbaren
+   Token, hat `EX = HeartbeatLoop`-TTL (heute 15 s), und jede Erneuerung hat
+   die bestehende 5-s-Heartbeat-Kadenz (also strikt unter TTL).
+3. Vor dem gebundenen Worker-Task erneuert nur der LoRA-Job seinen Hold (sein
+   Tod lässt die TTL räumen). Ab Load/`train_lora` erneuert der Worker bis
+   `finally`; `TrainLoraRequest.hold_token` ist Pflicht und ein alter Token
+   nach Restart darf weder renewen noch Training starten. Worker-Startup löscht
+   Queue- **und** Hold-Key; `/generate` liefert bei Hold 409.
+4. Solange Reserve 409 liefert, bleibt LoRA `queued` und pollt begrenzt bis
+   `STALE_JOB_THRESHOLDS[JobType.LORA_TRAINING].queued_seconds`; dann schlägt
+   sie ohne Lease mit `Generation queue did not drain before LoRA training
+   could start` fehl. Sie wird erst nach Reserve `running`; kein 1100-s-Wait
+   ohne Heartbeat im bestehenden 300-s-RUNNING-Reaperfenster.
+5. `pick_worker` liest den Hold-Key, nicht den 5-s-Heartbeat-Spiegel: freie
+   Online-Worker gehen vor, alle gehaltenen Worker deferieren Generate. Der
+   Wait-Pfad setzt `Job.queue_reason` auf `Waiting for LoRA training on this
+   GPU.` und löscht ihn bei Admit, Fehler oder Cancel.
+6. Generate bleibt bis erfolgreiches Lua-Admit in der DB `queued`. Bei Hold
+   setzt der ARQ-Lauf den Grund, deferiert/re-enqueuet mit
+   `GPU_HOLD_POLL_INTERVAL_SECONDS` (5 s) und gibt den Slot frei; erst nach
+   erfolgreichem INCR wird er `running`. `music_max_jobs` und
+   `arq_job_timeout` gelten damit nur für echte Arbeit, nicht für Hold-Warten.
 
-Bei genau einem GPU-Worker bedeutet die Lease folgerichtig: jede neue
-Generierung bleibt mit diesem Queued-Grund sichtbar stehen, bis das Training
-endet; sie wird nicht als laufende Generierung oder als kaputte GPU dargestellt.
+### Dateien und Umsetzung
 
-## Beobachtung und Wiederherstellung
+- `src/songmaker_cli/acestep_state.py`, `scheduler.py`: gleicher Lua-Text über
+  Queue- und Hold-Key für Admit/Reserve/Renew/Release; Scheduler ist Zulasser,
+  kein Hold-Owner, und `pick_worker` filtert den Redis-Hold. Ein Gleichheitstest
+  sichert den paketübergreifenden Key-/Script-Vertrag.
+- `src/acestep_worker/heartbeat.py`, `wrapper.py`, `models.py`: Hold-Key,
+  Reserve/Renew/Release-Endpoints, tokengebundenes `train_lora`, 409-Generate,
+  Startup-DEL und Worker-Renewal während Load/Task.
+- `src/songmaker_cli/jobs/lora_training.py`, `jobs/generation.py`,
+  `music_worker.py`, `constants.py`: queued Drain, Token-Übergabe,
+  Admit-vor-RUNNING und benanntes ARQ-Defer; #479s eigene Uhren bleiben dort.
+- `src/songmaker_cli/db/models.py`, `db/migrations/versions/*`,
+  `db/queries/jobs.py`, `api_models/__init__.py` und `scripts/generate_types.py`:
+  nullable `Job.queue_reason`, Migration, `JobResponse` und Frontend-Typ.
+- `docs/acestep.md`: Redis-Tabelle ergänzt Hold-Key und 15-s-TTL: Worker/HTTP
+  mutiert allein den Hold, der Scheduler führt den Generate-Admit aus und
+  mutiert damit den Queue-Zähler. `docs/architecture.md`: Generate-Flow sagt:
+  Lua-Admit führt INCR atomar aus; Hold → queued Defer, erst danach RUNNING.
 
-`build_state_payload()` und `/loaded_models` liefern zusätzlich den aktiven
-Training-Hold (mindestens „LoRA training“, sinnvollerweise ohne fremde Daten).
-Die Admin-/Pool-Projektion übernimmt ihn als Anzeige, nicht als Owner.
-`worker_is_online()` bleibt GPU-/Heartbeat-Liveness und wird durch „training“
-nicht zu offline; der Scheduler benutzt die Lease für Kapazität.
+### Tests und Done when
 
-Es kommt kein Reaper hinzu: Der vorhandene Job-Reaper arbeitet weiter mit
-Job-Heartbeats und den bestehenden Liveness-Signalen. #479 hält während eines
-echten Trainings dessen Job-Heartbeat frisch. Fehlt der Worker-Heartbeat nach
-Restart/Crash, greifen dessen TTL, die bestehende Restart-Grace und die normale
-Terminalisierung/Reconciliation; die Worker-Startup-Bereinigung entfernt die
-Lease sofort. S4 ändert weder Reaper-Takt noch Liveness-Policy.
+- `tests/test_acestep_state.py` und `tests/test_scheduler.py`: Occupancy gegen
+  `fakeredis`/`eval`, nicht gegen das eval-lose `_InMemoryRedis`: beide
+  Rennreihenfolgen, Token-Mismatch, TTL, Multi-Worker-Skip und kein INCR bei
+  Hold.
+- `tests/test_acestep_worker_train_lora.py`, `tests/acestep_worker/test_heartbeat.py`
+  und `test_wrapper.py`: Reserve/Renew/Release, Startup-DEL, alter Token,
+  `/generate` 409 sowie Release bei Erfolg, Fehler und Cancel.
+- `tests/test_jobs_lora_training.py`, `tests/test_jobs.py`,
+  `test_lifecycle_job_reaper.py` und `test_music_worker.py`: queued Drain
+  überlebt den Reaper, Job-Tod räumt per TTL, Generate deferiert slotfrei und
+  wird erst nach Admit RUNNING.
+- Done when: alle sechs Vertragssätze, einschließlich Ein-GPU-Fall, sind an
+  realen Grenzstellen bewiesen; der Reaper, `worker_liveness.py`, Cache-Schutz
+  und #479s Konfiguration sind unverändert.
 
-## Tests nach Vertrag
+## S4b — Sichtbarkeit ist eine Projektion
 
-| Vertragssatz | Beweis |
-|---|---|
-| Training beginnt nicht vor leerer Queue | Scheduler-/LoRA-Test mit kontrolliertem Redis: Reserve scheitert bei Tiefe >0, erst Decrement lässt `/load_model` und Train-Aufruf zu. |
-| Keine Generation teilt die GPU danach | Paralleltest: Hold gesetzt → Zulassung hält Generation `queued` mit `queue_reason`; Release startet sie und leert den Grund. |
-| Jede Freigabe ist sicher | Erfolg, Worker-Fehler, Cancellation vor/nach Task und Worker-Startup/TTL prüfen tokengebundene Freigabe bzw. Bereinigung. |
-| Status ist ehrlich | Worker-Test prüft Hold in Heartbeat und `/loaded_models`; API-/Svelte-Test prüft Queued-Label mit Grund, im Ein-Worker-Fall ohne „running“. |
-| Reaper erfindet keinen zweiten Zustand | Liveness-/Lifecycle-Test: Training-Heartbeat bleibt #479 überlassen; verschwundener Worker folgt der vorhandenen Grace/Reconciliation und die Hold-Lease blockiert nicht weiter. |
+### Vertrag
 
-Vorhandene Fakes: `tests/test_scheduler.py` hat `_InMemoryRedis` mit
-get/set/incr/decr und Worker-DB-Seeding; `tests/test_acestep_state.py`,
-`tests/acestep_worker/test_heartbeat.py` sowie
-`tests/test_acestep_worker_train_lora.py` nutzen `fakeredis`/`FakeAsyncRedis`.
-Die Worker-Endpoint-Tests besitzen bereits einen blockierbaren Train-Runner;
-die Job-Tests patchen `pick_worker`, HTTP und `_iterate_task_events`.
+1. Der Job-Stream liefert bei jedem sichtbaren Wechsel `queue_reason` **und**
+   `queue_position`; ein Grundwechsel bei weiterem `queued` wird emittiert.
+2. `SongDetailView` zeigt den Grund neben dem gelandeten Queued-Label und der
+   Position, niemals als Fehler. Ein gehaltener Worker bleibt online; das
+   Pool-/Admin-Bild sagt Hold/LoRA-Training statt fälschlich Idle.
+3. Keine Sichtbarkeitsfläche schreibt, verlängert oder räumt Redis. Fehlt die
+   Projektion, bleibt die Redis-Entscheidung korrekt.
 
-## Geplante Grenzen
+### Dateien und Umsetzung
 
-Anfassen: Scheduler-/Redis-Zulassung und Generation-Statusübergang
-(`src/songmaker_cli/scheduler.py`, `acestep_state.py`, `jobs/generation.py`),
-LoRA-Reservierung (`jobs/lora_training.py`), Worker-Lease/Projektion und API
-(`acestep_worker/wrapper.py`, `heartbeat.py`, `models.py`), Job-Response/
-Migration und Queued-Anzeige (`db`, `api_models`, `jobs_api`, Frontend) sowie
-die oben genannten gezielten Tests und die zwei Worker-Pool-Dokus.
+- `src/songmaker_cli/jobs_api.py`, `api_models/__init__.py`,
+  `db/queries/jobs.py`, `scripts/generate_types.py`: Stream-Snapshot trägt
+  Position und Grund, und dessen Dirty-Check beobachtet beide Felder.
+- `frontend/src/lib/components/SongDetailView.svelte`,
+  `editor/TakesList.svelte` und ihre Tests: Queued-Grund neben Label/Position.
+- `src/acestep_worker/wrapper.py`, `src/songmaker_cli/api_models/workers.py`,
+  `admin_api.py`, `frontend/src/lib/components/WorkerPoolPanel.svelte` und
+  Tests: `training_hold` nur spiegeln; `_derive_worker_status` bleibt online.
+- `docs/acestep.md`: Redis-Tabelle kennzeichnet Heartbeat/Admin als
+  Hold-Projektion. `docs/architecture.md`: Generate-Flow unterscheidet Redis-
+  Entscheidung von Stream/UI-Projektion.
 
-Bewusst nicht: kein neuer Reaper, keine Änderung von `worker_liveness.py` oder
-der Cache-Eviction-Semantik, kein Scheduler-Parallel-Owner und keine zweite
-Zeitgrenze/Heartbeat-Kadenz/Epochen-Konfiguration. S3 #479 baut diese Grenzen
-parallel; S4 konsumiert ihr Ergebnis statt es zu kopieren.
+### Tests und Done when
+
+- `tests/test_jobs_api.py` beweist Position+Grund im initialen und folgenden
+  SSE-Ereignis ohne Statuswechsel; `tests/test_generate_types.py` sichert den
+  generierten Vertrag.
+- `SongDetailView.test.ts`, `TakesList.test.ts`, `WorkerPoolPanel.test.ts` und
+  Worker/Admin-Tests beweisen Queued-Text, Position, Hold statt Idle und online
+  statt offline.
+- Done when: ein Ein-GPU-Hold ist über Stream, Song-Detail und Pool/Admin
+  ehrlich sichtbar, während S4a weiterhin allein die Redis-Wahrheit besitzt.
+
+## Review-Auflösung 1–10
+
+1. Einarbeitet: Zwei-Key-Lua, Token/TTL und kein JSON-/Key-Merge (S4a 1–2).
+2. Einarbeitet: Reserve/Renew/Release, Token-Prüfung, 409 und Startup-DEL (S4a 3).
+3. Einarbeitet: Phasengetrenntes Renew, TTL-Crashpfad und alter Token (S4a 3).
+4. Einarbeitet: queued ARQ-Defer, `GPU_HOLD_POLL_INTERVAL_SECONDS`, RUNNING nach INCR (S4a 6).
+5. Einarbeitet: queued LoRA-Drain mit vorhandener Grenze, keine S3-Uhr (S4a 4).
+6. Einarbeitet: persistenter einzelner Owner `Job.queue_reason` und Stream/UI (S4a 5; S4b 1–2).
+7. Einarbeitet: Redis-Hold-Filter, Ein-GPU- und Admin-Projektion (S4a 5; S4b 2).
+8. Einarbeitet: fakeredis/eval- und Lifecycle-/Defer-Testmatrix (S4a Tests).
+9. Einarbeitet: beide genannten Doku-Deltas je Scheibe.
+10. Einarbeitet: exakte Queue-/Drain-Definition in „Grenzen“ und S4a 4.
