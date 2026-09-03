@@ -2,6 +2,7 @@ import { writable, get } from 'svelte/store';
 import type { GenerationItem, GenerationParams, VersionGenerationParams } from '$lib/api/types';
 import { RECIPE_REPAINT_OFF_LABEL, TAKE_COVER_LABEL, TAKE_REPAINT_LABEL } from '$lib/constants';
 import { applyGenerationSettings, pinnedSeed } from '$lib/stores/editor';
+import { nowPlayingTakeLabel } from '$lib/constants/now-playing';
 
 export type SourceMode = 'repaint' | 'cover';
 export type RepaintMode = 'conservative' | 'balanced' | 'aggressive';
@@ -196,7 +197,10 @@ function paramsSubsetEqual(
 // side-effect free so it can be unit tested without mounting a component.
 export function recipeChips(input: RecipeChipInput): RecipeChip[] {
 	const sourceTake = input.sourceGeneration
-		? `${input.sourceGeneration.version_number === null ? '' : `v${input.sourceGeneration.version_number} · `}take ${input.sourceGeneration.generation_number}`
+		? nowPlayingTakeLabel(
+				input.sourceGeneration.version_number,
+				input.sourceGeneration.generation_number
+			)
 		: RECIPE_REPAINT_OFF_LABEL;
 	return [
 		{

@@ -500,8 +500,8 @@ describe('TakesList', () => {
 			const provenance = target.querySelector<HTMLElement>('#take-result .take-origin');
 
 			expect(provenance?.textContent?.trim()).toBe(label);
-			expect(provenance?.parentElement?.classList.contains('take-row')).toBe(true);
-			expect(provenance?.closest('.take-body')).toBeNull();
+			expect(provenance?.parentElement?.classList.contains('take-main')).toBe(true);
+			expect(provenance?.closest('.take-actions')).toBeNull();
 			expect(provenance?.querySelector('a')?.getAttribute('href')).toBe('#take-source');
 		}
 	);
@@ -535,7 +535,7 @@ describe('TakesList', () => {
 		await tick();
 		const row = target.querySelector<HTMLElement>('#take-result');
 
-		const provenance = row?.querySelector<HTMLButtonElement>('.take-origin');
+		const provenance = row?.querySelector<HTMLElement>('.take-origin');
 		expect(provenance?.querySelector('a')).toBeNull();
 		provenance?.click();
 		await tick();
@@ -545,7 +545,7 @@ describe('TakesList', () => {
 	it('plays the take and opens Now Playing on its play target click', async () => {
 		const { target } = await render();
 		const row = target.querySelector<HTMLElement>('.take-row');
-		row?.querySelector<HTMLElement>('.take-body')?.click();
+		row?.querySelector<HTMLElement>('.take-summary')?.click();
 		expect(playTakeAndShowNowPlaying).toHaveBeenCalledWith(
 			expect.objectContaining({ id: 'g1' }),
 			expect.objectContaining({ id: 's1' })
@@ -627,22 +627,22 @@ describe('TakesList', () => {
 		const { target } = await render();
 		const row = target.querySelector<HTMLElement>('.take-row');
 		if (!row) throw new Error('Expected a take row');
-		const body = row.querySelector<HTMLElement>('.take-body');
-		if (!body) throw new Error('Expected the take row body');
+		const main = row.querySelector<HTMLElement>('.take-main');
+		if (!main) throw new Error('Expected the take row main column');
 
-		expect(body.querySelector('.take-label')).not.toBeNull();
-		expect(body.querySelector('.take-duration')).not.toBeNull();
-		expect(body.querySelector('button')).toBeNull();
+		expect(main.querySelector('.take-label')).not.toBeNull();
+		expect(main.querySelector('.take-duration')).not.toBeNull();
+		expect(main.querySelector('button')).toBeNull();
 		expect(row.querySelector('.take-actions')?.parentElement).toBe(row);
 
 		// The model badge is another descriptive fact about the take, so it
 		// belongs in the body with the rest — never in take-actions, where a
 		// row too narrow to hold both wraps actions onto their own line
 		// instead of crowding a touch target (#163/2).
-		expect(body.querySelector('.model-badge')).not.toBeNull();
+		expect(main.querySelector('.model-badge')).not.toBeNull();
 		expect(row.querySelector('.take-actions')?.querySelector('.model-badge')).toBeNull();
 
-		body.click();
+		main.querySelector<HTMLElement>('.take-summary')?.click();
 		await tick();
 		expect(pick).not.toHaveBeenCalled();
 		expect(keep).not.toHaveBeenCalled();
@@ -722,9 +722,9 @@ describe('TakesList archived takes', () => {
 	it('stops announcing itself as a button while it cannot act', async () => {
 		const { target } = await renderWithArchived();
 		const [playable, archived] = Array.from(target.querySelectorAll<HTMLElement>('.take-row'));
-		expect(playable.querySelector('.take-body')?.getAttribute('role')).toBe('button');
-		expect(archived.querySelector('.take-body')?.getAttribute('role')).toBeNull();
-		expect(archived.querySelector('.take-body')?.getAttribute('tabindex')).toBeNull();
+		expect(playable.querySelector('.take-summary')?.getAttribute('role')).toBe('button');
+		expect(archived.querySelector('.take-summary')?.getAttribute('role')).toBeNull();
+		expect(archived.querySelector('.take-summary')?.getAttribute('tabindex')).toBeNull();
 	});
 
 	it('is a button again in selection mode, where ticking it still does something', async () => {
@@ -732,16 +732,16 @@ describe('TakesList archived takes', () => {
 		enterSelectionMode();
 		await tick();
 		const archived = target.querySelectorAll<HTMLElement>('.take-row')[1];
-		expect(archived.querySelector('.take-body')?.getAttribute('role')).toBe('button');
+		expect(archived.querySelector('.take-summary')?.getAttribute('role')).toBe('button');
 		expect(archived.querySelector('.take-action-btn')).toBeNull();
-		archived.querySelector<HTMLElement>('.take-body')?.click();
+		archived.querySelector<HTMLElement>('.take-summary')?.click();
 		await tick();
 		expect(get(selectedIds).has('g-arch')).toBe(true);
 	});
 
 	it('still plays a take that is not archived', async () => {
 		const { target } = await renderWithArchived();
-		target.querySelector<HTMLElement>('.take-row .take-body')?.click();
+		target.querySelector<HTMLElement>('.take-row .take-summary')?.click();
 		await tick();
 		expect(playTakeAndShowNowPlaying).toHaveBeenCalledWith(
 			expect.objectContaining({ id: 'g1' }),
