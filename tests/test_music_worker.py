@@ -3,7 +3,10 @@
 from __future__ import annotations
 
 import asyncio
+from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
+
+import pytest
 
 import songmaker_cli.music_worker as mw_mod
 from songmaker_cli.constants import AuditAction, JobStatus, JobType, LoraStatus
@@ -94,14 +97,22 @@ def test_generate_passes_repaint_params() -> None:
     assert kwargs["repaint_params"].repainting_end == 1.0
 
 
-def test_file_cleanup_cron_audits_orphans_and_expires_files() -> None:
+def test_cleanup_stale_cron_audits_orphans_and_expires_files() -> None:
     worker = _make_worker()
     worker.audit_orphaned_files = MagicMock()
 
-    with patch("songmaker_cli.cleanup.run_cleanup_expired") as mock_expired:
+    with (
+        patch.object(
+            MusicWorker.__mro__[1], "cleanup_stale_cron", new_callable=AsyncMock,
+            return_value=0,
+        ) as mock_base,
+        patch("songmaker_cli.cleanup.run_cleanup_expired") as mock_expired,
+    ):
         ctx = _mock_ctx()
-        _run(worker.cleanup_files_cron(ctx))
+        result = _run(worker.cleanup_stale_cron(ctx))
 
+    assert result == 0
+    mock_base.assert_awaited_once_with(ctx)
     worker.audit_orphaned_files.assert_called_once()
     mock_expired.assert_called_once()
 
@@ -134,22 +145,33 @@ def test_on_shutdown_disposes_db() -> None:
     worker._db_engine.dispose.assert_called_once()
 
 
-def test_startup_recovers_music_job_types_and_reconciles_lora_once(tmp_path) -> None:
+@pytest.mark.parametrize("recovery_path", ["startup", "cron"])
+def test_music_recovery_paths_reconcile_recovered_loras_once(tmp_path, recovery_path) -> None:
     factory = init_test_db(tmp_path / "songmaker.db")
     audio_dir = tmp_path / "audio"
     audio_dir.mkdir()
+    stale_heartbeat = datetime.now(timezone.utc) - timedelta(days=1)
     with factory() as session:
         session.add(User(id="u1", username="u1", password_hash="x"))
+        job_kwargs = (
+            {} if recovery_path == "startup" else {"heartbeat_at": stale_heartbeat}
+        )
         session.add_all([
-            Job(id="generate-1", type=JobType.GENERATE, status=JobStatus.RUNNING),
-            Job(id="lora-job-1", type=JobType.LORA_TRAINING, status=JobStatus.RUNNING),
+            Job(
+                id="generate-1", type=JobType.GENERATE,
+                status=JobStatus.RUNNING, **job_kwargs,
+            ),
+            Job(
+                id="lora-job-1", type=JobType.LORA_TRAINING,
+                status=JobStatus.RUNNING, **job_kwargs,
+            ),
             Job(
                 id="load-model-1", type=JobType.LOAD_MODEL_ON_WORKER,
-                status=JobStatus.RUNNING,
+                status=JobStatus.RUNNING, **job_kwargs,
             ),
             Job(
                 id="download-model-1", type=JobType.DOWNLOAD_MODEL_ON_WORKER,
-                status=JobStatus.RUNNING,
+                status=JobStatus.RUNNING, **job_kwargs,
             ),
             UserLora(
                 id="lora-1", user_id="u1", name="Lora", slug="lora",
@@ -164,8 +186,12 @@ def test_startup_recovers_music_job_types_and_reconciles_lora_once(tmp_path) -> 
     redis = AsyncMock()
     redis.set = AsyncMock(return_value=True)
 
-    with patch("songmaker_cli.logging_config.configure_logging"):
-        _run(worker.on_startup({"redis": redis}))
+    if recovery_path == "startup":
+        with patch("songmaker_cli.logging_config.configure_logging"):
+            _run(worker.on_startup({"redis": redis}))
+    else:
+        with patch("songmaker_cli.cleanup.run_cleanup_expired"):
+            _run(worker.cleanup_stale_cron({"redis": redis}))
 
     with factory() as session:
         generate = session.query(Job).filter_by(id="generate-1").one()
@@ -183,9 +209,12 @@ def test_startup_recovers_music_job_types_and_reconciles_lora_once(tmp_path) -> 
         JobType.LOAD_MODEL_ON_WORKER,
         JobType.DOWNLOAD_MODEL_ON_WORKER,
     )
+    expected_error_type = (
+        "server_restart" if recovery_path == "startup" else "heartbeat_lost"
+    )
     for job in (generate, lora_job, load_model, download_model):
         assert job.status == JobStatus.FAILED
-        assert job.error_type == "server_restart"
+        assert job.error_type == expected_error_type
     assert lora.status == LoraStatus.FAILED
     assert len(audits) == 1
 
@@ -247,7 +276,7 @@ def test_music_worker_settings_queue_name() -> None:
 def test_music_worker_settings_has_cron() -> None:
     from songmaker_cli.music_worker import MusicWorkerSettings
     names = {job.name for job in MusicWorkerSettings.cron_jobs}
-    assert "cron:MusicWorker.cleanup_files_cron" in names
+    assert "cron:MusicWorker.cleanup_stale_cron" in names
     assert "cron:MusicWorker.generation_retention_cron" in names
 
 
