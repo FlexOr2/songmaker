@@ -74,8 +74,8 @@ class WorkerGenerationFailed(WorkerTaskFailed):
 
     Its message is ACE-Step's own cause from an ``error`` event, or the
     scheduler's ``WORKER_STREAM_WENT_SILENT`` cause after ``httpx.ReadTimeout``.
-    The job layer stores it and the UI shows it verbatim, so every message must
-    be useful to an operator.
+    The job layer logs the raw cause and stores a fixed musician-facing message;
+    only the silent-stream cause keeps its dedicated fixed message.
     """
 
 

@@ -15,8 +15,11 @@ from songmaker_cli.constants import (
     JOB_ERROR_INTERNAL,
     JOB_ERROR_JUDGE_FAILED,
     JOB_ERROR_NO_WORKERS,
+    JOB_ERROR_REFERENCE_AUDIO_NOT_FOUND,
     JOB_ERROR_SERVER_UNREACHABLE,
+    JOB_ERROR_SONG_NOT_FOUND,
     JOB_ERROR_UNEXPECTED,
+    JOB_ERROR_VERSION_NOT_FOUND,
     JOB_ERROR_WORKER_GENERATION_FAILED,
     JOB_ERROR_WORKER_STREAM_SILENT,
     JOB_HEARTBEAT_INTERVAL_SECONDS,
@@ -41,6 +44,12 @@ _USER_FACING_ERRORS: tuple[tuple[type[Exception], str], ...] = (
     (RuntimeError, JOB_ERROR_INTERNAL),
 )
 
+_GENERATION_SETUP_MESSAGES: frozenset[str] = frozenset({
+    JOB_ERROR_SONG_NOT_FOUND,
+    JOB_ERROR_VERSION_NOT_FOUND,
+    JOB_ERROR_REFERENCE_AUDIO_NOT_FOUND,
+})
+
 
 class GenerationSetupError(Exception):
     pass
@@ -54,7 +63,9 @@ def _sanitize_error(exc: Exception, job_id: str) -> str:
     """Return the fixed musician-facing message and log the raw failure."""
     log.error("Job %s failed: %s", job_id, exc, exc_info=exc)
     if isinstance(exc, GenerationSetupError):
-        return str(exc)
+        if str(exc) in _GENERATION_SETUP_MESSAGES:
+            return str(exc)
+        return JOB_ERROR_UNEXPECTED
     if isinstance(exc, JudgeFailureError):
         if str(exc) == JUDGE_FAILURE_TIMEOUT:
             return str(exc)

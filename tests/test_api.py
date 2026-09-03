@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -3319,6 +3320,19 @@ def test_sanitize_error_generation_setup() -> None:
     from songmaker_cli.jobs import GenerationSetupError, _sanitize_error
 
     assert _sanitize_error(GenerationSetupError("Song not found"), "j1") == "Song not found"
+
+
+def test_sanitize_error_hides_unknown_generation_setup_details(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from songmaker_cli.jobs import GenerationSetupError, _sanitize_error
+
+    raw_error = "/srv/songmaker/private.db is unavailable"
+    with caplog.at_level(logging.ERROR, logger="songmaker_cli.jobs._runtime"):
+        message = _sanitize_error(GenerationSetupError(raw_error), "j1")
+
+    assert message == "An unexpected error occurred"
+    assert raw_error in caplog.text
 
 
 def test_chat_success_finalizes_job(client: TestClient) -> None:
