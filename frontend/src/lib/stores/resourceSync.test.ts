@@ -378,9 +378,21 @@ describe('resource sync interleavings', () => {
 describe('resource sync owner', () => {
 	it('bounds deferred events and remembered generation ids', async () => {
 		let loaded: string[] = [];
-		const { controller, sources, loadedWatch } = setup({
+		const newestSongId = `s-${RESOURCE_SYNC_TRACKED_EVENT_LIMIT + 1}`;
+		const oldestSongId = 's-1';
+		const seenSongId = 's-seen';
+		const { controller, sources, fetchCalls, loadedWatch } = setup({
 			listLoadedSongIds: () => loaded,
-			fetchSong: async (songId) => song({ id: songId, generations: [gen(`g-${songId}`)] })
+			fetchSong: async (songId) =>
+				song({
+					id: songId,
+					generations:
+						songId === seenSongId
+							? Array.from({ length: RESOURCE_SYNC_TRACKED_EVENT_LIMIT + 1 }, (_, index) =>
+									gen(`g-seen-${index + 1}`)
+								)
+							: [gen(`g-${songId}`)]
+				})
 		});
 		controller.start();
 		latestSource(sources).emit('hello', { high_water_mark: '0' });
@@ -396,13 +408,20 @@ describe('resource sync owner', () => {
 		await flush();
 		expect(controller.trackedSizes.deferred).toBe(RESOURCE_SYNC_TRACKED_EVENT_LIMIT);
 
-		loaded = Array.from(
-			{ length: RESOURCE_SYNC_TRACKED_EVENT_LIMIT + 1 },
-			(_, index) => `s-${index + 1}`
-		);
+		loaded = [newestSongId];
 		loadedWatch.notify?.();
-		for (let i = 0; i < 1000; i++) await Promise.resolve();
-		expect(controller.trackedSizes.deferred).toBe(0);
+		await flush();
+		expect(fetchCalls).toEqual([newestSongId]);
+
+		loaded = [newestSongId, oldestSongId];
+		loadedWatch.notify?.();
+		await flush();
+		expect(fetchCalls).toEqual([newestSongId]);
+
+		loaded = [seenSongId];
+		latestSource(sources).emit('generation.created', created('258', 'g-seen-trigger', seenSongId));
+		await flush();
+		expect(fetchCalls).toEqual([newestSongId, seenSongId]);
 		expect(controller.trackedSizes.seenGenerationIds).toBe(RESOURCE_SYNC_TRACKED_EVENT_LIMIT);
 	});
 
