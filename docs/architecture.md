@@ -768,9 +768,13 @@ it through the configured judge-provider call. Every configuration enforces a
 minimum five-second timeout because the Claude one-shot path may need that
 much for its tool-free CLI preflight; only that Claude path performs the
 tool-surface probe. Grok and Codex use the compatible API path directly.
-After the provider's answer budget, the caller may wait through the bounded
-cleanup margin (SIGTERM grace plus post-SIGKILL wait). The scorer watchdog has
-only a small final-safety headroom. A provider timeout is a judge failure:
+The five-second timeout is the provider floor; the bounded cleanup margin
+(SIGTERM grace plus post-SIGKILL wait) belongs only to the
+`agent_cli.run_cli_bounded` probe, while Grok/Codex use HTTP timeouts, the
+Claude API uses its SDK timeout, the Claude-CLI judge uses
+`subprocess.run(timeout)`, and the outer judge boundary is the Thread-Watchdog
+`timeout+1s` (`pipeline.py:223-229`). The scorer watchdog has only a small
+final-safety headroom. A provider timeout is a judge failure:
 child scores are retained, but the scoring job ends `partial` with
 `judge_error`, never `completed`.
 
