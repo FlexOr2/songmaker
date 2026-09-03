@@ -590,8 +590,8 @@ MCP-enabled CLI; Grok chooses its subscription CLI when the mounted
 its subscription CLI when the mounted `.codex/auth.json` contains a nonempty
 `tokens.access_token`, otherwise `OPENAI_API_KEY`. A selected Grok or Codex
 CLI failure remains on that path for the turn. Their adapters convert bounded
-CLI streams to chat events; the Codex adapter permits text-only JSONL events
-and rejects reported tool items before a final event.
+CLI streams to chat events; the Codex transport's security and stream-gate
+contract is documented in `docs/security.md`.
 
 ### Engine packages (`src/`)
 

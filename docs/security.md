@@ -442,6 +442,10 @@ reported command, MCP, web-search, or file-change item, and treats unknown or
 malformed items as `codex_cli_stream_protocol_error`. Event payloads, prompts,
 and stderr are not logged; failure logging contains only the return code and
 stderr length.
+`approval_policy="never"` means auto-approval within the sandbox, not that
+tools cannot run: the JSONL gate refuses a tool only after Codex reports the
+item, so these flags do not rule out execution or a web-search request before
+that event is observed.
 
 **The renewal secret never leaves the host.** The mirror publishes the
 short-lived access token and blanks the long-lived one, so whatever eventually

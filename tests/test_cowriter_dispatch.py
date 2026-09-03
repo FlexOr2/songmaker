@@ -230,6 +230,7 @@ def test_grok_cli_token_discriminator_accepts_only_a_nonempty_string_key(
     assert dispatch._grok_cli_token_is_present() is False
 
 
+@pytest.mark.acceptance("ACC-COWRITER-12")
 def test_codex_dispatch_prefers_a_mirrored_cli_access_token_over_an_api_key(
     monkeypatch,
 ) -> None:

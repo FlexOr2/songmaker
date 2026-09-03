@@ -16,7 +16,10 @@ from songmaker_cli.cowriter import codex_cli_adapter
 from songmaker_cli.cowriter.errors import ProviderUnavailableError
 
 
-def _outcome(*, returncode: int = 0, complete: bool = True, stderr: str = "") -> CliRunOutcome:
+def _outcome(
+    *, returncode: int = 0, complete: bool = True, stderr: str = "",
+    reason: CliRunReason = CliRunReason.COMPLETE,
+) -> CliRunOutcome:
     return CliRunOutcome(
         started=True,
         spawn_error=None,
@@ -25,7 +28,7 @@ def _outcome(*, returncode: int = 0, complete: bool = True, stderr: str = "") ->
         stderr=stderr,
         complete=complete,
         became_zombie=False,
-        reason=CliRunReason.COMPLETE,
+        reason=reason,
     )
 
 
@@ -51,7 +54,6 @@ async def _collect():
     return [event async for event in _stream()]
 
 
-@pytest.mark.acceptance("ACC-COWRITER-12")
 def test_codex_cli_streams_text_then_one_final_and_pins_its_command(monkeypatch) -> None:
     calls: list = []
     observed_cwd_modes: list[int] = []
@@ -176,6 +178,7 @@ def test_codex_cli_classifies_errors_without_logging_payloads(
         ([], _outcome(complete=False, stderr="401"), "cli_login_expired"),
         ([], _outcome(complete=False), "codex_cli_error"),
         ([b'{"type":"turn.completed","usage":{}}\n'], _outcome(returncode=1), "codex_cli_error"),
+        ([], _outcome(complete=False, reason=CliRunReason.OUTPUT_LIMIT_REACHED), "codex_cli_error"),
     ),
 )
 def test_codex_cli_classifies_runner_failures(monkeypatch, lines, outcome, code) -> None:
