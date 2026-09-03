@@ -559,7 +559,6 @@ now_seconds() {
 
 first_seen_commit_timestamp() {
     local commit_sha="$1"
-    local commit_timestamp="$2"
     local now recorded_sha recorded_timestamp
     if ! now="$(now_seconds)" || ! [[ "$now" =~ ^[0-9]+$ ]]; then
         printf '%s' 'cannot determine current time for check-run grace period'
@@ -579,11 +578,10 @@ first_seen_commit_timestamp() {
         recorded_timestamp="$now"
         printf '%s %s\n' "$commit_sha" "$recorded_timestamp" >"$FIRST_SEEN_COMMIT_FILE"
     fi
-    if ((recorded_timestamp > commit_timestamp)); then
-        printf '%s' "$recorded_timestamp"
-    else
-        printf '%s' "$commit_timestamp"
-    fi
+    # The commit timestamp is supplied by the repository and may be forged
+    # into the future.  The grace period must therefore always start at the
+    # first local observation, which is measured by the host clock above.
+    printf '%s' "$recorded_timestamp"
 }
 
 # The escalation rule both counters below share: escalate on the tick that
@@ -977,7 +975,7 @@ if ! [[ "$REMOTE_COMMIT_TIMESTAMP" =~ ^[0-9]+$ ]]; then
     fail_tick "invalid verified commit time"
 fi
 
-if ! CHECK_RUN_AGE_START="$(first_seen_commit_timestamp "$REMOTE_HEAD" "$REMOTE_COMMIT_TIMESTAMP")"; then
+if ! CHECK_RUN_AGE_START="$(first_seen_commit_timestamp "$REMOTE_HEAD")"; then
     log_err "cannot determine when origin/$DEPLOY_BRANCH commit $REMOTE_HEAD was first seen — refusing to deploy: $CHECK_RUN_AGE_START"
     fail_tick "cannot determine commit first-seen time"
 fi

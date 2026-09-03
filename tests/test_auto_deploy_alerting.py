@@ -1181,7 +1181,7 @@ def test_no_check_runs_yet_waits_without_incrementing_the_failure_streak(tmp_pat
     assert "compose build" not in checkout.docker_calls
 
 
-def test_no_check_runs_past_the_commit_grace_period_counts_as_a_failed_tick(
+def test_future_commit_timestamp_cannot_starve_first_seen_grace_alarm(
     tmp_path: Path,
 ) -> None:
     checkout = Checkout(tmp_path)
@@ -1189,7 +1189,11 @@ def test_no_check_runs_past_the_commit_grace_period_counts_as_a_failed_tick(
     checkout.adopt_current_head_as_deployed()
     checkout.move_main_forward()
     checkout.set_check_runs()
-    checkout.set_clock(checkout.remote_main_commit_timestamp() + 1)
+    # The repository's commit timestamp is deliberately still in the future
+    # when the first-seen grace period expires. It must not starve the alarm.
+    checkout.set_clock(
+        checkout.remote_main_commit_timestamp() - CHECK_RUN_APPEARANCE_GRACE_SECONDS - 1,
+    )
 
     first_tick = checkout.tick()
 
