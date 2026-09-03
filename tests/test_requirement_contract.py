@@ -209,6 +209,7 @@ def test_repository_contains_one_tip_per_requirement_document() -> None:
         ("ACC-CURATION-02", ("REQ-CURATION-02",), "integration", True),
         ("ACC-COWRITER-09", ("REQ-COWRITER-09",), "integration", True),
         ("ACC-COWRITER-11", ("REQ-COWRITER-11",), "integration", True),
+        ("ACC-SHARE-18", ("REQ-SHARE-18",), "integration", True),
     ]
 
 
@@ -230,6 +231,7 @@ def test_repository_contains_the_active_library_listening_contract() -> None:
         ("ACC-CURATION-02", ("REQ-CURATION-02",), "integration", True),
         ("ACC-COWRITER-09", ("REQ-COWRITER-09",), "integration", True),
         ("ACC-COWRITER-11", ("REQ-COWRITER-11",), "integration", True),
+        ("ACC-SHARE-18", ("REQ-SHARE-18",), "integration", True),
     ]
 
 

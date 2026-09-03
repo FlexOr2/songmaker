@@ -20,3 +20,10 @@ text = "A Grok CLI failure ends the turn with its named error and does not switc
 requirements = ["REQ-COWRITER-11"]
 proof_kind = "integration"
 critical = true
+
+[[acceptance]]
+id = "ACC-SHARE-18"
+text = "A public share audio request for an unknown share returns the same silent not-found response as a missing file."
+requirements = ["REQ-SHARE-18"]
+proof_kind = "integration"
+critical = true
