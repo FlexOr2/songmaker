@@ -94,3 +94,17 @@ def test_configure_logging_emits_common_json_fields(capsys: pytest.CaptureFixtur
         "timestamp": payload["timestamp"],
     }
     assert datetime.fromisoformat(payload["timestamp"])
+
+
+def test_configure_logging_includes_exception_traceback(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    configure_logging("INFO")
+
+    try:
+        raise ValueError("generation failed")
+    except ValueError:
+        logging.getLogger("acestep.worker").exception("generation failed")
+
+    payload = json.loads(capsys.readouterr().err)
+    assert "ValueError: generation failed" in payload["exception"]

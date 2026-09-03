@@ -36,14 +36,15 @@ DEFAULT_MODEL_SIZES_GB: dict[str, float] = {
 
 class JsonFormatter(logging.Formatter):
     def format(self, record: logging.LogRecord) -> str:
-        return json.dumps(
-            {
-                "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
-                "level": record.levelname.lower(),
-                "logger": record.name,
-                "event": record.getMessage(),
-            },
-        )
+        payload = {
+            "timestamp": datetime.fromtimestamp(record.created, UTC).isoformat(),
+            "level": record.levelname.lower(),
+            "logger": record.name,
+            "event": record.getMessage(),
+        }
+        if record.exc_info:
+            payload["exception"] = self.formatException(record.exc_info)
+        return json.dumps(payload)
 
 
 def configure_logging(log_level: str) -> None:
