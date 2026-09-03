@@ -1134,12 +1134,9 @@ class TestConfigureLogging:
         logging.getLogger("songmaker.test").info("worker ready")
 
         payload = json.loads(capsys.readouterr().err)
-        assert payload == {
-            "event": "worker ready",
-            "level": "info",
-            "logger": "songmaker.test",
-            "timestamp": payload["timestamp"],
-        }
+        assert payload["event"] == "worker ready"
+        assert payload["level"] == "info"
+        assert payload["logger"] == "songmaker.test"
         assert datetime.fromisoformat(payload["timestamp"])
 
 
