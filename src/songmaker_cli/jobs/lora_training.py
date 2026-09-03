@@ -276,10 +276,10 @@ def cleanup_failed_lora_with_factory(
         session.commit()
 
     if not _cleanup_failed_lora_paths(audio_dir, user_id, lora_id):
-        _audit_failed_lora_cleanup(db_factory, audio_dir)
+        _log_failed_lora_cleanup(db_factory, audio_dir)
 
 
-def audit_orphaned_lora_work_dirs(
+def log_orphaned_lora_work_dirs(
     db_factory: sessionmaker[Session], audio_dir: Path,
 ) -> None:
     """Log disposable LoRA work dirs whose LoRA is missing or no longer active."""
@@ -312,12 +312,12 @@ def audit_orphaned_lora_work_dirs(
         )
 
 
-def _audit_failed_lora_cleanup(
+def _log_failed_lora_cleanup(
     db_factory: sessionmaker[Session], audio_dir: Path,
 ) -> None:
-    """Log an audit failure without blocking later LoRA reconciliation rows."""
+    """Log cleanup diagnostics without blocking later LoRA reconciliation rows."""
     try:
-        audit_orphaned_lora_work_dirs(db_factory, audio_dir)
+        log_orphaned_lora_work_dirs(db_factory, audio_dir)
     except Exception:
         log.exception("Failed to audit orphaned LoRA work dirs after cleanup error")
 
@@ -391,7 +391,7 @@ def reconcile_crashed_loras(
 
         reconciled += 1
         if not _cleanup_failed_lora_paths(audio_dir, user_id, lora_id):
-            _audit_failed_lora_cleanup(db_factory, audio_dir)
+            _log_failed_lora_cleanup(db_factory, audio_dir)
 
 
 async def run_lora_training_job(
@@ -597,7 +597,7 @@ async def run_lora_training_job(
     except PreviousAdapterRestoredError as exc:
         log.exception("LoRA training job %s kept its previous adapter: %s", job_id, exc)
         if not _cleanup_failed_lora_paths(audio_dir, user_id, lora_id):
-            _audit_failed_lora_cleanup(db_factory, audio_dir)
+            _log_failed_lora_cleanup(db_factory, audio_dir)
         storage_rel = str(
             Path(USER_LORAS_DIRNAME) / user_id / lora_id / USER_LORA_OUTPUT_DIRNAME,
         )
