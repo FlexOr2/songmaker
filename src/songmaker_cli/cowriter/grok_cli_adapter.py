@@ -18,7 +18,6 @@ from songmaker_cli.claude.provider import (
     _stdin_prompt,
 )
 from songmaker_cli.constants import (
-    CLI_OUTPUT_READ_LIMIT_BYTES,
     COWRITER_CLI_TIMEOUT_SECONDS,
     COWRITER_GROK_CLI_LINE_CHANNEL_CAPACITY,
     GROK_CLI_BINARY,
@@ -31,6 +30,9 @@ from songmaker_cli.cowriter.errors import ProviderUnavailableError
 _AUTH_FAILURE_MARKERS: Final = ("401", "oidc", "unauthenticated")
 _IGNORED_EVENT_TYPES: Final = frozenset({"thought", "usage", "available_commands", "plan"})
 _PROMPT_FILE_ARGUMENT_INDEX: Final = 2
+# Grok owns this larger bound because a 600-second streamed turn can include
+# substantial thought and usage NDJSON before its final answer.
+GROK_CLI_TURN_OUTPUT_READ_LIMIT_BYTES: Final = 4 * 1024 * 1024
 
 log = logging.getLogger(__name__)
 
@@ -56,7 +58,7 @@ async def stream_grok_cli_turn(
         stdin_payload=None,
         read="all",
         deadline=deadline,
-        output_read_limit_bytes=CLI_OUTPUT_READ_LIMIT_BYTES,
+        output_read_limit_bytes=GROK_CLI_TURN_OUTPUT_READ_LIMIT_BYTES,
         stdout_line_channel=channel,
         prompt_file_bytes=prompt,
         prompt_file_arg_index=_PROMPT_FILE_ARGUMENT_INDEX,
@@ -90,8 +92,11 @@ async def stream_grok_cli_turn(
                 channel.request_abort()
                 continue
             if event_type in _IGNORED_EVENT_TYPES:
-                _ignored_event_data(event_data)
                 continue
+            log.warning(
+                "Grok CLI emitted an unknown stream event type (type_length=%d)",
+                len(event_type),
+            )
             raise _GrokCliStreamFailure("grok_cli_stream_protocol_error")
         await asyncio.shield(runner)
         _raise_for_grok_outcome(outcome, saw_end, error_message)
@@ -153,11 +158,6 @@ def _error_event_data(event: dict[str, object]) -> str:
     if not isinstance(message, str):
         raise _GrokCliStreamFailure("grok_cli_stream_protocol_error")
     return message
-
-
-def _ignored_event_data(event: dict[str, object]) -> None:
-    if "data" not in event:
-        raise _GrokCliStreamFailure("grok_cli_stream_protocol_error")
 
 
 def _raise_for_grok_outcome(

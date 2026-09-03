@@ -402,6 +402,7 @@ def _run_cli_bounded(
 ) -> None:
     process: subprocess.Popen[bytes] | None = None
     prompt_file_path: str | None = None
+    outcome: CliRunOutcome | None = None
     output = _CliOutput(
         bytearray(), bytearray(), complete=False, reason=CliRunReason.IO_ERROR,
     )
@@ -432,20 +433,17 @@ def _run_cli_bounded(
                 became_zombie=False,
                 reason=CliRunReason.SPAWN_FAILED,
             )
-            _publish_bounded_outcome(state, outcome)
-            if stdout_line_channel is not None:
-                stdout_line_channel._close(outcome)
-            return
-        state.started.set()
-        _notify_spawned(on_spawned, process.pid)
-        output = _exchange_bounded(
-            process,
-            stdin_payload,
-            read,
-            deadline,
-            output_read_limit_bytes,
-            stdout_line_channel,
-        )
+        else:
+            state.started.set()
+            _notify_spawned(on_spawned, process.pid)
+            output = _exchange_bounded(
+                process,
+                stdin_payload,
+                read,
+                deadline,
+                output_read_limit_bytes,
+                stdout_line_channel,
+            )
     finally:
         if process is not None:
             became_zombie = _reap_process_group(process)
@@ -468,11 +466,13 @@ def _run_cli_bounded(
                 reason=output.reason,
                 io_error=output.io_error,
             )
-            _publish_bounded_outcome(state, outcome)
-            if stdout_line_channel is not None:
-                stdout_line_channel._close(outcome)
         if prompt_file_path is not None:
             _unlink_prompt_file(prompt_file_path)
+        if outcome is None:
+            raise RuntimeError("bounded CLI runner exited without an outcome")
+        _publish_bounded_outcome(state, outcome)
+        if stdout_line_channel is not None:
+            stdout_line_channel._close(outcome)
 
 
 def _with_private_prompt_file(
@@ -595,6 +595,19 @@ def _exchange_bounded(
                     chunk = os.read(key.fileobj.fileno(), room)
                     if not chunk:
                         selector.unregister(key.fileobj)
+                        if key.data == "stdout" and stdout_line_channel is not None:
+                            if stdout_line_remainder:
+                                line = bytes(stdout_line_remainder)
+                                stdout_line_remainder.clear()
+                                if not stdout_line_channel._send(line):
+                                    reason = (
+                                        CliRunReason.CANCELLED
+                                        if stdout_line_channel.abort_requested()
+                                        else CliRunReason.OUTPUT_CHANNEL_FULL
+                                    )
+                                    return _CliOutput(
+                                        stdout, stderr, complete=False, reason=reason,
+                                    )
                         if read == "first_line" and key.data == "stdout":
                             return _CliOutput(
                                 stdout, stderr, complete=True, reason=CliRunReason.COMPLETE,

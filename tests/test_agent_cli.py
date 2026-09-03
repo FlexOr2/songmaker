@@ -985,6 +985,22 @@ def test_a_spawned_cli_never_sees_our_secrets(monkeypatch) -> None:
     assert not [key for key in SECRET_ENV_KEYS if key in env]
 
 
+def test_bounded_runner_does_not_pass_secrets_to_the_spawned_cli(monkeypatch) -> None:
+    for key in SECRET_ENV_KEYS:
+        monkeypatch.setenv(key, "leaked-value")
+    secret_checks = " && ".join(f'test -z "${{{key}}}"' for key in SECRET_ENV_KEYS)
+
+    outcome = run_cli_bounded(
+        ("/bin/sh", "-c", secret_checks),
+        stdin_payload=None,
+        read="all",
+        deadline=time.monotonic() + 1,
+    )
+
+    assert outcome.complete is True
+    assert outcome.returncode == 0
+
+
 def test_bounded_runner_sends_complete_stdout_lines_and_then_its_outcome() -> None:
     channel = CliLineChannel(maximum_lines=2)
 
@@ -998,6 +1014,37 @@ def test_bounded_runner_sends_complete_stdout_lines_and_then_its_outcome() -> No
 
     assert channel.receive(timeout=1) == b"one\n"
     assert channel.receive(timeout=1) == b"two\n"
+    assert channel.receive(timeout=1) == outcome
+
+
+def test_bounded_runner_sends_a_final_stdout_line_without_a_newline() -> None:
+    channel = CliLineChannel(maximum_lines=1)
+
+    outcome = run_cli_bounded(
+        ("/bin/sh", "-c", 'printf \'{"type":"end","stopReason":"stop"}\''),
+        stdin_payload=None,
+        read="all",
+        deadline=time.monotonic() + 1,
+        stdout_line_channel=channel,
+    )
+
+    assert channel.receive(timeout=1) == b'{"type":"end","stopReason":"stop"}'
+    assert channel.receive(timeout=1) == outcome
+
+
+def test_bounded_runner_names_a_full_stdout_line_channel() -> None:
+    channel = CliLineChannel(maximum_lines=1)
+
+    outcome = run_cli_bounded(
+        ("/bin/sh", "-c", "printf 'first\\nsecond\\n'"),
+        stdin_payload=None,
+        read="all",
+        deadline=time.monotonic() + 1,
+        stdout_line_channel=channel,
+    )
+
+    assert outcome.reason is CliRunReason.OUTPUT_CHANNEL_FULL
+    assert outcome.complete is False
     assert channel.receive(timeout=1) == outcome
 
 

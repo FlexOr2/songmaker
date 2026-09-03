@@ -412,9 +412,15 @@ service, path watcher, and ten-minute timer are the sole refresh path: each
 host refresh replaces the mounted access token in place while keeping
 `refresh_token` empty. A Grok CLI turn with an expired or OIDC-rejected mirror
 returns `cli_login_expired`; it never changes to the API-key path mid-turn.
-Its single-turn command denies tools and its streaming parser rejects every
-`tool_call` or `tool_call_update`, so no Grok CLI turn can use Songmaker or
-built-in tools in this slice.
+Its single-turn command passes `--deny '*'`, a permission rule, plus
+`--max-turns 1`; neither proves that the CLI exposes no built-in tools. The
+streaming parser loudly rejects every reported `tool_call` or
+`tool_call_update`, so Songmaker refuses that turn after the CLI reports a
+tool call. The 2026-09-03 `Antworte nur OK` experiment without `XAI_API_KEY`
+still emitted `available_commands` events with built-in tools and no
+`tool_call`; it does not exclude a tool execution before such an event. R1
+does not add `--disallowed-tools` as a substitute for that reported-event
+gate.
 
 **The renewal secret never leaves the host.** The mirror publishes the
 short-lived access token and blanks the long-lived one, so whatever eventually

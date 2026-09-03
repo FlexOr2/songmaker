@@ -53,7 +53,9 @@ def test_grok_cli_streams_text_then_one_final_and_pins_its_command(monkeypatch) 
         b'{"type":"end","stopReason":"stop"}\n',
     ]
     monkeypatch.setattr(
-        grok_cli_adapter, "run_cli_bounded", _runner(lines, _outcome(), calls),
+        grok_cli_adapter,
+        "run_cli_bounded",
+        _runner(lines, _outcome(), calls),
     )
 
     async def collect():
@@ -71,6 +73,53 @@ def test_grok_cli_streams_text_then_one_final_and_pins_its_command(monkeypatch) 
     assert kwargs["prompt_file_bytes"] == b"system\n\nUser: hello"
     assert kwargs["prompt_file_arg_index"] == 2
     assert kwargs["cwd"] == "/tmp"
+    assert kwargs["output_read_limit_bytes"] == (
+        grok_cli_adapter.GROK_CLI_TURN_OUTPUT_READ_LIMIT_BYTES
+    )
+
+
+@pytest.mark.parametrize("event_type", sorted(grok_cli_adapter._IGNORED_EVENT_TYPES))
+def test_grok_cli_accepts_ignored_observations_without_data(monkeypatch, event_type) -> None:
+    calls = []
+    lines = [
+        json.dumps({"type": event_type}).encode() + b"\n",
+        b'{"type":"text","data":"hello"}\n',
+        b'{"type":"end","stopReason":"stop"}\n',
+    ]
+    monkeypatch.setattr(
+        grok_cli_adapter,
+        "run_cli_bounded",
+        _runner(lines, _outcome(), calls),
+    )
+
+    async def collect():
+        return [event async for event in _stream()]
+
+    assert asyncio.run(collect()) == [
+        AssistantTextEvent(text="hello"),
+        FinalEvent(text="hello"),
+    ]
+
+
+def test_grok_cli_logs_the_length_of_an_unknown_event_type_before_rejecting_it(
+    monkeypatch, caplog,
+) -> None:
+    calls = []
+    event_type = "unexpected"
+    monkeypatch.setattr(
+        grok_cli_adapter,
+        "run_cli_bounded",
+        _runner([json.dumps({"type": event_type}).encode() + b"\n"], _outcome(), calls),
+    )
+    caplog.set_level("WARNING")
+
+    async def collect():
+        return [event async for event in _stream()]
+
+    with pytest.raises(ProviderUnavailableError, match="grok_cli_stream_protocol_error"):
+        asyncio.run(collect())
+
+    assert f"type_length={len(event_type)}" in caplog.text
 
 
 @pytest.mark.parametrize("event_type", ("tool_call", "tool_call_update"))
@@ -78,7 +127,9 @@ def test_grok_cli_rejects_any_tool_call_and_never_emits_a_final(monkeypatch, eve
     calls = []
     lines = [json.dumps({"type": event_type}).encode() + b"\n"]
     monkeypatch.setattr(
-        grok_cli_adapter, "run_cli_bounded", _runner(lines, _outcome(), calls),
+        grok_cli_adapter,
+        "run_cli_bounded",
+        _runner(lines, _outcome(), calls),
     )
 
     async def collect():
@@ -88,6 +139,26 @@ def test_grok_cli_rejects_any_tool_call_and_never_emits_a_final(monkeypatch, eve
         asyncio.run(collect())
 
     assert calls
+
+
+def test_grok_cli_process_streams_ndjson_through_the_bounded_runner(monkeypatch, tmp_path) -> None:
+    fake_cli = tmp_path / "grok"
+    fake_cli.write_text(
+        "#!/bin/sh\n"
+        "printf '%s\\n' "
+        '\'{"type":"text","data":"hello"}\' '
+        '\'{"type":"end","stopReason":"stop"}\'\n',
+    )
+    fake_cli.chmod(0o700)
+    monkeypatch.setattr(grok_cli_adapter, "GROK_CLI_BINARY", str(fake_cli))
+
+    async def collect():
+        return [event async for event in _stream()]
+
+    assert asyncio.run(collect()) == [
+        AssistantTextEvent(text="hello"),
+        FinalEvent(text="hello"),
+    ]
 
 
 @pytest.mark.parametrize(
@@ -104,7 +175,9 @@ def test_grok_cli_rejects_any_tool_call_and_never_emits_a_final(monkeypatch, eve
 def test_grok_cli_rejects_an_invalid_or_unfinished_stream(monkeypatch, lines) -> None:
     calls = []
     monkeypatch.setattr(
-        grok_cli_adapter, "run_cli_bounded", _runner(lines, _outcome(), calls),
+        grok_cli_adapter,
+        "run_cli_bounded",
+        _runner(lines, _outcome(), calls),
     )
 
     async def collect():
@@ -132,6 +205,11 @@ def test_grok_cli_rejects_an_invalid_or_unfinished_stream(monkeypatch, lines) ->
             _outcome(complete=False, stderr="OIDC 401"),
             "cli_login_expired",
         ),
+        (
+            [],
+            _outcome(complete=False),
+            "grok_cli_error",
+        ),
         ([b'{"type":"text","data":"partial"}\n'], _outcome(complete=False), "grok_cli_error"),
         ([b'{"type":"end","stopReason":"stop"}\n'], _outcome(returncode=1), "grok_cli_error"),
     ),
@@ -141,7 +219,9 @@ def test_grok_cli_names_failed_or_incomplete_runs_without_leaking_stderr(
 ) -> None:
     calls = []
     monkeypatch.setattr(
-        grok_cli_adapter, "run_cli_bounded", _runner(lines, outcome, calls),
+        grok_cli_adapter,
+        "run_cli_bounded",
+        _runner(lines, outcome, calls),
     )
     caplog.set_level("WARNING")
 
