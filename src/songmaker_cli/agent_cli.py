@@ -810,7 +810,7 @@ def _probe_grok_status() -> GrokCliStatus:
 
 
 def grok_cli_token_is_present() -> bool:
-    """Whether the credential mirror holds the Grok CLI access token."""
+    """Whether the Grok CLI credential mirror contains a non-empty access token."""
     try:
         raw_auth = Path(GROK_CLI_AUTH_FILE).read_text()
     except FileNotFoundError:

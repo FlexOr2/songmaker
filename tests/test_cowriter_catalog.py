@@ -290,6 +290,11 @@ def test_grok_cli_token_configures_turns_and_supplies_its_model_catalog(monkeypa
     assert get_provider_configuration("grok", ProviderSurface.CO_WRITER) == (
         ConfiguredProvider("grok", ProviderSetupMethod.GROK_CLI)
     )
+    assert get_provider_configuration("grok", ProviderSurface.JUDGE) == (
+        CliLoginNeedsApiKeyProvider(
+            "grok", ProviderSetupMethod.GROK_CLI, "XAI_API_KEY",
+        )
+    )
     assert list_provider_models("grok") == ["grok-4.6"]
 
 

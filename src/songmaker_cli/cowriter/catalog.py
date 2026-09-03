@@ -200,8 +200,7 @@ def _refresh_cli_login(provider: str) -> None:
 
 def list_provider_models(provider: str) -> list[str]:
     settings = get_settings()
-    # The catalog is for models that can serve a turn; JUDGE is the weaker surface.
-    configuration = _provider_configuration(provider, ProviderSurface.JUDGE, settings)
+    configuration = _catalog_configuration(provider, settings)
     match configuration:
         case ConfiguredProvider():
             return _models_for_setup_method(provider, configuration.method, settings)
@@ -232,6 +231,15 @@ def list_provider_models(provider: str) -> list[str]:
                 f"{provider} cannot list models until {configuration.need.value} is configured",
             )
     raise AssertionError(f"unhandled provider configuration state: {configuration!r}")
+
+
+def _catalog_configuration(provider: str, settings: Settings) -> ProviderConfiguration:
+    """Use the judge setup unless only its API key is missing."""
+    judge = _provider_configuration(provider, ProviderSurface.JUDGE, settings)
+    if not isinstance(judge, CliLoginNeedsApiKeyProvider):
+        return judge
+    cowriter = _provider_configuration(provider, ProviderSurface.CO_WRITER, settings)
+    return cowriter if isinstance(cowriter, ConfiguredProvider) else judge
 
 
 def models_with_active_model(
@@ -283,8 +291,6 @@ def _provider_configuration(
     credential = _provider_api_credential(provider, settings)
     key_is_set = bool(_secret(credential.secret))
     cli_method = _cli_setup_method(provider)
-    if provider == _GROK_PROVIDER and cli_method is ProviderSetupMethod.GROK_CLI:
-        return ConfiguredProvider(provider, cli_method)
     if key_is_set and _api_key_carries(provider, surface):
         if provider == _CLAUDE_PROVIDER and not _anthropic_sdk_available():
             return DependencyUnavailableProvider(
@@ -296,7 +302,7 @@ def _provider_configuration(
             ProviderSetupMethod.API_KEY,
             credential.environment_key,
         )
-    if cli_method is not None and _cli_carries(cli_method):
+    if cli_method is not None and _cli_carries(cli_method, surface):
         return ConfiguredProvider(provider, cli_method)
     if cli_method is not None:
         return CliLoginNeedsApiKeyProvider(
@@ -318,11 +324,11 @@ def _api_key_carries(provider: str, surface: ProviderSurface) -> bool:
     return not (provider == _CLAUDE_PROVIDER and surface is ProviderSurface.CO_WRITER)
 
 
-def _cli_carries(method: ProviderSetupMethod) -> bool:
-    return method in {
-        ProviderSetupMethod.CLAUDE_CLI,
-        ProviderSetupMethod.GROK_CLI,
-    }
+def _cli_carries(method: ProviderSetupMethod, surface: ProviderSurface) -> bool:
+    return method is ProviderSetupMethod.CLAUDE_CLI or (
+        method is ProviderSetupMethod.GROK_CLI
+        and surface is ProviderSurface.CO_WRITER
+    )
 
 
 def _needed_setup(provider: str, surface: ProviderSurface) -> ProviderNeed:

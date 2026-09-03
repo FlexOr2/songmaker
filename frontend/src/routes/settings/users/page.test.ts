@@ -99,6 +99,12 @@ const GROK_VIA_CLI: ProviderSurfaceStatus = {
 	setup_method: 'grok_cli',
 	environment_key: null
 };
+const GROK_CLI_NEEDS_API_KEY: ProviderSurfaceStatus = {
+	state: 'cli_login_needs_api_key',
+	needs: 'api_key',
+	setup_method: 'grok_cli',
+	environment_key: 'XAI_API_KEY'
+};
 const NO_CODEX_KEY: ProviderSurfaceStatus = {
 	state: 'unconfigured',
 	needs: 'api_key',
@@ -108,7 +114,7 @@ const NO_CODEX_KEY: ProviderSurfaceStatus = {
 const GROK_CONFIGURED_VIA_CLI: ProviderStatus[] = [
 	providerStatus('claude', CLAUDE_VIA_CLI),
 	providerStatus('codex', NO_CODEX_KEY),
-	providerStatus('grok', GROK_VIA_CLI)
+	providerStatus('grok', GROK_VIA_CLI, GROK_CLI_NEEDS_API_KEY)
 ];
 const CLAUDE_KEY_WITHOUT_CLI: ProviderStatus[] = [
 	providerStatus(
@@ -406,7 +412,7 @@ describe('admin models tab', () => {
 		const providers = sectionByHeading(target, 'Providers');
 
 		expect(providers.textContent).toContain('Claude Code CLI login');
-		expect(providers.textContent).toContain('OPENAI_API_KEY set');
+		expect(providers.textContent).toContain('Configured via OPENAI_API_KEY');
 		expect(providers.textContent).toContain('Missing XAI_API_KEY');
 	});
 
@@ -453,17 +459,19 @@ describe('admin models tab', () => {
 		expect(cowriter.textContent).toContain('Provider check is still running in the background');
 	});
 
-	it('offers Grok through its configured CLI login for both surfaces', async () => {
+	it('offers Grok through its CLI login to the co-writer but not scoring', async () => {
 		api.fetchProviderStatus.mockResolvedValue(GROK_CONFIGURED_VIA_CLI);
 		const target = await renderPage(true);
 		await selectTab(target, 'models');
 
-		for (const heading of ['Co-Writer', 'Scoring']) {
-			const picker = sectionByHeading(target, heading);
-			expect(pillNamed(picker, 'Grok').disabled).toBe(false);
-		}
-		expect(sectionByHeading(target, 'Providers').textContent).toContain(
-			'Configured via Grok CLI login'
+		expect(pillNamed(sectionByHeading(target, 'Co-Writer'), 'Grok').disabled).toBe(false);
+		const scoring = sectionByHeading(target, 'Scoring');
+		expect(pillNamed(scoring, 'Grok').disabled).toBe(true);
+		expect(scoring.textContent).toContain('answering needs its API key');
+		const providers = sectionByHeading(target, 'Providers');
+		expect(providers.textContent).toContain('Configured via Grok CLI login');
+		expect(providers.textContent).toContain(
+			'Grok CLI login found — but answering needs its API key'
 		);
 	});
 

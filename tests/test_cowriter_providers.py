@@ -689,7 +689,13 @@ def _stub_cli_runners(
                         "configured",
                         setup_method="grok_cli",
                     ),
-                ) * 2,
+                    _status(
+                        "cli_login_needs_api_key",
+                        needs="api_key",
+                        setup_method="grok_cli",
+                        environment_key="XAI_API_KEY",
+                    ),
+                ),
                 "codex": (
                     _status(
                         "cli_login_needs_api_key",
@@ -782,7 +788,7 @@ def test_provider_status_projects_the_catalog_contract(
     assert all(count <= 1 for count in calls.values())
 
 
-def test_grok_cli_token_is_configured_and_selectable_through_cowriter_settings(
+def test_grok_cli_token_configures_the_cowriter_but_not_the_judge_without_an_api_key(
     admin_client, monkeypatch,
 ):
     monkeypatch.delenv("XAI_API_KEY", raising=False)
@@ -805,6 +811,11 @@ def test_grok_cli_token_is_configured_and_selectable_through_cowriter_settings(
     grok = statuses["grok"]["cowriter"]
     assert grok["state"] == "configured"
     assert grok["setup_method"] == "grok_cli"
+    judge = statuses["grok"]["judge"]
+    assert judge["state"] == "cli_login_needs_api_key"
+    assert judge["needs"] == "api_key"
+    assert judge["setup_method"] == "grok_cli"
+    assert judge["environment_key"] == "XAI_API_KEY"
 
     settings = client.get("/api/settings/cowriter").json()
     assert settings["models_by_provider"]["grok"]
@@ -815,6 +826,15 @@ def test_grok_cli_token_is_configured_and_selectable_through_cowriter_settings(
 
     assert saved.status_code == 200
     assert saved.json()["provider"] == "grok"
+
+    judge_saved = client.put(
+        "/api/settings/judge",
+        json={"provider": "grok", "model": "grok-4.6"},
+    )
+
+    assert judge_saved.status_code == 422
+    assert judge_saved.json()["detail"]["surface"] == "judge"
+    assert judge_saved.json()["detail"]["status"]["state"] == "cli_login_needs_api_key"
 
 
 @pytest.mark.parametrize("provider", ["claude", "grok", "codex"])
