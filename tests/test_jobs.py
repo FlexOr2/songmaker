@@ -51,7 +51,7 @@ from songmaker_cli.jobs import (
     run_generation_job,
     run_scoring_job,
 )
-from songmaker_cli.scheduler import GenerationTaskResultDTO
+from songmaker_cli.scheduler import GenerationTaskResultDTO, WorkerTaskFailed
 from songmaker_cli.scoring.models import (
     EmotionalDynamicsScore,
     ScorerOutcome,
@@ -564,6 +564,48 @@ def test_generation_count_series_blocks_hold_reservation_until_final_cleanup(
         assert await read_queue_depth(redis, "w1") == 0
         assert await reserve_gpu_hold(redis, "w1", "training-token", 15)
         assert await release_gpu_hold(redis, "w1", "training-token")
+
+    _run(exercise())
+
+
+@pytest.mark.parametrize("outcome", ["cancel", "error", "timeout"])
+def test_generation_series_releases_redis_occupancy_after_every_terminal_outcome(
+    seeded_db,
+    tmp_path: Path,
+    outcome: str,
+) -> None:
+    from songmaker_cli.acestep_state import read_queue_depth, reserve_gpu_hold
+
+    async def dispatch(**kwargs):
+        if outcome == "cancel":
+            _cancel_job(seeded_db, "j1")
+            return _make_dto()
+        if outcome == "timeout":
+            raise asyncio.CancelledError()
+        raise WorkerTaskFailed("worker failed")
+
+    async def exercise() -> None:
+        redis = fakeredis.aioredis.FakeRedis()
+        await _seed_healthy_worker(redis, seeded_db)
+        with (
+            patch("songmaker_cli.jobs.dispatch_generation_on_worker", dispatch),
+            patch("songmaker_cli.jobs.load_generation_defaults", return_value={}),
+        ):
+            if outcome == "timeout":
+                with pytest.raises(asyncio.CancelledError):
+                    await run_generation_job(
+                        "j1", "s1", "v1", 3, "u1", db_factory=seeded_db,
+                        audio_dir=tmp_path / "audio", data_dir=tmp_path / "data", redis=redis,
+                        target_model="sft",
+                    )
+            else:
+                await run_generation_job(
+                    "j1", "s1", "v1", 3, "u1", db_factory=seeded_db,
+                    audio_dir=tmp_path / "audio", data_dir=tmp_path / "data", redis=redis,
+                    target_model="sft",
+                )
+        assert await read_queue_depth(redis, "w1") == 0
+        assert await reserve_gpu_hold(redis, "w1", "training-token", 15)
 
     _run(exercise())
 

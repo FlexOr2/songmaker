@@ -33,6 +33,7 @@ from songmaker_cli.config import (
 from songmaker_cli.constants import (
     ARQ_MUSIC_QUEUE_NAME,
     ARQ_SCORING_QUEUE_NAME,
+    GENERATION_WAITING_FOR_LORA_QUEUE_REASON,
     GPU_HOLD_POLL_INTERVAL_SECONDS,
     WORKER_SHARED_TMP_DIRNAME,
     JobFunction,
@@ -779,7 +780,7 @@ async def run_generation_job(
                 db_factory,
                 job_id,
                 JobStatus.QUEUED,
-                queue_reason="Waiting for LoRA training on this GPU.",
+                queue_reason=GENERATION_WAITING_FOR_LORA_QUEUE_REASON,
             )
             await redis.enqueue_job(
                 JobFunction.GENERATE,

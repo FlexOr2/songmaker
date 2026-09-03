@@ -18,6 +18,12 @@ WORKER_KEY_PREFIX = "songmaker:acestep:worker"
 QUEUE_KEY_PREFIX = "songmaker:acestep:queue"
 GPU_HOLD_KEY_PREFIX = "songmaker:acestep:hold"
 
+ADMIT_GENERATION_SCRIPT = """
+if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
+redis.call('INCR', KEYS[1])
+return 1
+"""
+
 RENEW_GPU_HOLD_SCRIPT = """
 if redis.call('GET', KEYS[1]) ~= ARGV[1] then return 0 end
 return redis.call('EXPIRE', KEYS[1], ARGV[2])

@@ -24,7 +24,8 @@ DOWNLOAD_TTL_SECONDS = 1800
 
 ADMIT_GENERATION_SCRIPT = """
 if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end
-return redis.call('INCR', KEYS[1])
+redis.call('INCR', KEYS[1])
+return 1
 """
 RESERVE_GPU_HOLD_SCRIPT = """
 if redis.call('EXISTS', KEYS[2]) == 1 then return 0 end

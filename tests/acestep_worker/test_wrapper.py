@@ -13,17 +13,20 @@ from fastapi.testclient import TestClient
 
 from acestep_engine.models import AceStepConfig
 from acestep_worker.gpu_util import GpuHealth, GpuHealthStatus
-from acestep_worker.heartbeat import HeartbeatLoop, queue_depth_key
+from acestep_worker.heartbeat import HeartbeatLoop, gpu_hold_key, queue_depth_key
 from acestep_worker.model_cache import LoadedModel, ModelCache, VramReader, VramStats
-from acestep_worker.models import GenerationTaskResult, WorkerTaskEvent
+from acestep_worker.models import GenerateRequest, GenerationTaskResult, WorkerTaskEvent
 from acestep_worker.task_store import TaskStore
 from acestep_worker.wrapper import (
     WorkerDeps,
     _format_sse,
+    build_router,
     create_app,
     default_generate_runner,
     read_queue_depth,
 )
+
+_INTERNAL_HEADERS = {"X-Internal-Token": "test-internal-token"}
 
 
 def _run(coro):
@@ -306,8 +309,79 @@ def test_generate_requires_loaded(tmp_path: Path) -> None:
         resp = client.post(
             "/generate",
             json={"mode": "sft", "config": {"prompt": "test", "lyrics": ""}},
+            headers=_INTERNAL_HEADERS,
         )
     assert resp.status_code == 409
+
+
+@pytest.mark.parametrize(
+    ("headers", "status_code"),
+    [
+        pytest.param({}, 422, id="missing-token"),
+        pytest.param({"X-Internal-Token": "wrong-token"}, 401, id="wrong-token"),
+    ],
+)
+def test_generate_rejects_requests_without_the_internal_token(
+    tmp_path: Path,
+    headers: dict[str, str],
+    status_code: int,
+) -> None:
+    deps, _ = _make_deps(tmp_path)
+    app = create_app(deps)
+    with TestClient(app) as client:
+        response = client.post(
+            "/generate",
+            json={"mode": "sft", "config": {"prompt": "test", "lyrics": ""}},
+            headers=headers,
+        )
+    assert response.status_code == status_code
+
+
+def test_generate_acquisition_serializes_with_hold_reservation(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    deps, _ = _make_deps(tmp_path)
+    generation_started = asyncio.Event()
+    allow_generation_to_finish = asyncio.Event()
+    spawned: list[object] = []
+
+    async def scenario() -> None:
+        await deps.cache.load("sft")
+
+        async def blocking_runner(*_args, **_kwargs) -> None:
+            generation_started.set()
+            await allow_generation_to_finish.wait()
+
+        deps.generate_runner = blocking_runner
+        monkeypatch.setattr("acestep_worker.wrapper.spawn_background", spawned.append)
+        router = build_router(deps)
+        generate = next(route.endpoint for route in router.routes if route.path == "/generate")
+        reserve = next(
+            route.endpoint for route in router.routes if route.path == "/gpu_hold/reserve"
+        )
+        generated = await generate(
+            GenerateRequest(mode="sft", config=AceStepConfig(prompt="test", lyrics=""))
+        )
+        assert generated.task_id
+        running_generation = asyncio.create_task(spawned.pop())
+        await generation_started.wait()
+        reserve_task = asyncio.create_task(reserve())
+        with pytest.raises(HTTPException, match="GPU is busy or held"):
+            await reserve_task
+        allow_generation_to_finish.set()
+        await running_generation
+
+        assert (await reserve()).token
+        with pytest.raises(HTTPException, match="GPU is held for LoRA training"):
+            await generate(
+                GenerateRequest(mode="sft", config=AceStepConfig(prompt="test", lyrics=""))
+            )
+        await deps.redis.delete(gpu_hold_key(deps.worker_id))
+
+    _run(scenario())
 
 
 def test_generate_rejects_a_worker_held_for_lora_training(tmp_path: Path) -> None:
@@ -323,6 +397,7 @@ def test_generate_rejects_a_worker_held_for_lora_training(tmp_path: Path) -> Non
         resp = client.post(
             "/generate",
             json={"mode": "sft", "config": {"prompt": "test", "lyrics": ""}},
+            headers=_INTERNAL_HEADERS,
         )
     assert resp.status_code == 409
     assert resp.json()["detail"] == "GPU is held for LoRA training"
@@ -336,6 +411,7 @@ def test_generate_returns_task_id(tmp_path: Path) -> None:
         resp = client.post(
             "/generate",
             json={"mode": "sft", "config": {"prompt": "test", "lyrics": ""}},
+            headers=_INTERNAL_HEADERS,
         )
     assert resp.status_code == 200
     assert resp.json()["task_id"].startswith("gen-")
@@ -386,7 +462,9 @@ def test_generate_passes_the_full_config_through_losslessly(tmp_path: Path) -> N
     payload = _full_ace_step_config_payload()
     with TestClient(app) as client:
         client.post("/load_model", json={"mode": "sft"})
-        resp = client.post("/generate", json={"mode": "sft", "config": payload})
+        resp = client.post(
+            "/generate", json={"mode": "sft", "config": payload}, headers=_INTERNAL_HEADERS
+        )
 
     assert resp.status_code == 200
     assert len(received) == 1
@@ -402,7 +480,9 @@ def test_generate_rejects_an_unrecognized_config_field(tmp_path: Path) -> None:
     payload = {**_full_ace_step_config_payload(), "audio_duraton": 91}
     with TestClient(app) as client:
         client.post("/load_model", json={"mode": "sft"})
-        resp = client.post("/generate", json={"mode": "sft", "config": payload})
+        resp = client.post(
+            "/generate", json={"mode": "sft", "config": payload}, headers=_INTERNAL_HEADERS
+        )
     assert resp.status_code == 422
 
 
@@ -415,7 +495,9 @@ def test_generate_rejects_a_missing_required_config_field(tmp_path: Path) -> Non
     del payload["lyrics"]
     with TestClient(app) as client:
         client.post("/load_model", json={"mode": "sft"})
-        resp = client.post("/generate", json={"mode": "sft", "config": payload})
+        resp = client.post(
+            "/generate", json={"mode": "sft", "config": payload}, headers=_INTERNAL_HEADERS
+        )
     assert resp.status_code == 422
 
 
@@ -465,6 +547,7 @@ def test_get_task_known(tmp_path: Path) -> None:
         gen = client.post(
             "/generate",
             json={"mode": "sft", "config": {"prompt": "x", "lyrics": ""}},
+            headers=_INTERNAL_HEADERS,
         )
         task_id = gen.json()["task_id"]
         for _ in range(20):
@@ -491,6 +574,7 @@ def test_stream_task_yields_done(tmp_path: Path) -> None:
         gen = client.post(
             "/generate",
             json={"mode": "sft", "config": {"prompt": "x", "lyrics": ""}},
+            headers=_INTERNAL_HEADERS,
         )
         task_id = gen.json()["task_id"]
         for _ in range(20):
@@ -1011,6 +1095,7 @@ def test_generate_acquires_and_releases_refcount(tmp_path: Path) -> None:
                 resp = await client.post(
                     "/generate",
                     json={"mode": "sft", "config": {"prompt": "x", "lyrics": ""}},
+                    headers=_INTERNAL_HEADERS,
                 )
                 assert resp.status_code == 200
                 for _ in range(50):
@@ -1061,6 +1146,7 @@ def test_generate_releases_refcount_on_runner_exception(tmp_path: Path) -> None:
                 resp = await client.post(
                     "/generate",
                     json={"mode": "sft", "config": {"prompt": "x", "lyrics": ""}},
+                    headers=_INTERNAL_HEADERS,
                 )
                 assert resp.status_code == 200
                 for _ in range(50):

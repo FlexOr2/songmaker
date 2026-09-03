@@ -18,7 +18,7 @@ from fastapi.testclient import TestClient
 
 from acestep_worker.heartbeat import HeartbeatLoop, gpu_hold_key, reserve_gpu_hold
 from acestep_worker.model_cache import LoadedModel, ModelCache
-from acestep_worker.models import TrainLoraRequest, TrainLoraTaskResult
+from acestep_worker.models import GpuHoldTokenRequest, TrainLoraRequest, TrainLoraTaskResult
 from acestep_worker.task_store import TaskStore
 from acestep_worker.wrapper import (
     WorkerDeps,
@@ -377,6 +377,71 @@ def test_train_lora_renews_before_creating_its_task_and_releases_after_success(
     _run(scenario())
 
 
+def test_release_rejects_a_hold_claimed_by_a_training_task(tmp_path: Path) -> None:
+    from fastapi import HTTPException
+
+    deps = _make_deps(tmp_path)
+
+    async def scenario() -> None:
+        assert await reserve_gpu_hold(deps.redis, deps.worker_id, "hold-token", 15)
+        async with deps.gpu_hold_handover_lock:
+            deps.gpu_hold_handover_tokens.add("hold-token")
+        endpoint = next(
+            route.endpoint
+            for route in build_router(deps).routes
+            if route.path == "/gpu_hold/release"
+        )
+        with pytest.raises(HTTPException, match="owned by a training task") as exc_info:
+            await endpoint(GpuHoldTokenRequest(token="hold-token"))
+        assert exc_info.value.status_code == 409
+        assert await deps.redis.get(gpu_hold_key(deps.worker_id)) == b"hold-token"
+
+    _run(scenario())
+
+
+def test_handover_claim_cannot_race_a_coordinator_release(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from fastapi import HTTPException
+
+    from acestep_worker.heartbeat import release_gpu_hold
+    from acestep_worker.wrapper import _claim_gpu_hold_handover, _release_gpu_hold_handover
+
+    deps = _make_deps(tmp_path)
+    claim_entered = asyncio.Event()
+    allow_claim = asyncio.Event()
+
+    async def delayed_match(*_args, **_kwargs) -> bool:
+        claim_entered.set()
+        await allow_claim.wait()
+        return True
+
+    async def scenario() -> None:
+        assert await reserve_gpu_hold(deps.redis, deps.worker_id, "hold-token", 15)
+        release = next(
+            route.endpoint
+            for route in build_router(deps).routes
+            if route.path == "/gpu_hold/release"
+        )
+        claim_task = asyncio.create_task(_claim_gpu_hold_handover(deps, "hold-token"))
+        await claim_entered.wait()
+        release_task = asyncio.create_task(release(GpuHoldTokenRequest(token="hold-token")))
+        await asyncio.sleep(0)
+        assert not release_task.done()
+        allow_claim.set()
+        assert await claim_task
+        with pytest.raises(HTTPException, match="owned by a training task") as exc_info:
+            await release_task
+        assert exc_info.value.status_code == 409
+        assert await deps.redis.get(gpu_hold_key(deps.worker_id)) == b"hold-token"
+        await _release_gpu_hold_handover(deps, "hold-token")
+        assert await release_gpu_hold(deps.redis, deps.worker_id, "hold-token")
+
+    monkeypatch.setattr("acestep_worker.wrapper.gpu_hold_matches", delayed_match)
+    _run(scenario())
+
+
 def test_train_lora_allows_only_one_concurrent_handover_for_a_hold_token(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
@@ -663,6 +728,7 @@ def test_worker_renewal_failure_releases_hold_and_cache_before_background_error(
     dataset_dir.mkdir()
     renewal_started = asyncio.Event()
     training_started = asyncio.Event()
+    training_cancelled = asyncio.Event()
     spawned: list[object] = []
 
     async def failed_renewal(*args, **kwargs) -> None:
@@ -676,7 +742,11 @@ def test_worker_renewal_failure_releases_hold_and_cache_before_background_error(
     ) -> None:
         training_started.set()
         await store.mark_running(task_id)
-        await asyncio.Event().wait()
+        try:
+            await asyncio.Event().wait()
+        except asyncio.CancelledError:
+            training_cancelled.set()
+            raise
 
     async def scenario() -> None:
         await deps.cache.load("sft")
@@ -701,9 +771,11 @@ def test_worker_renewal_failure_releases_hold_and_cache_before_background_error(
             await spawned[0]
         assert renewal_started.is_set()
         assert training_started.is_set()
+        assert training_cancelled.is_set()
         assert await deps.redis.get(gpu_hold_key(deps.worker_id)) is None
         assert deps.cache._in_use.get("sft", 0) == 0
         assert not deps.gpu_hold_handover_tokens
+        assert not deps.gpu_hold_handover_tasks
 
     monkeypatch.setattr("acestep_worker.wrapper._renew_gpu_hold_until_done", failed_renewal)
     monkeypatch.setattr("acestep_worker.wrapper.spawn_background", spawned.append)

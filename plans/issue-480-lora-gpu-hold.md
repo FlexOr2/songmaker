@@ -87,7 +87,10 @@ danach eintreffende Generierung trifft den Hold und wartet ohnehin dahinter.
    Token angenommen hat. `TrainLoraRequest.hold_token` ist Pflicht: der
    Endpoint vergleicht ihn mit dem Hold-Key und startet vor seiner erfolgreichen
    Antwort den tokengebundenen Worker-Renewal-Task. Erst diese Antwort ist die
-   Handover-Grenze; danach beendet der Job seinen Renewal-Task. Der Worker
+   Handover-Grenze; danach beendet der Job seinen Renewal-Task. Verliert der
+   Job die Submit-Antwort, fragt er den internen Handover-Status ab und folgt
+   mit dessen Task-ID demselben Training statt einen möglicherweise laufenden
+   Worker-Task als fehlgeschlagen zu markieren. Der Worker
    erneuert ausschließlich während seines gebundenen `train_lora`-Tasks und
    gibt im selben `finally` tokengebunden frei. Weder `HeartbeatLoop` noch
    `/load_model` erneuert. Stirbt der Job vor der Handover-Antwort, endet sein

@@ -95,8 +95,9 @@ User clicks "Generate"                    User clicks "Score"
         │                                         │
         ▼                                         ▼
   Music Worker (orchestrator)              Scoring Worker
-  ├── build config + repaint/cover overrides ├── spawn scorer subprocess
-  ├── /load_model + /generate (HTTP)         ├── AudioBox aesthetics
+  ├── see [Generation Flow](#generation-flow) ├── spawn scorer subprocess
+  │   for Lua admission, hold defer, config   ├── AudioBox aesthetics
+  │   build, worker HTTP, and persistence
   ├── consume SSE → task done                 ├── BPM, dynamics, silence, spectral
                                                   ├── lyrical coherence (Claude)
                                                   ├── save scores to DB

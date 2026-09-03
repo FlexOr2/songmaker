@@ -42,7 +42,9 @@ def _validate_base_generation_params(value: object) -> dict | None:
     if value is None:
         return None
     if not isinstance(value, dict):
-        msg = f"generation_params must be a dict or None, got {type(value).__name__}"
+        msg = (
+            f"generation_params must be a dict or None, got {type(value).__name__}"
+        )
         raise TypeError(msg)
     return BaseGenerationParams.model_validate(value).model_dump(exclude_none=True)
 
@@ -51,7 +53,9 @@ def _validate_stored_generation_params(value: object) -> dict | None:
     if value is None:
         return None
     if not isinstance(value, dict):
-        msg = f"generation_params must be a dict or None, got {type(value).__name__}"
+        msg = (
+            f"generation_params must be a dict or None, got {type(value).__name__}"
+        )
         raise TypeError(msg)
     return StoredGenerationParams.model_validate(value).model_dump(exclude_none=True)
 
@@ -79,10 +83,7 @@ class ShareMixin:
     """Mixin providing share_slug + is_shared columns for public sharing."""
 
     share_slug: Mapped[str | None] = mapped_column(
-        String(36),
-        unique=True,
-        nullable=True,
-        index=True,
+        String(36), unique=True, nullable=True, index=True,
     )
     is_shared: Mapped[bool] = mapped_column(Boolean, default=False)
 
@@ -98,18 +99,14 @@ class Album(ShareMixin, Base):
     colors: Mapped[dict] = mapped_column(JSON, default=dict)
     cover_key: Mapped[str | None] = mapped_column(String(64), nullable=True)
     created_by: Mapped[str | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True,
     )
     created_at: Mapped[datetime] = mapped_column(TZDateTime, default=_utcnow)
 
     deleted_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
     archived_at: Mapped[datetime | None] = mapped_column(
-        TZDateTime,
-        nullable=True,
-        index=True,
+        TZDateTime, nullable=True, index=True,
     )
 
     songs: Mapped[list[Song]] = relationship(back_populates="album", cascade="all, delete-orphan")
@@ -117,15 +114,15 @@ class Album(ShareMixin, Base):
 
 class Song(ShareMixin, Base):
     __tablename__ = "songs"
-    __table_args__ = (Index("ix_songs_album_id_slug", "album_id", "slug", unique=True),)
+    __table_args__ = (
+        Index("ix_songs_album_id_slug", "album_id", "slug", unique=True),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     title: Mapped[str] = mapped_column(String(200))
     album_id: Mapped[str] = mapped_column(ForeignKey("albums.id"))
     slug: Mapped[str] = mapped_column(
-        String(SONG_SLUG_MAX_LENGTH),
-        default="",
-        server_default="",
+        String(SONG_SLUG_MAX_LENGTH), default="", server_default="",
     )
     vocal_language: Mapped[str] = mapped_column(String(10), default="")
     track_number: Mapped[int] = mapped_column(Integer, default=0)
@@ -136,13 +133,11 @@ class Song(ShareMixin, Base):
 
     album: Mapped[Album] = relationship(back_populates="songs")
     versions: Mapped[list[Version]] = relationship(
-        back_populates="song",
-        cascade="all, delete-orphan",
+        back_populates="song", cascade="all, delete-orphan",
         order_by="Version.created_at",
     )
     generations: Mapped[list[Generation]] = relationship(
-        back_populates="song",
-        cascade="all, delete-orphan",
+        back_populates="song", cascade="all, delete-orphan",
         order_by="Generation.created_at.desc()",
     )
 
@@ -186,9 +181,7 @@ class Generation(ShareMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     song_id: Mapped[str] = mapped_column(ForeignKey("songs.id"), index=True)
     version_id: Mapped[str | None] = mapped_column(
-        ForeignKey("versions.id"),
-        nullable=True,
-        index=True,
+        ForeignKey("versions.id"), nullable=True, index=True,
     )
     generation_number: Mapped[int] = mapped_column(Integer, default=1)
     seed: Mapped[int | None] = mapped_column(BigInteger, nullable=True)
@@ -200,20 +193,15 @@ class Generation(ShareMixin, Base):
     status: Mapped[str] = mapped_column(String(20), default=JobStatus.COMPLETED)
     is_archived: Mapped[bool] = mapped_column(Boolean, default=False)
     archived_at: Mapped[datetime | None] = mapped_column(
-        TZDateTime,
-        nullable=True,
-        index=True,
+        TZDateTime, nullable=True, index=True,
     )
     is_picked: Mapped[bool] = mapped_column(Boolean, default=False)
     is_kept: Mapped[bool] = mapped_column(Boolean, default=False)
     model_mode: Mapped[str] = mapped_column(
-        String(10),
-        nullable=False,
-        default=MODEL_DEFAULT_MODE,
+        String(10), nullable=False, default=MODEL_DEFAULT_MODE,
     )
     src_generation_id: Mapped[str | None] = mapped_column(
-        ForeignKey("generations.id", ondelete="SET NULL"),
-        nullable=True,
+        ForeignKey("generations.id", ondelete="SET NULL"), nullable=True,
     )
     audio_duration_sec: Mapped[float | None] = mapped_column(Float, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, default=_utcnow)
@@ -221,17 +209,13 @@ class Generation(ShareMixin, Base):
     song: Mapped[Song] = relationship(back_populates="generations")
     version: Mapped[Version | None] = relationship(back_populates="generations")
     src_generation: Mapped[Generation | None] = relationship(
-        remote_side=[id],
-        foreign_keys=[src_generation_id],
+        remote_side=[id], foreign_keys=[src_generation_id],
     )
     scores: Mapped[list[Score]] = relationship(
-        back_populates="generation",
-        cascade="all, delete-orphan",
+        back_populates="generation", cascade="all, delete-orphan",
     )
     rating: Mapped[Rating | None] = relationship(
-        back_populates="generation",
-        uselist=False,
-        cascade="all, delete-orphan",
+        back_populates="generation", uselist=False, cascade="all, delete-orphan",
     )
 
     @validates("generation_params")
@@ -249,23 +233,17 @@ class Playlist(ShareMixin, Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     title: Mapped[str] = mapped_column(String(200))
     slug: Mapped[str] = mapped_column(
-        String(PLAYLIST_SLUG_MAX_LENGTH),
-        unique=True,
-        index=True,
-        default="",
-        server_default="",
+        String(PLAYLIST_SLUG_MAX_LENGTH), unique=True, index=True,
+        default="", server_default="",
     )
     created_by: Mapped[str | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True,
     )
     created_at: Mapped[datetime] = mapped_column(TZDateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(TZDateTime, default=_utcnow, onupdate=_utcnow)
 
     entries: Mapped[list[PlaylistEntry]] = relationship(
-        back_populates="playlist",
-        cascade="all, delete-orphan",
+        back_populates="playlist", cascade="all, delete-orphan",
         order_by="PlaylistEntry.position",
     )
 
@@ -276,8 +254,7 @@ class PlaylistEntry(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     playlist_id: Mapped[str] = mapped_column(ForeignKey("playlists.id"), index=True)
     generation_id: Mapped[str] = mapped_column(
-        ForeignKey("generations.id", ondelete="CASCADE"),
-        index=True,
+        ForeignKey("generations.id", ondelete="CASCADE"), index=True,
     )
     position: Mapped[int] = mapped_column(Integer)
     added_at: Mapped[datetime] = mapped_column(TZDateTime, default=_utcnow)
@@ -326,9 +303,7 @@ class GenerationPreset(Base):
     params: Mapped[dict] = mapped_column(JSON, default=dict)
     is_default: Mapped[bool] = mapped_column(Boolean, default=False)
     created_by: Mapped[str | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True,
     )
     created_at: Mapped[datetime] = mapped_column(TZDateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(TZDateTime, default=_utcnow, onupdate=_utcnow)
@@ -354,14 +329,10 @@ class Job(Base):
     error_type: Mapped[str | None] = mapped_column(String(30), nullable=True)
     queue_reason: Mapped[str | None] = mapped_column(Text, nullable=True)
     user_id: Mapped[str | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True,
     )
     song_id: Mapped[str | None] = mapped_column(
-        ForeignKey("songs.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
+        ForeignKey("songs.id", ondelete="SET NULL"), nullable=True, index=True,
     )
     worker_pid: Mapped[int | None] = mapped_column(Integer, nullable=True)
     heartbeat_at: Mapped[datetime] = mapped_column(TZDateTime, default=_utcnow)
@@ -381,16 +352,13 @@ class User(Base):
     role: Mapped[str] = mapped_column(String(20), default="user")
     is_active: Mapped[bool] = mapped_column(Boolean, default=True)
     default_generation_config: Mapped[str | None] = mapped_column(
-        String(36),
-        nullable=True,
-        default=None,
+        String(36), nullable=True, default=None,
     )
     created_at: Mapped[datetime] = mapped_column(TZDateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(TZDateTime, default=_utcnow, onupdate=_utcnow)
 
     sessions: Mapped[list[UserSession]] = relationship(
-        back_populates="user",
-        cascade="all, delete-orphan",
+        back_populates="user", cascade="all, delete-orphan",
     )
 
 
@@ -400,8 +368,7 @@ class ResourceEventCursor(Base):
     __tablename__ = "resource_event_cursors"
 
     user_id: Mapped[str] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        primary_key=True,
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True,
     )
     high_water_mark: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
 
@@ -417,8 +384,7 @@ class ResourceEvent(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=False,
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=False,
     )
     sequence: Mapped[int] = mapped_column(BigInteger, nullable=False)
     kind: Mapped[str] = mapped_column(String(50), nullable=False)
@@ -426,10 +392,7 @@ class ResourceEvent(Base):
     resource_id: Mapped[str] = mapped_column(String(64), nullable=False, index=True)
     generation_id: Mapped[str] = mapped_column(String(64), nullable=False)
     created_at: Mapped[datetime] = mapped_column(
-        TZDateTime,
-        nullable=False,
-        default=_utcnow,
-        index=True,
+        TZDateTime, nullable=False, default=_utcnow, index=True,
     )
 
 
@@ -458,13 +421,13 @@ class LoginAttempt(Base):
 
 class RateLimitSetting(Base):
     __tablename__ = "rate_limit_settings"
-    __table_args__ = (UniqueConstraint("user_id", "setting_key", name="uq_rate_limit_user_key"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "setting_key", name="uq_rate_limit_user_key"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str | None] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        nullable=True,
-        index=True,
+        ForeignKey("users.id", ondelete="CASCADE"), nullable=True, index=True,
     )
     setting_key: Mapped[str] = mapped_column(String(50))
     value: Mapped[int] = mapped_column(Integer)
@@ -482,15 +445,12 @@ class Conversation(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        index=True,
+        ForeignKey("users.id", ondelete="CASCADE"), index=True,
     )
     title: Mapped[str | None] = mapped_column(String(200), nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        TZDateTime,
-        default=_utcnow,
-        onupdate=_utcnow,
+        TZDateTime, default=_utcnow, onupdate=_utcnow,
     )
     archived_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
 
@@ -521,20 +481,16 @@ class ConversationSummary(Base):
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     conversation_id: Mapped[str] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE"),
-        unique=True,
-        index=True,
+        unique=True, index=True,
     )
     summary_text: Mapped[str] = mapped_column(Text)
     last_summarized_message_id: Mapped[str | None] = mapped_column(
-        ForeignKey("chat_messages.id", ondelete="SET NULL"),
-        nullable=True,
+        ForeignKey("chat_messages.id", ondelete="SET NULL"), nullable=True,
     )
     message_count: Mapped[int] = mapped_column(Integer, default=0)
     token_count: Mapped[int] = mapped_column(Integer, default=0)
     updated_at: Mapped[datetime] = mapped_column(
-        TZDateTime,
-        default=_utcnow,
-        onupdate=_utcnow,
+        TZDateTime, default=_utcnow, onupdate=_utcnow,
     )
 
     conversation: Mapped[Conversation] = relationship(back_populates="summary")
@@ -546,14 +502,11 @@ class CowriterUserMemory(Base):
     __tablename__ = "cowriter_user_memories"
 
     user_id: Mapped[str] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        primary_key=True,
+        ForeignKey("users.id", ondelete="CASCADE"), primary_key=True,
     )
     body: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(
-        TZDateTime,
-        default=_utcnow,
-        onupdate=_utcnow,
+        TZDateTime, default=_utcnow, onupdate=_utcnow,
     )
 
 
@@ -563,14 +516,11 @@ class CowriterSongMemory(Base):
     __tablename__ = "cowriter_song_memories"
 
     song_id: Mapped[str] = mapped_column(
-        ForeignKey("songs.id", ondelete="CASCADE"),
-        primary_key=True,
+        ForeignKey("songs.id", ondelete="CASCADE"), primary_key=True,
     )
     body: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(
-        TZDateTime,
-        default=_utcnow,
-        onupdate=_utcnow,
+        TZDateTime, default=_utcnow, onupdate=_utcnow,
     )
 
 
@@ -580,14 +530,11 @@ class CowriterAlbumMemory(Base):
     __tablename__ = "cowriter_album_memories"
 
     album_id: Mapped[str] = mapped_column(
-        ForeignKey("albums.id", ondelete="CASCADE"),
-        primary_key=True,
+        ForeignKey("albums.id", ondelete="CASCADE"), primary_key=True,
     )
     body: Mapped[str] = mapped_column(Text, default="")
     updated_at: Mapped[datetime] = mapped_column(
-        TZDateTime,
-        default=_utcnow,
-        onupdate=_utcnow,
+        TZDateTime, default=_utcnow, onupdate=_utcnow,
     )
 
 
@@ -596,14 +543,11 @@ class ChatMessage(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     song_id: Mapped[str | None] = mapped_column(
-        ForeignKey("songs.id", ondelete="CASCADE"),
-        index=True,
-        nullable=True,
+        ForeignKey("songs.id", ondelete="CASCADE"), index=True, nullable=True,
     )
     conversation_id: Mapped[str | None] = mapped_column(
         ForeignKey("conversations.id", ondelete="CASCADE"),
-        index=True,
-        nullable=True,
+        index=True, nullable=True,
     )
     role: Mapped[str] = mapped_column(String(10))
     content: Mapped[str] = mapped_column(Text)
@@ -622,9 +566,7 @@ class AceStepWorker(Base):
     vram_total_gb: Mapped[float | None] = mapped_column(Float, nullable=True)
     registered_at: Mapped[datetime] = mapped_column(TZDateTime, default=_utcnow)
     last_register_at: Mapped[datetime] = mapped_column(
-        TZDateTime,
-        default=_utcnow,
-        onupdate=_utcnow,
+        TZDateTime, default=_utcnow, onupdate=_utcnow,
     )
 
 
@@ -638,12 +580,13 @@ class UserLora(Base):
     """
 
     __tablename__ = "user_loras"
-    __table_args__ = (UniqueConstraint("user_id", "slug", name="uq_user_lora_user_slug"),)
+    __table_args__ = (
+        UniqueConstraint("user_id", "slug", name="uq_user_lora_user_slug"),
+    )
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str] = mapped_column(
-        ForeignKey("users.id", ondelete="CASCADE"),
-        index=True,
+        ForeignKey("users.id", ondelete="CASCADE"), index=True,
     )
     name: Mapped[str] = mapped_column(String(100))
     slug: Mapped[str] = mapped_column(String(LORA_SLUG_MAX_LENGTH))
@@ -651,17 +594,13 @@ class UserLora(Base):
     storage_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     tensor_path: Mapped[str | None] = mapped_column(String(500), nullable=True)
     training_job_id: Mapped[str | None] = mapped_column(
-        ForeignKey("jobs.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
+        ForeignKey("jobs.id", ondelete="SET NULL"), nullable=True, index=True,
     )
     error: Mapped[str | None] = mapped_column(Text, nullable=True)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, default=_utcnow)
     completed_at: Mapped[datetime | None] = mapped_column(TZDateTime, nullable=True)
     deleted_at: Mapped[datetime | None] = mapped_column(
-        TZDateTime,
-        nullable=True,
-        index=True,
+        TZDateTime, nullable=True, index=True,
     )
 
     samples: Mapped[list[UserLoraSample]] = relationship(
@@ -680,8 +619,7 @@ class UserLoraSample(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_lora_id: Mapped[str] = mapped_column(
-        ForeignKey("user_loras.id", ondelete="CASCADE"),
-        index=True,
+        ForeignKey("user_loras.id", ondelete="CASCADE"), index=True,
     )
     audio_path: Mapped[str] = mapped_column(String(500))
     caption: Mapped[str] = mapped_column(Text, default="")
@@ -689,9 +627,7 @@ class UserLoraSample(Base):
     position: Mapped[int] = mapped_column(Integer, default=0)
     created_at: Mapped[datetime] = mapped_column(TZDateTime, default=_utcnow)
     updated_at: Mapped[datetime] = mapped_column(
-        TZDateTime,
-        default=_utcnow,
-        onupdate=_utcnow,
+        TZDateTime, default=_utcnow, onupdate=_utcnow,
     )
 
     user_lora: Mapped[UserLora] = relationship(back_populates="samples")
@@ -702,9 +638,7 @@ class AuditLog(Base):
 
     id: Mapped[str] = mapped_column(String(36), primary_key=True, default=_uuid)
     user_id: Mapped[str | None] = mapped_column(
-        ForeignKey("users.id", ondelete="SET NULL"),
-        nullable=True,
-        index=True,
+        ForeignKey("users.id", ondelete="SET NULL"), nullable=True, index=True,
     )
     action: Mapped[str] = mapped_column(String(30), index=True)
     resource_type: Mapped[str] = mapped_column(String(30))

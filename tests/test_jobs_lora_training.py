@@ -129,6 +129,9 @@ def _patch_worker_calls(adapter_dir: str, *, events=None, submitted_requests=Non
         submit = AsyncMock()
         response = MagicMock()
         response.raise_for_status = MagicMock()
+        handover_response = MagicMock()
+        handover_response.raise_for_status = MagicMock()
+        handover_response.json.return_value = {"claimed": True, "task_id": "t-1"}
         response.json = MagicMock(return_value={"task_id": "t-1"})
 
         async def post(*args, **kwargs):
@@ -751,7 +754,7 @@ def test_held_lora_defers_without_running_or_materializing_a_dataset(seeded, db_
     with db_factory() as session:
         job = get_job(session, "job-1")
         assert job.status == JobStatus.QUEUED
-        assert job.queue_reason == "Waiting for LoRA training on this GPU."
+        assert job.queue_reason == "Waiting for queued generations on this GPU."
         assert get_user_lora(session, seeded["lora_id"]).status == LoraStatus.QUEUED
     dataset_dir = (
         seeded["audio_dir"]
@@ -798,7 +801,7 @@ def test_queued_generation_in_the_database_defers_lora_before_running(seeded, db
     with db_factory() as session:
         job = get_job(session, "job-1")
         assert job.status == JobStatus.QUEUED
-        assert job.queue_reason == "Waiting for LoRA training on this GPU."
+        assert job.queue_reason == "Waiting for queued generations on this GPU."
         assert get_user_lora(session, seeded["lora_id"]).status == LoraStatus.QUEUED
 
 
@@ -1019,6 +1022,118 @@ def test_running_update_failure_releases_the_new_lora_hold(seeded, db_factory) -
     assert renew_task is not None and renew_task.cancelled()
 
 
+def test_post_materialization_failure_releases_the_hold_and_stops_renewal(
+    seeded, db_factory
+) -> None:
+    import fakeredis.aioredis
+
+    from songmaker_cli.acestep_state import release_gpu_hold, reserve_gpu_hold
+
+    async def exercise() -> None:
+        from songmaker_cli.jobs.lora_training import update_user_lora
+
+        redis = fakeredis.aioredis.FakeRedis()
+        assert await reserve_gpu_hold(redis, "w0", "hold-token", 15)
+        renew_task = asyncio.create_task(asyncio.Event().wait())
+
+        async def start_renewal(*_args, **_kwargs) -> asyncio.Task[None]:
+            return renew_task
+
+        async def release_hold(*_args, **_kwargs) -> None:
+            assert await release_gpu_hold(redis, "w0", "hold-token")
+
+        def fail_preprocessing(session, *args, **kwargs) -> None:
+            if kwargs.get("status") == LoraStatus.PREPROCESSING:
+                raise RuntimeError("preprocessing update failed")
+            update_user_lora(session, *args, **kwargs)
+
+        with (
+            patch(
+                "songmaker_cli.jobs.lora_training._reserve_lora_worker",
+                AsyncMock(return_value=(_FakeWorker(), "hold-token")),
+            ),
+            patch("songmaker_cli.jobs.lora_training._start_lora_hold_renewal", start_renewal),
+            patch(
+                "songmaker_cli.jobs.lora_training._materialize_dataset",
+                return_value=seeded["audio_dir"],
+            ),
+            patch(
+                "songmaker_cli.jobs.lora_training.update_user_lora",
+                fail_preprocessing,
+            ),
+            patch("songmaker_cli.jobs.lora_training._release_lora_hold", release_hold),
+        ):
+            await run_lora_training_job(
+                {},
+                "job-1",
+                seeded["lora_id"],
+                seeded["user_id"],
+                db_factory=db_factory,
+                audio_dir=seeded["audio_dir"],
+                redis=redis,
+            )
+
+        assert renew_task.cancelled()
+        assert await reserve_gpu_hold(redis, "w0", "hold-token", 15)
+
+    _run(exercise())
+
+
+def test_post_materialization_cancellation_releases_the_hold_and_stops_renewal(
+    seeded, db_factory
+) -> None:
+    import fakeredis.aioredis
+
+    from songmaker_cli.acestep_state import release_gpu_hold, reserve_gpu_hold
+
+    async def exercise() -> None:
+        from songmaker_cli.jobs.lora_training import update_user_lora
+
+        redis = fakeredis.aioredis.FakeRedis()
+        assert await reserve_gpu_hold(redis, "w0", "hold-token", 15)
+        renew_task = asyncio.create_task(asyncio.Event().wait())
+
+        async def start_renewal(*_args, **_kwargs) -> asyncio.Task[None]:
+            return renew_task
+
+        async def release_hold(*_args, **_kwargs) -> None:
+            assert await release_gpu_hold(redis, "w0", "hold-token")
+
+        def cancel_preprocessing(session, *args, **kwargs) -> None:
+            if kwargs.get("status") == LoraStatus.PREPROCESSING:
+                raise asyncio.CancelledError()
+            update_user_lora(session, *args, **kwargs)
+
+        with (
+            patch(
+                "songmaker_cli.jobs.lora_training._reserve_lora_worker",
+                AsyncMock(return_value=(_FakeWorker(), "hold-token")),
+            ),
+            patch("songmaker_cli.jobs.lora_training._start_lora_hold_renewal", start_renewal),
+            patch(
+                "songmaker_cli.jobs.lora_training._materialize_dataset",
+                return_value=seeded["audio_dir"],
+            ),
+            patch("songmaker_cli.jobs.lora_training.update_user_lora", cancel_preprocessing),
+            patch("songmaker_cli.jobs.lora_training._release_lora_hold", release_hold),
+            pytest.raises(asyncio.CancelledError),
+        ):
+            await run_lora_training_job(
+                {},
+                "job-1",
+                seeded["lora_id"],
+                seeded["user_id"],
+                db_factory=db_factory,
+                audio_dir=seeded["audio_dir"],
+                redis=redis,
+            )
+
+        assert renew_task.cancelled()
+        assert await reserve_gpu_hold(redis, "w0", "hold-token", 15)
+
+    _run(exercise())
+
+
 def test_lora_releases_its_hold_when_running_cannot_be_applied(seeded, db_factory) -> None:
     renew_task: asyncio.Task[None] | None = None
 
@@ -1108,6 +1223,9 @@ def test_lost_train_response_keeps_the_hold_for_the_worker(seeded, db_factory) -
         renew_task = asyncio.create_task(asyncio.Event().wait())
         response = MagicMock()
         response.raise_for_status = MagicMock()
+        handover_response = MagicMock()
+        handover_response.raise_for_status = MagicMock()
+        handover_response.json.return_value = {"claimed": True, "task_id": "t-1"}
         client = MagicMock()
         client.__aenter__ = AsyncMock(return_value=client)
         client.__aexit__ = AsyncMock(return_value=None)
@@ -1115,6 +1233,8 @@ def test_lost_train_response_keeps_the_hold_for_the_worker(seeded, db_factory) -
         async def post(url, **kwargs):
             if url.endswith("/load_model"):
                 return response
+            if url.endswith("/gpu_hold/handover"):
+                return handover_response
             raise httpx.ReadError("train request was accepted but its response was lost")
 
         client.post = AsyncMock(side_effect=post)
@@ -1123,6 +1243,74 @@ def test_lost_train_response_keeps_the_hold_for_the_worker(seeded, db_factory) -
             from songmaker_cli.acestep_state import release_gpu_hold
 
             await release_gpu_hold(redis, "w0", "hold-token")
+
+        release = AsyncMock(side_effect=release_hold)
+        async def events(*_args, **_kwargs):
+            yield ("done", {"result": {"mode": "sft", "adapter_dir": "/tmp/adapter"}})
+
+        with (
+            patch("httpx.AsyncClient", return_value=client),
+            patch("songmaker_cli.jobs.lora_training._release_lora_hold", release),
+            patch("songmaker_cli.jobs.lora_training._iterate_task_events", events),
+        ):
+            result = await _pick_and_call_worker(
+                target_mode="sft",
+                request_payload={},
+                worker=_WorkerHandle(base_url="http://fake", id="w0"),
+                hold_token="hold-token",
+                renew_task=renew_task,
+                on_progress=lambda _fraction: None,
+                on_heartbeat=lambda: None,
+            )
+        assert result.adapter_dir == "/tmp/adapter"
+        assert not await admit_generation(redis, "w0")
+        return release
+
+    release = _run(exercise())
+    release.assert_not_awaited()
+
+
+def test_unknown_handover_probe_does_not_release_a_worker_owned_hold() -> None:
+    import fakeredis.aioredis
+    import httpx
+
+    from songmaker_cli.acestep_state import (
+        admit_generation,
+        release_gpu_hold,
+        renew_gpu_hold,
+        reserve_gpu_hold,
+    )
+    from songmaker_cli.jobs.lora_training import _pick_and_call_worker, _WorkerHandle
+
+    async def exercise() -> AsyncMock:
+        redis = fakeredis.aioredis.FakeRedis()
+        assert await reserve_gpu_hold(redis, "w0", "hold-token", 15)
+        worker_renewed = asyncio.Event()
+
+        async def worker_renewal() -> None:
+            assert await renew_gpu_hold(redis, "w0", "hold-token", 15)
+            worker_renewed.set()
+            await asyncio.Event().wait()
+
+        worker_renew_task = asyncio.create_task(worker_renewal())
+        await worker_renewed.wait()
+        job_renew_task = asyncio.create_task(asyncio.Event().wait())
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+
+        async def post(url, **_kwargs):
+            if url.endswith("/load_model"):
+                return response
+            if url.endswith("/gpu_hold/handover"):
+                raise httpx.ConnectError("handover probe unavailable")
+            raise httpx.ReadError("train request response lost")
+
+        client.post = AsyncMock(side_effect=post)
+        async def release_hold(*_args, **_kwargs) -> None:
+            assert await release_gpu_hold(redis, "w0", "hold-token")
 
         release = AsyncMock(side_effect=release_hold)
         with (
@@ -1135,10 +1323,75 @@ def test_lost_train_response_keeps_the_hold_for_the_worker(seeded, db_factory) -
                 request_payload={},
                 worker=_WorkerHandle(base_url="http://fake", id="w0"),
                 hold_token="hold-token",
+                renew_task=job_renew_task,
+                on_progress=lambda _fraction: None,
+                on_heartbeat=lambda: None,
+            )
+        assert job_renew_task.cancelled()
+        assert not await admit_generation(redis, "w0")
+        worker_renew_task.cancel()
+        with pytest.raises(asyncio.CancelledError):
+            await worker_renew_task
+        assert await release_gpu_hold(redis, "w0", "hold-token")
+        assert await admit_generation(redis, "w0")
+        return release
+
+    release = _run(exercise())
+    release.assert_not_awaited()
+
+
+@pytest.mark.parametrize("probe_outcome", ["invalid-json", "cancelled"])
+def test_handover_probe_failures_do_not_release_the_hold(probe_outcome: str) -> None:
+    import fakeredis.aioredis
+    import httpx
+
+    from songmaker_cli.acestep_state import admit_generation, release_gpu_hold, reserve_gpu_hold
+    from songmaker_cli.jobs.lora_training import _pick_and_call_worker, _WorkerHandle
+
+    async def exercise() -> AsyncMock:
+        redis = fakeredis.aioredis.FakeRedis()
+        assert await reserve_gpu_hold(redis, "w0", "hold-token", 15)
+        renew_task = asyncio.create_task(asyncio.Event().wait())
+        response = MagicMock()
+        response.raise_for_status = MagicMock()
+        handover_response = MagicMock()
+        handover_response.raise_for_status = MagicMock()
+        handover_response.json.side_effect = ValueError("not JSON")
+        client = MagicMock()
+        client.__aenter__ = AsyncMock(return_value=client)
+        client.__aexit__ = AsyncMock(return_value=None)
+
+        async def post(url, **_kwargs):
+            if url.endswith("/load_model"):
+                return response
+            if url.endswith("/gpu_hold/handover"):
+                if probe_outcome == "cancelled":
+                    raise asyncio.CancelledError()
+                return handover_response
+            raise httpx.ReadError("train request response lost")
+
+        client.post = AsyncMock(side_effect=post)
+
+        async def release_hold(*_args, **_kwargs) -> None:
+            assert await release_gpu_hold(redis, "w0", "hold-token")
+
+        release = AsyncMock(side_effect=release_hold)
+        expected = asyncio.CancelledError if probe_outcome == "cancelled" else httpx.ReadError
+        with (
+            patch("httpx.AsyncClient", return_value=client),
+            patch("songmaker_cli.jobs.lora_training._release_lora_hold", release),
+            pytest.raises(expected),
+        ):
+            await _pick_and_call_worker(
+                target_mode="sft",
+                request_payload={},
+                worker=_WorkerHandle(base_url="http://fake", id="w0"),
+                hold_token="hold-token",
                 renew_task=renew_task,
                 on_progress=lambda _fraction: None,
                 on_heartbeat=lambda: None,
             )
+        assert renew_task.cancelled()
         assert not await admit_generation(redis, "w0")
         return release
 

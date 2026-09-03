@@ -9,9 +9,13 @@ import fakeredis.aioredis
 import pytest
 
 from songmaker_cli.acestep_state import (
+    ADMIT_GENERATION_SCRIPT,
     DOWNLOAD_KEY_PREFIX,
     GPU_HOLD_KEY_PREFIX,
     QUEUE_KEY_PREFIX,
+    RELEASE_GPU_HOLD_SCRIPT,
+    RENEW_GPU_HOLD_SCRIPT,
+    RESERVE_GPU_HOLD_SCRIPT,
     WORKER_KEY_PREFIX,
     admit_generation,
     clear_download_in_progress,
@@ -47,7 +51,22 @@ def redis():
 
 def test_key_prefixes_match_worker_heartbeat() -> None:
     from acestep_worker.heartbeat import (
+        ADMIT_GENERATION_SCRIPT as WORKER_ADMIT_GENERATION_SCRIPT,
+    )
+    from acestep_worker.heartbeat import (
+        GPU_HOLD_KEY_PREFIX as WORKER_GPU_HOLD_PREFIX,
+    )
+    from acestep_worker.heartbeat import (
         QUEUE_KEY_PREFIX as WORKER_QUEUE_PREFIX,
+    )
+    from acestep_worker.heartbeat import (
+        RELEASE_GPU_HOLD_SCRIPT as WORKER_RELEASE_GPU_HOLD_SCRIPT,
+    )
+    from acestep_worker.heartbeat import (
+        RENEW_GPU_HOLD_SCRIPT as WORKER_RENEW_GPU_HOLD_SCRIPT,
+    )
+    from acestep_worker.heartbeat import (
+        RESERVE_GPU_HOLD_SCRIPT as WORKER_RESERVE_GPU_HOLD_SCRIPT,
     )
     from acestep_worker.heartbeat import (
         WORKER_KEY_PREFIX as WORKER_WORKER_PREFIX,
@@ -55,6 +74,11 @@ def test_key_prefixes_match_worker_heartbeat() -> None:
 
     assert WORKER_KEY_PREFIX == WORKER_WORKER_PREFIX
     assert QUEUE_KEY_PREFIX == WORKER_QUEUE_PREFIX
+    assert GPU_HOLD_KEY_PREFIX == WORKER_GPU_HOLD_PREFIX
+    assert ADMIT_GENERATION_SCRIPT == WORKER_ADMIT_GENERATION_SCRIPT
+    assert RESERVE_GPU_HOLD_SCRIPT == WORKER_RESERVE_GPU_HOLD_SCRIPT
+    assert RENEW_GPU_HOLD_SCRIPT == WORKER_RENEW_GPU_HOLD_SCRIPT
+    assert RELEASE_GPU_HOLD_SCRIPT == WORKER_RELEASE_GPU_HOLD_SCRIPT
 
 
 def test_heartbeat_payload_keys_match_admin_reader() -> None:

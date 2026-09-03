@@ -18,6 +18,7 @@ from sqlalchemy.orm import Session, sessionmaker
 from songmaker_cli.constants import (
     ARQ_MUSIC_QUEUE_NAME,
     GPU_HOLD_POLL_INTERVAL_SECONDS,
+    LORA_WAITING_FOR_GENERATION_QUEUE_REASON,
     MODEL_DEFAULT_MODE,
     STALE_JOB_THRESHOLDS,
     USER_LORA_DATASET_DIRNAME,
@@ -72,6 +73,17 @@ class PreviousAdapterRestoredError(RuntimeError):
 class _WorkerHandle:
     base_url: str
     id: str
+
+
+@dataclass
+class _LoraHoldHandover:
+    complete: bool = False
+
+
+@dataclass(frozen=True)
+class _LoraHandoverProbe:
+    claimed: bool | None
+    task_id: str | None = None
 
 
 ProgressCallback = Callable[[float], Awaitable[None] | None]
@@ -135,15 +147,18 @@ async def _pick_and_call_worker(
     worker: _WorkerHandle,
     hold_token: str,
     renew_task: asyncio.Task[None],
+    handover: _LoraHoldHandover | None = None,
     on_progress: ProgressCallback,
     on_heartbeat: HeartbeatCallback,
 ) -> TrainLoraTaskResultDTO:
     import httpx
 
+    if handover is None:
+        handover = _LoraHoldHandover()
     headers = _internal_headers()
-    handover_complete = False
     submit_transmission_started = False
     load_options = DispatchOptions()
+    task_id: str | None = None
     try:
         async with httpx.AsyncClient(timeout=load_options.load_model_timeout_seconds) as client:
             load = await _race_with_renewal(
@@ -173,13 +188,21 @@ async def _pick_and_call_worker(
             )
             submit.raise_for_status()
             task_id = submit.json()["task_id"]
-            handover_complete = True
+            handover.complete = True
     except BaseException:
-        if not handover_complete and not submit_transmission_started:
-            await _release_lora_hold(worker, hold_token)
-        raise
+        if submit_transmission_started:
+            handover.complete = True
+            probe = await _worker_claimed_lora_handover(worker, hold_token)
+            if probe.task_id is not None:
+                task_id = probe.task_id
+            elif probe.claimed is False:
+                handover.complete = False
+        if not handover.complete:
+            await _release_lora_hold(worker, hold_token, best_effort=True)
+        if task_id is None:
+            raise
     finally:
-        await _stop_lora_renewal(renew_task, suppress_failure=handover_complete)
+        await _stop_lora_renewal(renew_task, suppress_failure=handover.complete)
 
     last_result: TrainLoraTaskResultDTO | None = None
     async for event_type, data in _iterate_task_events(
@@ -249,16 +272,60 @@ async def _stop_lora_renewal(
             raise
 
 
-async def _release_lora_hold(worker: _WorkerHandle, hold_token: str) -> None:
+async def _worker_claimed_lora_handover(
+    worker: _WorkerHandle,
+    hold_token: str,
+) -> _LoraHandoverProbe:
     import httpx
 
-    async with httpx.AsyncClient(timeout=_LORA_SUBMIT_TIMEOUT_SECONDS) as client:
-        release = await client.post(
-            f"{worker.base_url}/gpu_hold/release",
-            json={"token": hold_token},
-            headers=_internal_headers(),
-        )
-        release.raise_for_status()
+    try:
+        async with httpx.AsyncClient(timeout=_LORA_SUBMIT_TIMEOUT_SECONDS) as client:
+            response = await client.post(
+                f"{worker.base_url}/gpu_hold/handover",
+                json={"token": hold_token},
+                headers=_internal_headers(),
+            )
+            response.raise_for_status()
+    except httpx.HTTPError:
+        log.exception("Could not confirm LoRA hold handover for worker %s", worker.id)
+        return _LoraHandoverProbe(claimed=None)
+    try:
+        payload = response.json()
+    except ValueError:
+        log.error("Worker %s returned invalid JSON for LoRA handover status", worker.id)
+        return _LoraHandoverProbe(claimed=None)
+    if not isinstance(payload, dict) or not isinstance(payload.get("claimed"), bool):
+        log.error("Worker %s returned an invalid LoRA handover status", worker.id)
+        return _LoraHandoverProbe(claimed=None)
+    if payload["claimed"] is not True:
+        return _LoraHandoverProbe(claimed=False)
+    task_id = payload.get("task_id")
+    return _LoraHandoverProbe(
+        claimed=True,
+        task_id=task_id if isinstance(task_id, str) else None,
+    )
+
+
+async def _release_lora_hold(
+    worker: _WorkerHandle,
+    hold_token: str,
+    *,
+    best_effort: bool = False,
+) -> None:
+    import httpx
+
+    try:
+        async with httpx.AsyncClient(timeout=_LORA_SUBMIT_TIMEOUT_SECONDS) as client:
+            release = await client.post(
+                f"{worker.base_url}/gpu_hold/release",
+                json={"token": hold_token},
+                headers=_internal_headers(),
+            )
+            release.raise_for_status()
+    except httpx.HTTPError:
+        if not best_effort:
+            raise
+        log.exception("Could not release LoRA hold for worker %s during cleanup", worker.id)
 
 
 async def _renew_lora_hold(worker: _WorkerHandle, hold_token: str) -> None:
@@ -311,6 +378,98 @@ async def _reserve_lora_worker(
             raise AllWorkersHeld("ACE-Step worker is busy or held")
         response.raise_for_status()
     return _WorkerHandle(base_url=picked.base_url, id=picked.id), response.json()["token"]
+
+
+async def _prepare_and_submit_lora(
+    *,
+    audio_dir: Path,
+    db_factory: sessionmaker[Session],
+    hold_token: str,
+    job_id: str,
+    lora_id: str,
+    samples: list,
+    target_mode: str,
+    user_id: str,
+    worker: _WorkerHandle,
+) -> tuple[TrainLoraTaskResultDTO, Path, Path] | None:
+    renew_task: asyncio.Task[None] | None = None
+    handover = _LoraHoldHandover()
+    try:
+        renew_task = await _start_lora_hold_renewal(worker, hold_token)
+        if not _update_job(db_factory, job_id, JobStatus.RUNNING, worker_pid=os.getpid()):
+            return None
+        dataset_dir = await _race_with_renewal(
+            asyncio.to_thread(
+                _materialize_dataset,
+                audio_dir=audio_dir,
+                user_id=user_id,
+                lora_id=lora_id,
+                samples=samples,
+            ),
+            renew_task,
+        )
+        with db_factory() as session:
+            update_user_lora(
+                session,
+                lora_id,
+                status=LoraStatus.PREPROCESSING,
+                clear_error=True,
+            )
+            session.commit()
+        _update_job(db_factory, job_id, JobStatus.RUNNING, progress=0.05)
+
+        output_dir = _output_dir(audio_dir, user_id, lora_id)
+        output_dir.parent.mkdir(parents=True, exist_ok=True)
+        tmp_output = _tmp_training_dir(audio_dir, user_id, lora_id)
+        if tmp_output.exists():
+            shutil.rmtree(tmp_output)
+
+        last_update = 0.0
+        last_status_name: str = LoraStatus.PREPROCESSING
+
+        def on_progress(fraction: float) -> None:
+            nonlocal last_update, last_status_name
+            import time as _t
+
+            now = _t.monotonic()
+            if now - last_update < _LORA_PROGRESS_THROTTLE_SECONDS:
+                return
+            last_update = now
+            new_status = LoraStatus.PREPROCESSING
+            if fraction >= 0.90:
+                new_status = LoraStatus.EXPORTING
+            elif fraction >= 0.20:
+                new_status = LoraStatus.TRAINING
+            if new_status != last_status_name:
+                with db_factory() as session:
+                    update_user_lora(session, lora_id, status=new_status)
+                    session.commit()
+                last_status_name = new_status
+            _update_job(db_factory, job_id, JobStatus.RUNNING, progress=fraction)
+
+        def on_heartbeat() -> None:
+            _touch_heartbeat(db_factory, job_id)
+
+        worker_result = await _pick_and_call_worker(
+            target_mode=target_mode,
+            request_payload={
+                "mode": target_mode,
+                "dataset_dir": str(dataset_dir),
+                "output_dir": str(tmp_output),
+            },
+            worker=worker,
+            hold_token=hold_token,
+            renew_task=renew_task,
+            handover=handover,
+            on_progress=on_progress,
+            on_heartbeat=on_heartbeat,
+        )
+        return worker_result, dataset_dir, tmp_output
+    finally:
+        if not handover.complete:
+            await _release_lora_hold(worker, hold_token, best_effort=True)
+        if renew_task is not None:
+            await _stop_lora_renewal(renew_task, suppress_failure=True)
 
 
 def _validate_export_path(
@@ -636,7 +795,7 @@ async def run_lora_training_job(
                 db_factory,
                 job_id,
                 JobStatus.QUEUED,
-                queue_reason="Waiting for LoRA training on this GPU.",
+                queue_reason=LORA_WAITING_FOR_GENERATION_QUEUE_REASON,
             )
             await redis.enqueue_job(
                 JobFunction.LORA_TRAINING,
@@ -648,89 +807,21 @@ async def run_lora_training_job(
             )
             return
 
-        renew_task: asyncio.Task[None] | None = None
         try:
-            renew_task = await _start_lora_hold_renewal(worker, hold_token)
-            if not _update_job(db_factory, job_id, JobStatus.RUNNING, worker_pid=os.getpid()):
-                await _release_lora_hold(worker, hold_token)
-                await _stop_lora_renewal(renew_task)
-                return
-            dataset_dir = await _race_with_renewal(
-                asyncio.to_thread(
-                    _materialize_dataset,
-                    audio_dir=audio_dir,
-                    user_id=user_id,
-                    lora_id=lora_id,
-                    samples=samples,
-                ),
-                renew_task,
-            )
-        except BaseException:
-            try:
-                await _release_lora_hold(worker, hold_token)
-            finally:
-                if renew_task is not None:
-                    await _stop_lora_renewal(renew_task)
-            raise
-
-        with db_factory() as session:
-            update_user_lora(
-                session,
-                lora_id,
-                status=LoraStatus.PREPROCESSING,
-                clear_error=True,
-            )
-            session.commit()
-        _update_job(db_factory, job_id, JobStatus.RUNNING, progress=0.05)
-
-        output_dir = _output_dir(audio_dir, user_id, lora_id)
-        output_dir.parent.mkdir(parents=True, exist_ok=True)
-        tmp_output = _tmp_training_dir(audio_dir, user_id, lora_id)
-        if tmp_output.exists():
-            shutil.rmtree(tmp_output)
-
-        last_update = 0.0
-        last_status_name: str = LoraStatus.PREPROCESSING
-
-        def _on_progress(fraction: float) -> None:
-            nonlocal last_update, last_status_name
-            import time as _t
-
-            now = _t.monotonic()
-            if now - last_update < _LORA_PROGRESS_THROTTLE_SECONDS:
-                return
-            last_update = now
-            new_status = LoraStatus.PREPROCESSING
-            if fraction >= 0.90:
-                new_status = LoraStatus.EXPORTING
-            elif fraction >= 0.20:
-                new_status = LoraStatus.TRAINING
-            if new_status != last_status_name:
-                with db_factory() as s:
-                    update_user_lora(s, lora_id, status=new_status)
-                    s.commit()
-                last_status_name = new_status
-            _update_job(db_factory, job_id, JobStatus.RUNNING, progress=fraction)
-
-        def _on_heartbeat() -> None:
-            _touch_heartbeat(db_factory, job_id)
-
-        request_payload = {
-            "mode": target_mode,
-            "dataset_dir": str(dataset_dir),
-            "output_dir": str(tmp_output),
-        }
-
-        try:
-            worker_result = await _pick_and_call_worker(
-                target_mode=target_mode,
-                request_payload=request_payload,
-                worker=worker,
+            submitted = await _prepare_and_submit_lora(
+                audio_dir=audio_dir,
+                db_factory=db_factory,
                 hold_token=hold_token,
-                renew_task=renew_task,
-                on_progress=_on_progress,
-                on_heartbeat=_on_heartbeat,
+                job_id=job_id,
+                lora_id=lora_id,
+                samples=samples,
+                target_mode=target_mode,
+                user_id=user_id,
+                worker=worker,
             )
+            if submitted is None:
+                return
+            worker_result, dataset_dir, tmp_output = submitted
         except NoCapacityError as exc:
             cleanup_failed_lora_with_factory(
                 lora_id=lora_id,

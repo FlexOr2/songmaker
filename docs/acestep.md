@@ -16,6 +16,10 @@ an LRU cache of loaded models and exposes:
 | POST | `/unpin_model` | Remove a model from the pinned set |
 | POST | `/restart` | Ask the worker process to terminate so Docker restarts it |
 | POST | `/generate` | Submit generation, returns `{task_id}` |
+| POST | `/gpu_hold/reserve` | Reserve an idle worker for token-bound LoRA training |
+| POST | `/gpu_hold/renew` | Renew a token-bound LoRA hold |
+| POST | `/gpu_hold/release` | Release a token-bound LoRA hold |
+| POST | `/gpu_hold/handover` | Confirm that the worker owns a token-bound training hold |
 | POST | `/tasks/train_lora` | Submit a LoRA training task, returns `{task_id}` |
 | POST | `/download_model` | Download a model variant, returns `{task_id}` |
 | GET | `/tasks/{id}` | Current task snapshot |

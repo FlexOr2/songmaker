@@ -8,11 +8,17 @@ from dataclasses import asdict
 from pathlib import Path
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import fakeredis.aioredis
 import httpx
 import pytest
 
 from acestep_engine.models import AceStepConfig
-from songmaker_cli.acestep_state import queue_depth_key, worker_state_key
+from songmaker_cli.acestep_state import (
+    gpu_hold_key,
+    queue_depth_key,
+    read_queue_depth,
+    worker_state_key,
+)
 from songmaker_cli.constants import (
     ACESTEP_SSE_CONNECT_TIMEOUT_SECONDS,
     ACESTEP_SSE_READ_TIMEOUT_SECONDS,
@@ -34,6 +40,7 @@ from songmaker_cli.scheduler import (
     _iterate_task_events,
     _pick_from,
     _PickedWorker,
+    admit_generation_worker,
     consume_download_task_stream,
     consume_task_stream,
     dispatch_generation,
@@ -190,6 +197,33 @@ def test_pick_worker_defers_when_every_online_worker_is_held(db_session) -> None
 
     with pytest.raises(AllWorkersHeld):
         _run(pick_worker(db_session, redis, "sft"))
+
+
+def test_admit_generation_uses_redis_lua_without_incrementing_behind_a_hold(db_session) -> None:
+    async def exercise() -> None:
+        redis = fakeredis.aioredis.FakeRedis()
+        _seed(db_session, "w1")
+        await redis.set(
+            worker_state_key("w1"),
+            json.dumps({"gpu_healthy": True, "loaded": ["sft"]}),
+        )
+
+        async def pick_then_hold(*_args, **_kwargs):
+            await redis.set(gpu_hold_key("w1"), "hold-token")
+            return _make_picked("w1")
+
+        with (
+            patch("songmaker_cli.scheduler.pick_worker", pick_then_hold),
+            pytest.raises(AllWorkersHeld),
+        ):
+            await admit_generation_worker(
+                target_mode="sft",
+                redis=redis,
+                db_factory=lambda: db_session,
+            )
+        assert await read_queue_depth(redis, "w1") == 0
+
+    _run(exercise())
 
 
 def test_pick_worker_skips_a_held_worker_for_a_free_online_worker(db_session) -> None:

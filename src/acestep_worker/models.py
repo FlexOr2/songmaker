@@ -81,6 +81,11 @@ class GpuHoldTokenRequest(BaseModel):
     token: str
 
 
+class GpuHoldHandoverResponse(BaseModel):
+    claimed: bool
+    task_id: str | None = None
+
+
 class WorkerTaskEvent(BaseModel):
     type: EventType
     data: dict[str, Any] = Field(default_factory=dict)
