@@ -5,6 +5,7 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import tempfile
 import time
 from collections.abc import AsyncIterator
 from typing import Final
@@ -23,7 +24,6 @@ from songmaker_cli.constants import (
     GROK_CLI_BINARY,
     GROK_CLI_PROMPT_FILE_PLACEHOLDER,
     GROK_CLI_STREAMING_OUTPUT_FORMAT,
-    GROK_CLI_TURN_CWD,
 )
 from songmaker_cli.cowriter.errors import ProviderUnavailableError
 
@@ -52,6 +52,7 @@ async def stream_grok_cli_turn(
     channel = CliLineChannel(COWRITER_GROK_CLI_LINE_CHANNEL_CAPACITY)
     deadline = time.monotonic() + COWRITER_CLI_TIMEOUT_SECONDS
     command = _build_grok_cli_command(model)
+    turn_directory = tempfile.TemporaryDirectory(prefix="songmaker-grok-cli-")
     runner = asyncio.create_task(asyncio.to_thread(
         run_cli_bounded,
         command,
@@ -62,7 +63,7 @@ async def stream_grok_cli_turn(
         stdout_line_channel=channel,
         prompt_file_bytes=prompt,
         prompt_file_arg_index=_PROMPT_FILE_ARGUMENT_INDEX,
-        cwd=GROK_CLI_TURN_CWD,
+        cwd=turn_directory.name,
     ))
     text_chunks: list[str] = []
     saw_end = False
@@ -107,7 +108,10 @@ async def stream_grok_cli_turn(
         raise ProviderUnavailableError("grok", exc.code) from exc
     finally:
         channel.request_abort()
-        await asyncio.shield(runner)
+        try:
+            await asyncio.shield(runner)
+        finally:
+            turn_directory.cleanup()
 
 
 def _build_grok_cli_command(model: str) -> tuple[str, ...]:

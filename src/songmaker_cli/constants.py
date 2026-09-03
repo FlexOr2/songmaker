@@ -226,7 +226,6 @@ CLAUDE_CLI_AUTH_METHOD_FIELD: Final[str] = "authMethod"
 GROK_CLI_BINARY: Final[str] = "grok"
 GROK_CLI_AUTH_FILE: Final[str] = "/home/songmaker/.grok/auth.json"
 GROK_CLI_PROMPT_FILE_PLACEHOLDER: Final[str] = "<songmaker-private-prompt>"
-GROK_CLI_TURN_CWD: Final[str] = "/tmp"
 GROK_CLI_STREAMING_OUTPUT_FORMAT: Final[str] = "streaming-json"
 GROK_CLI_STATUS_ARGS: Final[tuple[str, ...]] = ("models",)
 GROK_CLI_LOGGED_IN_MARKER: Final[str] = "You are logged in with "

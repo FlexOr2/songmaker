@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import asyncio
 import json
+import os
 import threading
 import time
 
@@ -48,16 +49,19 @@ def _stream():
 @pytest.mark.acceptance("ACC-COWRITER-09")
 def test_grok_cli_streams_text_then_one_final_and_pins_its_command(monkeypatch) -> None:
     calls = []
+    observed_cwd_modes = []
     lines = [
         b'{"type":"text","data":"hello"}\n',
         b'{"type":"available_commands","data":[]}\n',
         b'{"type":"end","stopReason":"stop"}\n',
     ]
-    monkeypatch.setattr(
-        grok_cli_adapter,
-        "run_cli_bounded",
-        _runner(lines, _outcome(), calls),
-    )
+    runner = _runner(lines, _outcome(), calls)
+
+    def capture_cwd_mode(command, **kwargs):
+        observed_cwd_modes.append(os.stat(kwargs["cwd"]).st_mode & 0o777)
+        runner(command, **kwargs)
+
+    monkeypatch.setattr(grok_cli_adapter, "run_cli_bounded", capture_cwd_mode)
 
     async def collect():
         return [event async for event in _stream()]
@@ -73,10 +77,14 @@ def test_grok_cli_streams_text_then_one_final_and_pins_its_command(monkeypatch) 
     )
     assert kwargs["prompt_file_bytes"] == b"system\n\nUser: hello"
     assert kwargs["prompt_file_arg_index"] == 2
-    assert kwargs["cwd"] == "/tmp"
+    cwd = kwargs["cwd"]
+    assert cwd is not None
+    assert observed_cwd_modes == [0o700]
+    assert os.path.basename(cwd).startswith("songmaker-grok-cli-")
     assert kwargs["output_read_limit_bytes"] == (
         grok_cli_adapter.GROK_CLI_TURN_OUTPUT_READ_LIMIT_BYTES
     )
+    assert not os.path.exists(cwd)
 
 
 @pytest.mark.parametrize("event_type", sorted(grok_cli_adapter._IGNORED_EVENT_TYPES))
