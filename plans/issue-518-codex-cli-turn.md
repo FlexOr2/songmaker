@@ -30,14 +30,23 @@ Sicherheitsrahmen: #321; Vorbild: #497; Credential-Owner: #350.
 
 ## Umsetzung
 
+**Entschiedenes argv:** Der gepinnte Codex-Aufruf enthält sowohl
+`--skip-git-repo-check` als auch `--ignore-user-config`: Der private
+`TemporaryDirectory`-cwd ist kein Git-Repository und würde ohne die erste Flag
+vor jedem JSONL-Event mit „Not inside a trusted directory“ scheitern; die zweite
+unterbindet lokale `config.toml`-Defaults. Der Command-Test pinnt beide Flags.
+Unbekannte `item.type`-Werte, etwa `todo_list` oder Plan-Updates, bleiben
+bewusst `codex_cli_stream_protocol_error`.
+
 1. **Codex-Adapter und vollständiges argv:**
    `stream_codex_cli_turn()` flacht System und Nachrichten mit
    `_flatten_messages()` und `_stdin_prompt()` aus `claude.provider` ab und
    übergibt sie als `stdin_payload` an genau dieses argv:
 
    ```text
-   codex exec --json --sandbox read-only --ignore-user-config --ignore-rules
-   --ephemeral -c approval_policy="never" -c mcp_servers={} --model <model> -
+   codex exec --json --sandbox read-only --skip-git-repo-check
+   --ignore-user-config --ignore-rules --ephemeral -c approval_policy="never"
+   -c mcp_servers={} --model <model> -
    ```
 
    `_build_codex_cli_command(model)` gibt diese Reihenfolge als Tuple zurück;
