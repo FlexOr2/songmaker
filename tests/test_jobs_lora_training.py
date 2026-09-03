@@ -110,7 +110,7 @@ async def _fake_events_ok(*args, **kwargs) -> AsyncIterator[tuple[str, dict]]:
     )
 
 
-def _patch_worker_calls(adapter_dir: str, *, events=None):
+def _patch_worker_calls(adapter_dir: str, *, events=None, submitted_requests=None):
     """Return context-manager patches for worker-side HTTP + SSE stubs."""
     from contextlib import contextmanager
 
@@ -122,7 +122,12 @@ def _patch_worker_calls(adapter_dir: str, *, events=None):
         response = MagicMock()
         response.raise_for_status = MagicMock()
         response.json = MagicMock(return_value={"task_id": "t-1"})
-        submit.post = AsyncMock(return_value=response)
+        async def post(*args, **kwargs):
+            if submitted_requests is not None:
+                submitted_requests.append((args[0], kwargs["json"]))
+            return response
+
+        submit.post = AsyncMock(side_effect=post)
         submit.__aenter__ = AsyncMock(return_value=submit)
         submit.__aexit__ = AsyncMock(return_value=None)
 
@@ -156,22 +161,21 @@ def _patch_worker_calls(adapter_dir: str, *, events=None):
     return _cm()
 
 
-def test_happy_path_transitions_and_persists(seeded, db_factory, tmp_path) -> None:
+def test_happy_path_transitions_and_persists(seeded, db_factory, tmp_path, caplog) -> None:
     output_dir = (
         seeded["audio_dir"] / USER_LORAS_DIRNAME / seeded["user_id"]
         / seeded["lora_id"] / "training_tmp"
     )
 
     def _create_adapter_dir() -> str:
-        adapter = output_dir / "final"
-        adapter.parent.mkdir(parents=True, exist_ok=True)
-        adapter.mkdir(exist_ok=True)
-        (adapter / "adapter_config.json").write_text("{}")
-        return str(adapter)
+        output_dir.mkdir(parents=True, exist_ok=True)
+        (output_dir / "adapter_config.json").write_text("{}")
+        return str(output_dir)
 
     adapter_src = _create_adapter_dir()
 
-    with _patch_worker_calls(adapter_src):
+    submitted_requests: list[tuple[str, dict]] = []
+    with _patch_worker_calls(adapter_src, submitted_requests=submitted_requests):
         _run(run_lora_training_job(
             {}, "job-1", seeded["lora_id"], seeded["user_id"],
             db_factory=db_factory, audio_dir=seeded["audio_dir"],
@@ -207,6 +211,18 @@ def test_happy_path_transitions_and_persists(seeded, db_factory, tmp_path) -> No
     )
     assert final_path.exists()
     assert not dataset_path.exists()
+    assert not any(
+        "Failed to remove tmp training dir" in record.message
+        for record in caplog.records
+    )
+    assert submitted_requests == [
+        ("http://fake/load_model", {"mode": "sft"}),
+        ("http://fake/tasks/train_lora", {
+            "mode": "sft",
+            "dataset_dir": str(dataset_path),
+            "output_dir": str(output_dir),
+        }),
+    ]
 
 
 def test_dataset_materialization_writes_files(seeded, db_factory, tmp_path) -> None:

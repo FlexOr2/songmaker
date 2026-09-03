@@ -126,6 +126,15 @@ async def _pick_and_call_worker(
         worker = await pick_worker(session, redis, target_mode)
 
     headers = _internal_headers()
+    load_options = DispatchOptions()
+    async with httpx.AsyncClient(timeout=load_options.load_model_timeout_seconds) as client:
+        load = await client.post(
+            f"{worker.base_url}/load_model",
+            json={"mode": target_mode},
+            headers=headers,
+        )
+        load.raise_for_status()
+
     async with httpx.AsyncClient(timeout=_LORA_SUBMIT_TIMEOUT_SECONDS) as client:
         submit = await client.post(
             f"{worker.base_url}/tasks/train_lora",
@@ -403,7 +412,6 @@ async def run_lora_training_job(
         tmp_output = _tmp_training_dir(audio_dir, user_id, lora_id)
         if tmp_output.exists():
             shutil.rmtree(tmp_output)
-        tmp_output.mkdir(parents=True, exist_ok=True)
 
         last_update = 0.0
         last_status_name: str = LoraStatus.PREPROCESSING
@@ -471,10 +479,11 @@ async def run_lora_training_job(
         final_dir.parent.mkdir(parents=True, exist_ok=True)
         shutil.move(str(adapter_src), str(final_dir))
 
-        try:
-            shutil.rmtree(tmp_output)
-        except OSError:
-            log.warning("Failed to remove tmp training dir %s", tmp_output)
+        if tmp_output.exists():
+            try:
+                shutil.rmtree(tmp_output)
+            except OSError:
+                log.warning("Failed to remove tmp training dir %s", tmp_output)
         try:
             shutil.rmtree(dataset_dir)
         except OSError:
