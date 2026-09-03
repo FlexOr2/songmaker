@@ -491,6 +491,7 @@
 		bottom: var(--player-height);
 		z-index: 30;
 		display: flex;
+		flex-wrap: wrap;
 		padding: 0.6rem 0.8rem;
 		background: var(--bg);
 		border-top: 1px solid var(--border);
