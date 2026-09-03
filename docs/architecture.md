@@ -5,7 +5,7 @@
 ```
                     ┌─────────────────────────────────────┐
                     │        SvelteKit Frontend            │
-                    │  Song editor, player, Claude chat,   │
+                    │  Song editor, player, co-writer chat,│
                     │  generation settings, filters        │
                     └──────────────┬──────────────────────┘
                                   │ REST API (JSON)
@@ -17,8 +17,8 @@
                     └──┬─────────┬──────────┬─────────────┘
                        │         │          │
                        ▼         ▼          ▼
-                 PostgreSQL    Redis    Claude API
-                 (all data)   (queues,  (chat, scoring)
+                 PostgreSQL    Redis    Co-writer / judge providers
+                 (all data)   (queues,  (selected provider per surface)
                               sessions,
                               rate limits)
 ```
@@ -69,13 +69,15 @@ own GPU. Workers self-register with the web container at startup
 (`POST /api/internal/workers/register`) and heartbeat ephemeral state to
 Redis with a 15s TTL. The music-worker is now a thin orchestrator: its
 arq `generate` job calls the scheduler (`scheduler.py`), which picks an
-online worker, dispatches via HTTP, and consumes the worker's task SSE stream
-until `done`. A stream that stays silent
+online worker, INCRs queue depth atomically, dispatches via HTTP, and
+consumes the worker's task SSE stream until `done`. A stream that stays silent
 for 630 seconds fails the generation with `Worker stream went silent`; transport
 drops still use the scheduler's bounded reconnect policy. The music-worker then
 post-processes the worker's WAV (decode → splice → master → MP3 → DB
 insert) and the job completes. See [acestep.md](acestep.md) for the
 worker API surface.
+
+Production application containers (web, music-worker, scoring-worker, and ACE-Step workers) write JSON log lines with `timestamp`, `level`, `logger`, and `event`; Docker retains five 10 MB files per service so operational history remains bounded.
 
 ## Job Routing
 
@@ -96,15 +98,12 @@ User clicks "Generate"                    User clicks "Score"
         ▼                                         ▼
   Music Worker (orchestrator)              Scoring Worker
   ├── see [Generation Flow](#generation-flow) ├── spawn scorer subprocess
-  │   for Lua admission, hold defer, config   ├── AudioBox aesthetics
-  │   build, worker HTTP, and persistence      ├── Whisper transcription
-  ├── apply repaint/cover overrides            ├── BPM, dynamics, silence, spectral
-  ├── scheduler.dispatch_generation:          ├── lyrical coherence (configured judge provider)
-  │   ├── pick acestep-worker                ├── save scores to DB
-  │   ├── INCR queue_depth (Redis)             └── Job status: completed
-  │   ├── /load_model + /generate (HTTP)
-  │   ├── consume SSE → task done
-  │   └── DECR queue_depth (finally)
+  │   for Lua admission, hold defer, config   ├── Whisper transcription
+  │   build, worker HTTP, and persistence      ├── AudioBox aesthetics
+  │                                              ├── BPM, dynamics, silence, spectral
+  │                                              ├── lyrical coherence (configured judge provider)
+  │                                              ├── save scores to DB
+  │                                              └── Job status: completed
   ├── post_process_generation (to_thread):
   │   ├── read worker WAV from volume
   │   ├── decode + splice (if repaint)
@@ -120,9 +119,10 @@ User clicks "Generate"                    User clicks "Score"
   User clicks "Chat"
         │
         ▼
-  POST /songs/{id}/chat
+  POST /api/chat/turn
   (multi-turn: loads history from DB,
-   sends full messages array to Claude,
+   compacts it to a rolling summary plus a token-bounded tail,
+   streams through the selected co-writer provider,
    stores user + assistant messages)
 ```
 
@@ -422,6 +422,15 @@ The idle transport Play keeps its own path, since it must keep the listener's
 shuffle setting. Navigation reads playback only through `idlePlayTarget()`
 ("what would Play start"), never as a queue.
 
+Queue-stream admission is owned by `queue_stream_api.py`: both authenticated
+snapshot endpoints prepare the count-windowed sources after releasing the
+request session and before their build can reach ffmpeg. The product cap is six
+hours of measured audio; a longer queue receives 422 rather than a shortened
+stream. `queue_streams.py` derives its 336-second ffmpeg timeout from that cap,
+the measured-rate policy, and its reserve; `tests/test_queue_streams.py` pins
+the formula and proves that both endpoints reject an overlong queue before
+ffmpeg runs.
+
 Escape is also a global "one level up" shortcut, mounted once in
 `+layout.svelte` (`lib/utils/escape-level-up.ts`): from a song it goes to
 that song's collection interior, from a collection interior it goes to the
@@ -494,7 +503,7 @@ what is playing into the editor.
 
 Now Playing (`NowPlaying.svelte`) has two surfaces and one instance, mounted by `routes/+layout.svelte`: **docked**, a `NOW_PLAYING_DOCKED_WIDTH_PX` (400px) flex column of the desktop `.shell-row` beside the rail and the workspace, and **full**, the modal surface covering the viewport. `stores/player.ts` owns which one shows — `nowPlayingSurface: 'closed' | 'docked' | 'full'`, with `nowPlayingOpen` derived from it — and `openNowPlaying` / `closeNowPlaying` stay the only entry points; `expandNowPlaying` / `dockNowPlaying` switch between the two desktop surfaces and remember the choice in `stores/playbackSettings.ts` (`nowPlayingDesktopSurface`, defaulting to docked), so the next open lands where the listener last was. Whether a docked panel fits is one fact, `nowPlayingDockable`, which the layout reports by reading `NOW_PLAYING_STACKED_MEDIA` as "cannot dock" — below the stacking breakpoint `NOW_PLAYING_STACKED_MAX_PX` (1099), or any coarse pointer, and there is no panel. Docking briefly needed a threshold of its own (1440) because the editor read the viewport: giving the panel 400px pushed a take row's Pick/Keep/… actions outside `main`, which is `overflow: hidden`, so they became unreachable rather than scrollable (browser gate, 2026-08-23). Since #185 the editor answers to its own width instead, so the cost of docking is a column it folds, and one width decides both — wide enough for Now Playing's three columns is wide enough to stand them beside the workspace. Losing the room turns a docked panel into the full surface rather than closing it. Now Playing opens from `PlayerBar`'s Now Playing button (which also closes the rail drawer) or by clicking a take row — `TakesList`, the playlist interior, the rail's playlist rows — which opens it straight on the This-take judging panel instead of the Queue panel — the panel request is the same `nowPlayingPanel` store, read once by `NowPlaying` on mount since the layout remounts it fresh on every open. `NowPlaying` wraps `NowPlayingFrame.svelte` — the surface shell, cover/transport/shuffle column, and lyrics column, driven by props plus `audioPlayer` directly — and supplies its own two-tab (Queue / This take) right panel via a snippet; the share surface supplies a queue-only right panel to the same frame instead.
 
-The frame's `surface` prop is what separates the two. Full is `role="dialog"`, `aria-modal`, focus-trapped, and carries the transport (progress, shuffle, prev/next, play). Docked is `role="complementary"` with no `aria-modal`, no focus trap and **no transport at all** — the transport bar stays visible beside it and keeps carrying seek, shuffle, prev/next and play, so there is never a second player. Escape follows from that: the full surface is modal and answers the key itself through `escapeNowPlaying` (back to the docked panel wherever one fits, otherwise closed), while the docked panel deliberately reaches the global level-up in `utils/escape-level-up.ts`, which gained a `'now-playing'` level above song/collection/wall. Closing hands focus back to the transport bar's Now Playing button; because the full surface hides that bar, `registerNowPlayingTrigger` delivers the pending focus when the bar remounts rather than focusing a detached element. The frame refocuses itself on every surface change, since expanding or collapsing rebuilds the controls the listener was on. The frame itself knows nothing about whether a bar is showing: its full surface simply reserves `var(--player-height)` at the bottom, which is zero in the app and 88px on a share page. Three columns at ≥1100px — cover/transport, the lyrics column, the right panel — stack into one column with the right panel as a bottom sheet below that width or on coarse pointers; the sheet seeds its open state once per mount, so a take-row click still lands on the This-take sheet instead of a closed trigger labelled "Queue". The Queue panel (`NowPlayingQueue.svelte`, whose one optional `takePool` prop pairs the selected pool with its handler, so a queue can neither offer a picker that chooses nothing nor hide a pool it is built from; it is given by the library queue alone, and the panel is told what is playing by `contextLabel` rather than being handed the queue context to interpret — which is what keeps the share surface from importing the app's player store) renders `stores/player.ts#buildQueueViewModel`, a pure projection of the active queue context (library/album takes or a playlist's entries) into ordered rows labelled `vN · take k` with current/up-next; the pool trio `Picks → + Keeps → All takes` (`stores/playbackSettings.ts`, stored `keeps` migrates to `mix`) shows only for the library context. Clicking a row calls `jumpToQueueIndex`. The This-take panel (`NowPlayingTake.svelte`) is Now Playing's only write surface: pick/keep/rate/pin-seed/re-score route through `stores/takeActions.ts`, the single mutation owner for a take's judged state, shared with the editor's `TakesList`/`TakeMenu` — pick/keep/rate/pin-seed via `contexts/generation-actions.ts#takeActionsFor`, re-score by calling `rescore` directly, since Now Playing has no such context and a second path to the same mutation is exactly what #132 removed. `rescore` (issue #132) posts `POST /api/generations/{id}/score` and hands the job to `stores/jobs.ts#trackJob`; the job's own completion refreshes the song, which is what puts the recomputed scores and `whisper_cues` on the take. Because the server does not deduplicate scoring jobs, the take is marked as re-scoring from the moment the request leaves rather than from the moment a job comes back, and `rescoringTakeIds` unions those in-flight requests with the tracked `score` jobs — every surface reads it for the pending state and to refuse a second run. The entry itself sits in the editor take's `…` menu and, always available, next to pin-seed in the This-take panel: a take scored before word timestamps has segment-only cues, so re-scoring is what buys per-line timing even when cues already exist. "Use as reference" hands the take to `stores/recipe.ts`'s `pendingSource`, closes Now Playing, and navigates to the song (`stores/navigation.ts#revealPlayingSong`); `SongDetailView` only applies `pendingSource` once its `song_id` matches the song actually open, opening the Recipe panel on it as a repaint source, and drops it if the dirty-draft guard's confirm is cancelled instead of applying it to the song the user stayed on. It resolves the playing generation against `songList` component-locally (`$derived` + `$effect` calling `ensureGenerationsLoaded`) and stays absent until resolved. Sung-vs-lyrics deviations tokenise both texts with `utils/lyrics-normalize.ts` (the #45 contract) and diff them word-wise via `utils/diff.ts#computeDiffByKey`. Normalization casefolds — not merely lowercases — so a German "Straße" and a Whisper transcript's "strasse" register as the same token (issue #133); JS has no native `casefold()`, so the module hand-covers the small set of Unicode full-case-folding entries (German eszett, Greek final sigma) that diverge from `toLowerCase()` for text this product's lyrics can plausibly contain.
+The frame's `surface` prop is what separates the two. Full is `role="dialog"`, `aria-modal`, focus-trapped, and carries the transport (progress, shuffle, prev/next, play). Docked is `role="complementary"` with no `aria-modal`, no focus trap and **no transport at all** — the transport bar stays visible beside it and keeps carrying seek, shuffle, prev/next and play, so there is never a second player. Escape follows from that: the full surface is modal and answers the key itself through `escapeNowPlaying` (back to the docked panel wherever one fits, otherwise closed), while the docked panel deliberately reaches the global level-up in `utils/escape-level-up.ts`, which gained a `'now-playing'` level above song/collection/wall. Closing hands focus back to the transport bar's Now Playing button; because the full surface hides that bar, `registerNowPlayingTrigger` delivers the pending focus when the bar remounts rather than focusing a detached element. The frame refocuses itself on every surface change, since expanding or collapsing rebuilds the controls the listener was on. The frame itself knows nothing about whether a bar is showing: its full surface simply reserves `var(--player-height)` at the bottom, which is zero in the app and 88px on a share page. Three columns at ≥1100px — cover/transport, the lyrics column, the right panel — stack into one column with the right panel as a bottom sheet below that width or on coarse pointers; the sheet seeds its open state once per mount, so a take-row click still lands on the This-take sheet instead of a closed trigger labelled "Queue". The Queue panel (`NowPlayingQueue.svelte`, whose one optional `takePool` prop pairs the selected pool with its handler, so a queue can neither offer a picker that chooses nothing nor hide a pool it is built from; it is given by the library queue alone, and the panel is told what is playing by `contextLabel` rather than being handed the queue context to interpret — which is what keeps the share surface from importing the app's player store) renders `stores/player.ts#buildQueueViewModel`, a pure projection of the active queue context (library/album takes or a playlist's entries) into ordered rows labelled `vN · take k` with current/up-next; the pool trio `Picks → + Keeps → All takes` (`stores/playbackSettings.ts`, stored `keeps` migrates to `mix`) shows only for the library context. Clicking a row calls `jumpToQueueIndex`. The This-take panel (`NowPlayingTake.svelte`) is Now Playing's only write surface: pick/keep/rate/pin-seed/re-score route through `stores/takeActions.ts`, the single mutation owner for a take's judged state, shared with the editor's `TakesList`/`TakeMenu` — pick/keep/rate/pin-seed via `contexts/generation-actions.ts#takeActionsFor`, re-score by calling `rescore` directly, since Now Playing has no such context and a second path to the same mutation is exactly what #132 removed. `rescore` (issue #132) posts `POST /api/generations/{id}/score` and hands the job to `stores/jobs.ts#trackJob`; the job's own completion refreshes the song, which is what puts the recomputed scores and `whisper_cues` on the take. Because the server does not deduplicate scoring jobs, the take is marked as re-scoring from the moment the request leaves rather than from the moment a job comes back, and `rescoringTakeIds` unions those in-flight requests with the tracked `score` jobs — every surface reads it for the pending state and to refuse a second run. The entry itself sits in the editor take's `…` menu and, always available, next to pin-seed in the This-take panel: a take scored before word timestamps has segment-only cues, so re-scoring is what buys per-line timing even when cues already exist. Repaint and Cover are named actions directly on every editor take row and in This take; they set the source and mode in `stores/recipe.ts`, then the Now Playing entry closes the panel and navigates to the song. A Repaint or Cover result names its source take, linking to it while the source exists; the closed Recipe chip and Generate button name the active mode, and the open panel says that it uses the current editor lyrics and style. `SongDetailView` applies `pendingSource` only once its `song_id` matches the song actually open, opens Recipe in the chosen mode, and drops it if the dirty-draft guard's confirm is cancelled instead of applying it to the song the user stayed on. Archived takes cannot be sources; cover-source authorization remains in the existing panel and API flow. It resolves the playing generation against `songList` component-locally (`$derived` + `$effect` calling `ensureGenerationsLoaded`) and stays absent until resolved. Sung-vs-lyrics deviations tokenise both texts with `utils/lyrics-normalize.ts` (the #45 contract) and diff them word-wise via `utils/diff.ts#computeDiffByKey`. Normalization casefolds — not merely lowercases — so a German "Straße" and a Whisper transcript's "strasse" register as the same token (issue #133); JS has no native `casefold()`, so the module hand-covers the small set of Unicode full-case-folding entries (German eszett, Greek final sigma) that diverge from `toLowerCase()` for text this product's lyrics can plausibly contain.
 
 The lyrics column (`NowPlayingLyrics.svelte`) follows playback once the playing take carries `whisper_cues` (#45, contract confirmed on #52, word timestamps added on #142). `utils/lyrics-align.ts#alignLyricsToCues` takes one of two paths, chosen by what the take was scored with. **Word path** — a take scored with word timestamps carries a word stream (`cue.words`); lyric lines are walked in order and each takes the best-matching run of still-unconsumed words. The interval is then trimmed to the words of that run which take part in a matching block against the line, so a line always starts on its own first sung word even when the run had to begin on foreign words. The search window starts `WORD_STREAM_LOOKAHEAD` (24) words past the previous match and grows a step at a time until the take offers a reading of the line or the stream ends, so a long adlibbed or mistranscribed stretch cannot hide the lines behind it; assignment stays forward-only. A run is handed to a line only while no other line still in play reads that run just as well (#52's rival rule, applied to lines): in play means from the floor onwards — every line the take has not moved past, above this one as well as below, the same set the cue window path competes over — so a group of lines too alike to tell apart leaves the run to none of them instead of to whichever comes last. A line carrying the same text is never a rival, since the take simply sings those words again. The converse is checked too: every phrase that contains the run — the run extended to the left, to the right, or both, so a line may be the opening, the tail or an interior slice of it — is read back, and any line further down that reads such a phrase at `MIN_RATIO` and better than this line does has a claim on those words; if taking them here would leave that line with no rendition of its own, this line steps aside — that is what stops a line from swallowing the opening of a line below it, adjacent or not, while a line that has a rendition elsewhere never blocks it. Successive renditions of identical or nested neighbouring lines are therefore handed out in order rather than treated as a tie. **Cue window fallback** — a take scored before word timestamps carries only segment cues, and a segment follows breathing pauses rather than line breaks (the Nachtstrom take: 33 segments over 56 lines), so cues are walked in playback order and each takes the best-matching run of up to `MAX_WINDOW_LINES` (3) still-unconsumed lines. Every line of that run carries the whole cue span and they light together: nothing in such a take says where inside a cue one line ends and the next begins, and #45 forbids inventing it — only a re-score (#132) buys real per-line timing. Both paths share one accept rule: text is normalised by `utils/lyrics-normalize.ts`'s token rules, lines are split on `/\r?\n/` and blank plus `[section]`-marker lines never align, a lyric line of at most `VERBATIM_MAX_TOKENS` (2) words is only lit where the transcript carries exactly that text (a character ratio cannot tell "yeah" from a sung "year"), the winner must clear `MIN_RATIO` (0.72), and it must beat every rival by `AMBIGUITY_MARGIN` (0.12) — a rival being a candidate that overlaps neither the winner nor any repeat of it, those repeats being read off the stream rather than off the candidates the search happened to collect. A repeat is a run of the same length that reads the winner back; where the lyrics carry a line more than once, `REPEAT_MIN_RATIO` (0.88) tolerates the slips Whisper makes between two renditions of it ("…until the mornin" against "…until the morning"), and of several renditions a line takes the earliest still in reach, leaving the later ones to the lines below. For a line the lyrics carry once, and for lyric lines themselves in the cue window path, only word-for-word repetition counts — two readings that close are the ambiguity #45 refuses to guess at, and near-identical lyric lines are different lines, not transcript slips. Overlapping candidates are one rendition seen through a shifted window, and a repeat of the same words is not independent evidence of where a line was sung, nor is a shifted window around such a repeat; a chorus line is therefore never blocked by its own repeats and monotone consumption decides which rendition each of them takes. A differently-worded reading elsewhere in the take does rival it. Anything short of the rule leaves the line dark; a missed highlight is a gap, a wrong one is a lie. Similarity is `utils/sequence-matcher.ts`'s `SequenceMatcher`, a faithful TypeScript port of Python's `difflib.SequenceMatcher` (including the ≥200-char autojunk popular-element filter). `scripts/lyric_alignment_golden.py` is the reference: it holds both the Python-computed ratios and a Python reference implementation of both alignment paths, and `lyrics-align.fixtures.json` pins the TypeScript side to its intervals fixture by fixture, including the cases that must stay dark. Alignment no longer runs on the main thread: `services/lyricsAlignment.svelte.ts` owns one worker and hands it one take at a time (`utils/lyrics-align.worker.ts` is transport only, the pure `alignLyricsToCues` is unchanged), the column shows static text until the answer for the take now playing arrives, later takes supersede earlier ones, and a worker that cannot load falls back to aligning on the main thread — the same on the share surface, whose `$state`-held cues are snapshotted before they cross the boundary. `activeLyricLineIndices` returns every line covering `audioPlayer.currentTime` and none in a gap, and the first of them is scrolled into view (instant under `prefers-reduced-motion`, smooth otherwise). Lyrics longer than the column scroll inside it; the box fades its bottom edge while more text follows and drops the fade once the last line is reached, so the docked panel's cut through a line reads as "scroll for the rest" rather than as broken text, and `scroll-padding` keeps the line that follows the audio out of the faded strip. Cues and transcript come from the take resolved against `songList` (`playingGeneration`, not `info`, per the #45 amendment), so a thin library-pool item stays on static lyrics until `ensureGenerationsLoaded` fills in its real `whisper_cues`; a take with `whisper_text` but no cues at all (scored before #44 landed) shows a "Lyrics aren't synced for this take." note alongside the static text — the column states what is true and nothing more, since it renders for a public listener too; the contextual "Re-score this take to follow the lyrics." shortcut for that state lives in the owner-only This-take panel, next to its always-available Re-score entry. `SharedCollection.svelte` passes the playing take's cues to the same `NowPlayingFrame` prop (`SharePlayback.currentCues`, read off the share payload rather than off a stream manifest, so lyrics follow in both classic and stream mode), so a public listener gets the same following lyrics as the app — there is no share-only lyrics path. Because a share stream's manifest redacts `lyrics` (`queue_streams.py#public_queue_stream_manifest`), the frame takes the text from a `lyricsText` prop, symmetric to `lyricsCues`, whenever `info` cannot carry it. A take scored before word timestamps still falls back to static text exactly as in the app; the share surface just never offers re-score, which is an owner action — the lyrics column it shares with the app carries no action at all.
 
@@ -560,7 +569,7 @@ whose `lyrics` a public stream manifest redacts. A take scored without
 |-------|---------------|-----------|
 | HTTP | FastAPI app, CORS, security headers, body size limit, gzip compression (JSON/text/JS by Content-Type, never binary media or a `Content-Range` response, proper `Accept-Encoding` q-value negotiation), SPA fallback | `server.py`, `middleware/gzip.py` |
 | Auth | Session dependencies, login/setup/logout, password change, brute-force protection | `middleware/auth.py`, `auth_api.py`, `auth.py` |
-| API | REST endpoints split by domain: albums, songs, generations, playlists, library search/shares, LoRAs, chat, settings, admin | `api.py` (aggregator), `album_api.py`, `song_api.py`, `generation_api.py`, `playlist_api.py`, `library_api.py`, `lora_api.py`, `chat_api.py`, `settings_api.py`, `admin_api.py` |
+| API | REST endpoints split by domain: albums, songs, generations, playlists, library search/shares, LoRAs, live co-writer chat, legacy chat, settings, admin | `api.py` (aggregator), `album_api.py`, `song_api.py`, `generation_api.py`, `playlist_api.py`, `library_api.py`, `lora_api.py`, `conversation_api.py`, `chat_api.py` (legacy), `settings_api.py`, `admin_api.py` |
 | Helpers | Shared access checks, rate limiting, slug generation | `api_helpers.py` |
 | Models | Pydantic request/response with `from_orm()` | `api_models/` |
 | Jobs | Background generation + scoring runners | `jobs/` (package: `_runtime.py`, `generation.py`, `scoring.py`, `model_lifecycle.py`) |
@@ -570,8 +579,17 @@ whose `lyrics` a public stream manifest redacts. A take scored without
 | Config | ACE-Step config building (merges defaults + user + song params) | `config.py` |
 | DB | SQLAlchemy ORM models, query functions, engine init | `db/` |
 | Scoring | Fault-isolated pipeline: text accuracy, dynamics, BPM, silence, spectral, aesthetics, coherence | `scoring/` |
-| Claude | API + CLI backends for chat and lyrical coherence | `claude/provider.py` |
+| Co-writer | Dispatches the selected Claude, Grok, or Codex provider; the judge is configured separately | `cowriter/dispatch.py`, `cowriter/catalog.py`, `cowriter/*_adapter.py` |
+| Conversation | Conversation-scoped co-writer turns, history, and durable memory | `conversation_api.py` |
+| MCP | Claude's stdio tool server plus shared tool schemas and in-process execution for Grok/Codex | `mcp_server/`, `cowriter/tools.py` |
 | CLI | Thin HTTP client to the same API | `main.py`, `cli_client.py` |
+
+The Co-Writer dispatcher owns provider transport choice. Claude turns use its
+MCP-enabled CLI; Grok chooses its subscription CLI when the mounted
+`auth.json` carries a token and otherwise uses `XAI_API_KEY`; Codex uses its
+API key. A Grok CLI failure remains on that selected path for the turn. The
+Grok adapter converts its bounded `streaming-json` process output to chat
+events.
 
 ### Engine packages (`src/`)
 
@@ -754,14 +772,20 @@ In-flight ACE-Step GPU work is not interrupted (issue #30 Phase 2).
 
 ## Scoring Flow
 
-The parent-hosted lyrical-coherence judge owns one provider budget. It carries
-that budget through the selected provider call, including the Claude SDK or
-CLI preflight and request. The CLI preflight has its own five-second answer
-bound, but never exceeds the remaining judge budget; after that answer budget,
-the caller may wait through the bounded cleanup margin (SIGTERM grace plus
-post-SIGKILL wait). The scorer watchdog has only a small final-safety
-headroom. A provider timeout is a judge failure: child scores are retained,
-but the scoring job ends `partial` with `judge_error`, never `completed`.
+The parent-hosted lyrical-coherence judge owns one provider budget and carries
+it through the configured judge-provider call. Every configuration enforces a
+minimum five-second timeout because the Claude one-shot path may need that
+much for its tool-free CLI preflight; only that Claude path performs the
+tool-surface probe. Grok and Codex use the compatible API path directly.
+The five-second timeout is the provider floor; the bounded cleanup margin
+(SIGTERM grace plus post-SIGKILL wait) belongs only to the
+`agent_cli.run_cli_bounded` probe, while Grok/Codex use HTTP timeouts, the
+Claude API uses its SDK timeout, the Claude-CLI judge uses
+`subprocess.run(timeout)`, and the outer judge boundary is the Thread-Watchdog
+`timeout+1s` (`pipeline.py:223-229`). The scorer watchdog has only a small
+final-safety headroom. A provider timeout is a judge failure:
+child scores are retained, but the scoring job ends `partial` with
+`judge_error`, never `completed`.
 
 ```
 POST /api/generations/{id}/score
@@ -804,7 +828,7 @@ child-hosted scorers and then calls `judge_lyrical_coherence()` itself on the
 of the transcribed text — the judge reads it and `Generation.whisper_text`
 stores it. The judge produces an ordinary `ScorerRun` under its own
 `SCORER_TIMEOUT_SECONDS` budget, so `ok` / `failed` / `skipped` / `timed_out`
-and the merge rules apply to it exactly as to a child scorer: a Claude outage
+and the merge rules apply to it exactly as to a child scorer: a judge-provider outage
 leaves the stored `lyrical_coherence` untouched. `PipelineConfig` therefore
 carries no secret (issue #176; see docs/security.md).
 
@@ -855,7 +879,7 @@ parent's coherence budget, which is spent after the child returns.
 
 **Scoring worker** (`scoring_worker.py`):
 - Owns scorer subprocess (Whisper, AudioBox, audio scorers); judges lyrical
-  coherence itself (Claude), so no secret enters the subprocess
+  coherence itself through the configured judge provider, so no secret enters the subprocess
 - Handles `score` tasks
 - Device configurable via `SCORING_DEVICE` env var (`cpu` or `cuda`)
 - `max_jobs=1` (default, configurable via `SCORING_MAX_JOBS`)
@@ -947,6 +971,15 @@ never been observed; with a newer observation, it is `alive`.
   immediately sends its current event when the stream connects, and the
   scheduler heartbeats on every received event, so that initial event refreshes
   the heartbeat and the first-event and read windows do not concatenate.
+
+  LoRA training uses its own `LORA_TRAINING_JOB_TIMEOUT` (3600 seconds by
+  default), while the MusicWorker's global `ARQ_JOB_TIMEOUT` remains the
+  generation limit. Its five-second worker progress poll is ordered below the
+  300-second LoRA reaper threshold, which is ordered below the LoRA arq timeout.
+  Every TaskStore progress event follows the shared SSE path and refreshes the
+  job heartbeat; the reaper therefore only terminalizes a training job after
+  progress has stopped for its threshold, not because its total age exceeds a
+  generation run.
 
   The 630-second scheduler SSE read timeout applies to generation, download,
   and LoRA task streams through their shared `DispatchOptions()`. On a cold

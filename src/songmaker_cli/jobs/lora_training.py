@@ -392,7 +392,7 @@ async def _prepare_and_submit_lora(
     target_mode: str,
     user_id: str,
     worker: _WorkerHandle,
-    training_config: LoraTrainingJobConfig | None = None,
+    training_config: LoraTrainingJobConfig,
 ) -> tuple[TrainLoraTaskResultDTO, Path, Path] | None:
     renew_task: asyncio.Task[None] | None = None
     handover = _LoraHoldHandover()
@@ -456,9 +456,8 @@ async def _prepare_and_submit_lora(
             "mode": target_mode,
             "dataset_dir": str(dataset_dir),
             "output_dir": str(tmp_output),
+            **training_config.payload(),
         }
-        if training_config is not None:
-            request_payload.update(training_config.payload())
         worker_result = await _pick_and_call_worker(
             target_mode=target_mode,
             request_payload=request_payload,
@@ -716,7 +715,7 @@ async def run_lora_training_job(
     audio_dir: Path | None = None,
     redis: Redis | None = None,
     target_mode: str = MODEL_DEFAULT_MODE,
-    training_config: LoraTrainingJobConfig | None = None,
+    training_config: LoraTrainingJobConfig,
 ) -> None:
     """ARQ job: materialize dataset, dispatch training to a worker, persist.
 
@@ -925,13 +924,13 @@ async def run_lora_training_job(
             user_id=user_id,
             audio_dir=audio_dir,
             db_factory=db_factory,
-            error_message="Job cancelled: exceeded ARQ_JOB_TIMEOUT or worker shutdown",
+            error_message="Job cancelled: exceeded LORA_TRAINING_JOB_TIMEOUT or worker shutdown",
         )
         _update_job(
             db_factory,
             job_id,
             JobStatus.FAILED,
-            error="Job cancelled: exceeded ARQ_JOB_TIMEOUT or worker shutdown",
+            error="Job cancelled: exceeded LORA_TRAINING_JOB_TIMEOUT or worker shutdown",
             error_type="timeout",
         )
         raise

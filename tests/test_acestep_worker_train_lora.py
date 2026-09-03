@@ -115,6 +115,48 @@ def _auth_headers() -> dict[str, str]:
     return {INTERNAL_TOKEN_HEADER: "test-internal-token"}
 
 
+def _training_request_payload(**overrides: object) -> dict[str, object]:
+    payload = {
+        "lokr_linear_dim": 64,
+        "lokr_linear_alpha": 128,
+        "lokr_factor": -1,
+        "lokr_decompose_both": False,
+        "lokr_use_tucker": False,
+        "lokr_use_scalar": False,
+        "lokr_weight_decompose": True,
+        "learning_rate": 0.03,
+        "train_epochs": 500,
+        "train_batch_size": 1,
+        "gradient_accumulation": 4,
+        "save_every_n_epochs": 5,
+        "training_shift": 3.0,
+        "training_seed": 42,
+        "gradient_checkpointing": False,
+        "poll_interval_seconds": 5.0,
+    }
+    return {**payload, **overrides}
+
+
+def test_train_lora_rejects_missing_training_configuration(tmp_path: Path) -> None:
+    deps = _make_deps(tmp_path)
+    dataset_dir = deps.shared_audio_root / "dataset"
+    dataset_dir.mkdir()
+    app = create_app(deps)
+    with TestClient(app) as client:
+        response = client.post(
+            "/tasks/train_lora",
+            json={
+                "mode": "sft",
+                "dataset_dir": str(dataset_dir),
+                "output_dir": str(deps.shared_audio_root / "output"),
+                "hold_token": "test-token",
+            },
+            headers=_auth_headers(),
+        )
+
+    assert response.status_code == 422
+
+
 def test_train_lora_requires_loaded_mode(tmp_path: Path) -> None:
     deps = _make_deps(tmp_path)
     dataset_dir = deps.shared_audio_root / "dataset"
@@ -123,12 +165,12 @@ def test_train_lora_requires_loaded_mode(tmp_path: Path) -> None:
     with TestClient(app) as client:
         resp = client.post(
             "/tasks/train_lora",
-            json={
-                "mode": "sft",
-                "dataset_dir": str(dataset_dir),
-                "output_dir": str(deps.shared_audio_root / "output"),
-                "hold_token": "test-token",
-            },
+            json=_training_request_payload(
+                mode="sft",
+                dataset_dir=str(dataset_dir),
+                output_dir=str(deps.shared_audio_root / "output"),
+                hold_token="test-token",
+            ),
             headers=_auth_headers(),
         )
     assert resp.status_code == 409
@@ -148,12 +190,12 @@ def test_gpu_hold_endpoints_require_the_internal_token(tmp_path: Path) -> None:
             client.post("/gpu_hold/release", json={"token": "token"}, headers=headers).status_code
             == 401
         )
-        payload = {
-            "mode": "sft",
-            "dataset_dir": str(deps.shared_audio_root),
-            "output_dir": str(deps.shared_audio_root / "output"),
-            "hold_token": "token",
-        }
+        payload = _training_request_payload(
+            mode="sft",
+            dataset_dir=str(deps.shared_audio_root),
+            output_dir=str(deps.shared_audio_root / "output"),
+            hold_token="token",
+        )
         assert client.post("/tasks/train_lora", json=payload, headers=headers).status_code == 401
         assert client.post("/gpu_hold/reserve").status_code == 422
         assert client.post("/gpu_hold/renew", json={"token": "token"}).status_code == 422
@@ -277,12 +319,12 @@ def test_train_lora_501_when_runner_missing(tmp_path: Path) -> None:
     with TestClient(app) as client:
         resp = client.post(
             "/tasks/train_lora",
-            json={
-                "mode": "sft",
-                "dataset_dir": str(dataset_dir),
-                "output_dir": str(deps.shared_audio_root / "output"),
-                "hold_token": "test-token",
-            },
+            json=_training_request_payload(
+                mode="sft",
+                dataset_dir=str(dataset_dir),
+                output_dir=str(deps.shared_audio_root / "output"),
+                hold_token="test-token",
+            ),
             headers=_auth_headers(),
         )
     assert resp.status_code == 501
@@ -304,12 +346,12 @@ def test_train_lora_happy_path_emits_sse_events(tmp_path: Path) -> None:
         assert hold.status_code == 200
         resp = client.post(
             "/tasks/train_lora",
-            json={
-                "mode": "sft",
-                "dataset_dir": str(dataset_dir),
-                "output_dir": str(deps.shared_audio_root / "out"),
-                "hold_token": hold.json()["token"],
-            },
+            json=_training_request_payload(
+                mode="sft",
+                dataset_dir=str(dataset_dir),
+                output_dir=str(deps.shared_audio_root / "out"),
+                hold_token=hold.json()["token"],
+            ),
             headers=_auth_headers(),
         )
         assert resp.status_code == 200
@@ -362,6 +404,7 @@ def test_train_lora_renews_before_creating_its_task_and_releases_after_success(
                 dataset_dir=str(dataset_dir),
                 output_dir=str(deps.shared_audio_root / "output"),
                 hold_token="hold-token",
+                **_training_request_payload(),
             )
         )
         assert renewal_task_created.is_set()
@@ -466,6 +509,7 @@ def test_train_lora_allows_only_one_concurrent_handover_for_a_hold_token(
             dataset_dir=str(dataset_dir),
             output_dir=str(deps.shared_audio_root / "output"),
             hold_token="hold-token",
+            **_training_request_payload(),
         )
         responses = await asyncio.gather(
             endpoint(request),
@@ -511,6 +555,7 @@ def test_train_lora_releases_handover_claim_after_setup_failure(
             dataset_dir=str(dataset_dir),
             output_dir=str(deps.shared_audio_root / "output"),
             hold_token="hold-token",
+            **_training_request_payload(),
         )
         original_create = deps.task_store.create
 
@@ -575,6 +620,7 @@ def test_train_lora_releases_handover_claim_after_connection_error(
             dataset_dir=str(dataset_dir),
             output_dir=str(deps.shared_audio_root / "output"),
             hold_token="hold-token",
+            **_training_request_payload(),
         )
         with pytest.raises(ConnectionError, match="Redis unavailable"):
             await endpoint(request)
@@ -619,6 +665,7 @@ def test_train_lora_releases_handover_claim_when_setup_is_cancelled(
             dataset_dir=str(dataset_dir),
             output_dir=str(deps.shared_audio_root / "output"),
             hold_token="hold-token",
+            **_training_request_payload(),
         )
         handover = asyncio.create_task(endpoint(request))
         await renewal_started.wait()
@@ -664,6 +711,7 @@ def test_train_lora_releases_the_hold_when_the_runner_fails(
                 dataset_dir=str(dataset_dir),
                 output_dir=str(deps.shared_audio_root / "output"),
                 hold_token="hold-token",
+                **_training_request_payload(),
             )
         )
         with pytest.raises(RuntimeError, match="training failed"):
@@ -705,6 +753,7 @@ def test_train_lora_releases_the_hold_when_the_runner_is_cancelled(
                 dataset_dir=str(dataset_dir),
                 output_dir=str(deps.shared_audio_root / "output"),
                 hold_token="hold-token",
+                **_training_request_payload(),
             )
         )
         background_task = asyncio.create_task(spawned[0])
@@ -763,6 +812,7 @@ def test_worker_renewal_failure_releases_hold_and_cache_before_background_error(
                 dataset_dir=str(dataset_dir),
                 output_dir=str(deps.shared_audio_root / "output"),
                 hold_token="hold-token",
+                **_training_request_payload(),
             )
         )
         assert response.task_id
@@ -811,6 +861,7 @@ def test_train_lora_rejects_an_expired_hold_before_returning_a_task_id(
                     dataset_dir=str(dataset_dir),
                     output_dir=str(deps.shared_audio_root / "output"),
                     hold_token="hold-token",
+                    **_training_request_payload(),
                 )
             )
         assert exc_info.value.status_code == 409
@@ -870,6 +921,7 @@ def test_train_lora_pins_mode_from_eviction(tmp_path: Path) -> None:
                     dataset_dir="/x",
                     output_dir="/y",
                     hold_token="test-token",
+                    **_training_request_payload(),
                 ),
                 port=loaded.port,
                 checkpoint_dir=deps.checkpoint_dir,
@@ -914,8 +966,7 @@ def test_default_train_lora_runner_dispatches(tmp_path: Path) -> None:
         dataset_dir=str(dataset_dir),
         output_dir=str(output_dir),
         hold_token="test-token",
-        train_epochs=1,
-        poll_interval_seconds=0.001,
+        **_training_request_payload(train_epochs=1, poll_interval_seconds=0.001),
     )
 
     preprocess_states = iter(
@@ -1043,8 +1094,7 @@ def test_default_train_lora_runner_fails_on_preprocess_error(tmp_path: Path) -> 
         dataset_dir=str(source_dir),
         output_dir=str(tmp_path / "out"),
         hold_token="test-token",
-        train_epochs=1,
-        poll_interval_seconds=0.001,
+        **_training_request_payload(train_epochs=1, poll_interval_seconds=0.001),
     )
     with (
         patch(
@@ -1105,8 +1155,7 @@ def test_default_train_lora_runner_fails_on_zero_samples(tmp_path: Path) -> None
         dataset_dir=str(source_dir),
         output_dir=str(tmp_path / "out"),
         hold_token="test-token",
-        train_epochs=1,
-        poll_interval_seconds=0.001,
+        **_training_request_payload(train_epochs=1, poll_interval_seconds=0.001),
     )
     with (
         patch(
@@ -1181,11 +1230,12 @@ def test_train_lora_rejects_unsafe_shared_paths_before_creating_task(
     with TestClient(app) as client:
         response = client.post(
             "/tasks/train_lora",
-            json={
-                "mode": "sft",
-                "dataset_dir": str(dataset_path),
-                "output_dir": str(output_path),
-            },
+            json=_training_request_payload(
+                mode="sft",
+                dataset_dir=str(dataset_path),
+                output_dir=str(output_path),
+                hold_token="test-token",
+            ),
             headers=_auth_headers(),
         )
 
@@ -1209,8 +1259,7 @@ def test_cancellation_waits_for_staging_copy_before_workspace_cleanup(
         dataset_dir=str(dataset_dir),
         output_dir=str(shared_root / "training_tmp"),
         hold_token="test-token",
-        train_epochs=1,
-        poll_interval_seconds=0.001,
+        **_training_request_payload(train_epochs=1, poll_interval_seconds=0.001),
     )
     copy_started = threading.Event()
     copy_release = threading.Event()
