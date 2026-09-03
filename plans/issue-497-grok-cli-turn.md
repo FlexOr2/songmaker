@@ -17,78 +17,110 @@ Sicherheitsrahmen: #321; Sicherheits-Owner: `docs/security.md`.
 - `grok --help` belegt `--prompt-file`, `--output-format streaming-json`,
   `--deny` und `--max-turns`. NDJSON enthält u.a. `text`, `tool_call`,
   `tool_call_update`, `available_commands`, `usage` und `end`.
+- `agent_cli.grok_cli_status()` leitet den Login dagegen aus `grok models`
+  ab. Das ist weiterhin Katalog-/Diagnoseinformation, aber ausdrücklich
+  **nicht** der Turn-Dispatcher: ein abgelaufenes, noch vorhandenes Login
+  darf nicht als „kein CLI-Login“ in den API-Key-Weg fallen.
 
 ## Umsetzung
 
 1. **Ein gemeinsamer Spawn-Owner:** `agent_cli.py` erweitert
-   `run_cli_bounded` um einen begrenzten stdout-Zeilenkanal und eine
-   thread-sichere Abbruchanforderung. Nur der Runner besitzt bereinigte
+   `run_cli_bounded`, ohne seine bestehenden Lesearten `read="all"` und
+   `read="first_line"` zu ändern, um einen begrenzten stdout-Zeilenkanal und
+   eine thread-sichere Abbruchanforderung. Nur der Runner besitzt bereinigte
    Umgebung, `start_new_session`, begrenztes Lesen/Schreiben, TERM/KILL der
    Prozessgruppe und Reap – auch bei Deadline, Kanalüberlauf oder Abbruch.
-   Er erzeugt außerdem die private `0600`-Prompt-Datei und entfernt sie im
-   `finally`. Der Adapter kann nur Abbruch anfordern und das Ergebnis
-   abwarten; er verwendet weder `Popen` noch eigene Reap-Logik. Migriere die
-   passende Claude-Probe/Prompt-Erzeugung auf diese Hilfsmittel, damit diese
-   Mechanik einmal gehört; Claude behält Tool-Policy, Pooling und Parser.
-2. **Kanal-/Abbruchvertrag:** Der Runner sendet ganze, größenbegrenzte
-   stdout-Zeilen in einen begrenzten Kanal und schließt ihn erst mit seinem
-   eindeutigen `CliRunOutcome`. Eine Consumer-Cancellation setzt die
-   Abbruchanforderung und wartet den Runner ab. Bei Timeout, Abbruch,
-   Überlauf, Spawn-/I/O-Fehler oder unvollständigem Prozess gibt es kein
-   `FinalEvent`; bereits gepufferte, noch nicht gelesene Zeilen werden
-   verworfen. Bei Policy-, Protokoll- oder CLI-Fehlern wirft der Adapter eine
-   benannte `ProviderUnavailableError` statt ein Event zu liefern; bei
-   Client-Cancellation liefert er nichts mehr.
-3. **Grok-Adapter:** Neu `cowriter/grok_cli_adapter.py`. Er flacht System und
-   Verlauf wie der bestehende Adapter ab, übergibt Inhalt ausschließlich per
-   `--prompt-file` an `grok -p` und setzt Modell, `--output-format
-   streaming-json`, `--deny '*'`, `--max-turns 1`, `--no-subagents` und
-   `--disable-web-search`. Grok-spezifisch bleiben Flags und NDJSON-Parser;
-   Gedanken-, Nutzungs-, Signatur- und stderr-Inhalte erreichen weder Chat
-   noch Log.
+   Ausschließlich wenn ein Caller Prompt-**Bytes** übergibt, erzeugt der
+   Runner eine private `0600`-Prompt-Datei, ersetzt den dafür vorgesehenen
+   argv-Pfad und entfernt die Datei im `finally`; ohne Bytes gibt es keine
+   Datei. Der Adapter kann nur Abbruch anfordern und das Ergebnis abwarten;
+   er verwendet weder `Popen` noch eigene Reap-Logik. Claude-Proben behalten
+   ihre bisherige stdin-Nutzlast. Claude-Streaming-Spawn, Pooling,
+   Tool-Policy und Parser bleiben in `claude/provider.py`.
+2. **Kanal-/Abbruchvertrag:** Der neue Kanal ist ein Zusatz zu den
+   Read-Modi: Der Runner sendet ganze, größenbegrenzte stdout-Zeilen in einen
+   begrenzten Kanal und schließt ihn erst mit seinem eindeutigen
+   `CliRunOutcome`. Eine Consumer-Cancellation setzt die Abbruchanforderung
+   und wartet den Runner ab. Bei Timeout, Abbruch, Überlauf, Spawn-/I/O-Fehler
+   oder unvollständigem Prozess gibt es kein `FinalEvent`; bereits gepufferte,
+   noch nicht gelesene Zeilen werden verworfen. Bei Policy-, Protokoll- oder
+   CLI-Fehlern wirft der Adapter `ProviderUnavailableError("grok", "<code>")`
+   statt ein Event zu liefern; bei Client-Cancellation liefert er nichts mehr.
+3. **Grok-Adapter:** Neu `cowriter/grok_cli_adapter.py`. Er nutzt die
+   bestehende Claude-Formatierung `_flatten_messages` plus `_stdin_prompt`
+   (Systempräfix); es entsteht kein dritter Flacher. Er übergibt diesen Inhalt
+   ausschließlich als Bytes an die Runner-Prompt-Datei und pinnt das argv auf
+   `grok --prompt-file <private-path> --output-format streaming-json --deny
+   '*' --max-turns 1 --no-subagents --disable-web-search --model <model>`:
+   `--prompt-file` allein ist Single-Turn, daher ist `-p` verboten. Der Runner
+   startet Grok außerhalb des App-Trees (wie das Flag-Experiment in `/tmp`).
+   Grok-spezifisch bleiben Flags und NDJSON-Parser; Gedanken-, Nutzungs- und
+   Signaturinhalte erreichen weder Chat noch Log. Grok übergibt
+   `stderr="devnull"`; stderr erreicht damit nie Chat oder Log.
 4. **NDJSON-Vertrag und Werkzeug-Gate:** Jede Zeile muss UTF-8-JSON-Objekt
    mit String-`type` sein. Akzeptiert sind `text` mit String-`data` (wird
-   `AssistantTextEvent`), `end` mit String-`stopReason`, `error` mit
-   String-`message` sowie korrekt geformte, ignorierte `thought`, `usage`,
-   `available_commands` und `plan`-Beobachtungen. Genau ein `end` plus
-   erfolgreicher vollständiger Runner-Abschluss erzeugt danach ein
+   `AssistantTextEvent`), `end` mit String-`stopReason` sowie korrekt
+   geformte, ignorierte `thought`, `usage`, `available_commands` und
+   `plan`-Beobachtungen. Ein `error` braucht String-`message` und ist kein
+   Beobachtungs-Event: ein `error`-Event oder unvollständiger Lauf mit
+   401/OIDC/`unauthenticated` wird
+   `ProviderUnavailableError("grok", "cli_login_expired")`; jeder andere
+   CLI-Fehler wird
+   `ProviderUnavailableError("grok", "grok_cli_error")`. Genau ein `end`
+   plus erfolgreicher vollständiger Runner-Abschluss erzeugt danach ein
    `FinalEvent`. Ungültige Form, unbekannter Typ oder zweites `end` sind
-   `ProviderUnavailableError(grok_cli_stream_protocol_error)`: Abbruch
-   anfordern, reapen lassen, nie ein Finale. Jedes `tool_call` oder `tool_call_update`
-   – auch mit sonst fehlerhafter Nutzlast – ist
-   `ProviderUnavailableError(grok_cli_tool_call_blocked)` mit derselben
-   Semantik. Eine angekündigte
-   Werkzeugliste ist kein Aufruf. Es gibt weder MCP-Konfiguration noch
-   Songwerkzeuge.
+   `ProviderUnavailableError("grok", "grok_cli_stream_protocol_error")`:
+   Abbruch anfordern, reapen lassen, nie ein Finale. Jedes `tool_call` oder
+   `tool_call_update` – auch mit sonst fehlerhafter Nutzlast – ist
+   `ProviderUnavailableError("grok", "grok_cli_tool_call_blocked")` mit
+   derselben Semantik. Eine angekündigte Werkzeugliste ist kein Aufruf. Es
+   gibt weder MCP-Konfiguration noch Songwerkzeuge.
 5. **Spiegel und Ablauf:** Kein neuer Watcher, keine Kopie des Refresh-Tokens:
    #350 bleibt alleiniger Host-Refresh-Owner. Ergänze den Verhaltensnachweis
    „aktualisiertes Host-`key` erscheint im Spiegel, `refresh_token` bleibt
    leer“. OIDC/401 oder abgelaufenes gespiegeltes Login wird
    `cli_login_expired`; der ausgewählte CLI-Turn endet dort, nie über Key.
-6. **Dispatch bis R2:** `dispatch.py` entscheidet *vor* Turn-Beginn genau
-   einen Weg: eingeloggte Grok-CLI zuerst, sonst `XAI_API_KEY`, sonst
-   benannter Nichtverfügbarkeitsfehler. Ein CLI-Fehler startet nie HTTP.
-   R1 ändert weder Judge- noch Katalog-Erreichbarkeit und berührt
-   `cowriter/catalog.py` nicht; der CLI-Katalog gehört ausdrücklich zu R5.
+6. **Dispatch bis R2:** Nur für den Grok-Zweig von
+   `stream_cowriter_turn` liest `dispatch.py` vor dem Turn das gemountete
+   `/home/songmaker/.grok/auth.json`: ein nichtleerer String-`key` in einem
+   Realm wählt die CLI, `{}` oder kein Token erlauben den `XAI_API_KEY`-Weg;
+   fehlen beide, folgt der benannte Nichtverfügbarkeitsfehler. Die
+   `grok models`-Probe ist kein Diskriminator. Ein vorhandenes, aber
+   abgelaufenes/OIDC-401-Login geht in die CLI und endet als
+   `ProviderUnavailableError("grok", "cli_login_expired")`, nie über HTTP;
+   jeder weitere CLI-Fehler startet ebenfalls keinen HTTP-Turn. R1 ändert
+   weder Codex noch `call_provider_once` (beide Judges bleiben Key-basiert)
+   und berührt `cowriter/catalog.py` nicht; der CLI-Katalog gehört
+   ausdrücklich zu R5.
 7. **Sicherheitsdokument:** `docs/security.md` ergänzt nur sechs Stunden
    Zugriffsgültigkeit, #350 als Refresh-Owner und `cli_login_expired`; die
    vorhandene Redaktions- und Mount-Tabelle wird nicht dupliziert.
 
 ## Tests und Abnahme
 
-- `tests/test_agent_cli.py`: 0600-Prompt, gescrubbte Umgebung,
+- `tests/test_agent_cli.py`: Die bisherigen `all`- und `first_line`-Verträge
+  bleiben grün; zusätzlich 0600-Prompt nur bei Bytes, gescrubbte Umgebung,
   Prozessgruppen-Reap bei Abschluss/Timeout/Abbruch, Kanalgrenze und dass nur
   der Runner nach einer Adapter-Abbruchanforderung terminiert/reapet.
-- Neuer `tests/test_grok_cli_adapter.py`: vollständiges argv enthält
-  `--prompt-file`, `--deny '*'`, `--max-turns 1`, `--no-subagents` und
-  `--disable-web-search`; gefälschtes NDJSON wird Text plus genau ein Finale.
-  `tool_call` und `tool_call_update` werfen die benannte
-  `ProviderUnavailableError`, reapen und liefern kein `FinalEvent`; ebenso
-  ungültige/unklare Events, zwei `end`, Timeout und Abbruch. 401 wird
-  `cli_login_expired`; keine Secret-/stderr-Leaks.
-- `tests/test_cowriter_dispatch.py`: CLI geht Key vor, fehlende CLI nimmt den
-  Key, fehlende beide ergeben den benannten Fehler, und ein CLI-Fehler wechselt
-  innerhalb desselben Turns nie zu HTTP.
+- Neuer `tests/test_grok_cli_adapter.py`: Das vollständige argv entspricht
+  exakt der oben genannten Reihenfolge (insbesondere `--prompt-file` ohne
+  `-p`, `--output-format streaming-json`, `--deny '*'`, `--max-turns 1`,
+  `--no-subagents`, `--disable-web-search` und `--model`); der Prompt ist
+  Claude-kompatibel abgeflacht und der cwd ist nicht der App-Tree. Gefälschtes
+  NDJSON wird Text plus genau ein Finale. `tool_call` und
+  `tool_call_update` werfen `ProviderUnavailableError("grok", "<code>")`, reapen
+  und liefern kein `FinalEvent`; ebenso ungültige/unklare Events, zwei `end`,
+  Timeout und Abbruch. `error` oder ein unvollständiger 401/OIDC-Lauf werden
+  `ProviderUnavailableError("grok", "cli_login_expired")`, andere
+  Fehler `ProviderUnavailableError("grok", "grok_cli_error")`; kein
+  Secret- oder stderr-Leak.
+- `tests/test_cowriter_dispatch.py`: Ein nichtleeres `key`-Token im
+  gemounteten `auth.json` geht Key vor; `{}`/fehlendes Token nimmt den Key,
+  fehlende beide ergeben den benannten Fehler. Ein vorhandenes abgelaufenes
+  Login (auch mit `XAI_API_KEY`) nutzt die CLI und wird
+  `cli_login_expired`, nie HTTP. Ein erfolgreicher CLI-Turn wird durch den
+  Dispatcher gestreamt; kein CLI-Fehler wechselt innerhalb desselben Turns zu
+  HTTP. Codex und `call_provider_once` bleiben unverändert.
 - `tests/test_conversation_api.py`: Ein Adapterfehler nutzt den bestehenden
   Provider-Fehlerpfad; weder leere Assistant-Nachricht noch Final-SSE wird
   persistiert/gesendet.
@@ -102,10 +134,48 @@ Sicherheitsrahmen: #321; Sicherheits-Owner: `docs/security.md`.
 
 `env -u XAI_API_KEY grok -p 'Antworte nur OK' --deny '*' --max-turns 1
 --output-format streaming-json --cwd /tmp` endete Exit 0 nach einem Turn.
+Der Gegenversuch
+`grok -p --prompt-file <datei>` scheitert mit „a value is required for
+'--single <PROMPT>'“: `--prompt-file` ist selbst die Single-Turn-Option.
 Trotz `--deny '*'` kündigte der Stream 24 eingebaute Werkzeuge an, enthielt
 aber keinen `tool_call` und antwortete `Contract loaded.` und `OK`. Die Flag
 ist akzeptiert, beweist aber keine werkzeugfreie Oberfläche; das Stream-Gate
 ist deshalb zwingend.
+
+## Codebelege für die eingearbeiteten Reviewpunkte
+
+1. **Token-Dispatch statt Probe:** Compose mountet `grok.json` als
+   `/home/songmaker/.grok/auth.json` (`docker-compose.yml`), und
+   `_redact_grok` erhält den String `key`, leert aber `refresh_token`
+   (`scripts/mirror_agent_cli_credentials.py`). Dagegen ruft
+   `_probe_grok_status` über `grok_cli_status()` `grok models` auf
+   (`src/songmaker_cli/agent_cli.py`); dieser Probeausfall darf keinen
+   Key-Fallback auslösen.
+2. **argv:** `claude/provider.py:_build_cli_cmd` zeigt, dass `-p` eine
+   eigene Prompt-Option ist; das Live-Gegenexperiment oben belegt ihre
+   Unvereinbarkeit mit `--prompt-file`. Der Grok-Plan pinnt deshalb die
+   vollständige Single-Turn-Argumentliste ohne `-p`.
+3. **NDJSON-Fehler und stderr:** `agent_cli.run_cli_bounded` trennt stdout
+   und stderr und unterstützt schon `stderr="devnull"`
+   (`src/songmaker_cli/agent_cli.py`); der neue Grok-Pfad nutzt das, statt
+   stderr weiterzureichen. `conversation_api.py` behandelt die vorhandene
+   `ProviderUnavailableError` bereits generisch als 503, daher bleibt die
+   Fehlersignatur zweistellig und der Code in der Exception/Log-Nachricht.
+4. **Spawn und Flatten:** `run_cli_bounded` besitzt heute `read="all"` und
+   `read="first_line"` sowie `Popen(..., env=scrubbed_env(),
+   start_new_session=True)` und den Gruppen-Reap (`agent_cli.py`);
+   `claude/provider.py:_spawn_reserved_async_cli_process` ist hingegen der
+   Claude-Streaming-Owner. `_flatten_messages` und `_stdin_prompt` dort
+   definieren die bestehende Inhaltsform.
+5. **Fehlerform:** `cowriter/errors.py:ProviderError.__init__` nimmt
+   `(provider, message)` und `ProviderUnavailableError` erweitert sie ohne
+   eigenen Konstruktor. Alle Grok-Codes stehen daher als
+   `ProviderUnavailableError("grok", "<code>")`, nicht als umgebaute Klasse
+   oder einzelnes Argument.
+
+**Abweichungen vom Review:** keine. Die aus dem Review zusätzlich abgeleitete
+Unterscheidung `{}`/fehlendes Token gegen vorhandenes abgelaufenes Token ist
+als Dispatch- und Testvertrag festgeschrieben.
 
 ## Dateien
 
