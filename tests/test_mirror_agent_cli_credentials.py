@@ -121,6 +121,23 @@ def test_grok_keeps_its_shape_but_drops_the_operators_person(
     assert not {"email", "first_name", "last_name", "profile_image_asset_id"} & set(entry)
 
 
+def test_a_host_grok_refresh_replaces_the_mirrored_access_token_in_place(
+    home: Path, mirror_dir: Path,
+) -> None:
+    mirror.mirror(home, mirror_dir)
+    target = mirror_dir / "grok.json"
+    inode = target.stat().st_ino
+    refreshed = {**GROK["https://auth.x.ai::realm"], "key": "refreshed-access-jwt"}
+    (home / ".grok/auth.json").write_text(json.dumps({"https://auth.x.ai::realm": refreshed}))
+
+    mirror.mirror(home, mirror_dir)
+
+    (entry,) = _published(mirror_dir, "grok.json").values()
+    assert target.stat().st_ino == inode
+    assert entry["key"] == "refreshed-access-jwt"
+    assert entry["refresh_token"] == ""
+
+
 def test_codex_keeps_the_refresh_field_but_empties_it(home: Path, mirror_dir: Path) -> None:
     """Its CLI refuses a document without the field, and accepts an empty one."""
     mirror.mirror(home, mirror_dir)
@@ -188,6 +205,23 @@ def test_it_will_not_pad_a_target_that_has_somehow_grown(
 
     with pytest.raises(mirror.MirrorError, match="is already"):
         mirror.write_in_place(target, b"{}")
+
+
+def test_serialized_unicode_expansion_is_rejected_before_writing(
+    monkeypatch: pytest.MonkeyPatch, mirror_dir: Path, tmp_path: Path,
+) -> None:
+    mirror.prepare_mirror_directory(mirror_dir)
+    source = tmp_path / "credentials.json"
+    source.write_text('{"signed_in": true}')
+    credential = mirror.MirroredCredential(
+        "unicode", source, "unicode.json", lambda _document: {"value": "é" * 40},
+    )
+    monkeypatch.setattr(mirror, "SOURCE_READ_LIMIT_BYTES", 128)
+
+    with pytest.raises(mirror.MirrorError, match="payload is .* bytes"):
+        mirror.mirror_one(credential, mirror_dir)
+
+    assert not (mirror_dir / "unicode.json").exists()
 
 
 def test_a_write_that_does_not_land_completely_is_reported(

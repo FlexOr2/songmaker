@@ -16,6 +16,7 @@ from songmaker_cli.api_helpers import (
     check_generation_access,
     enforce_rate_limit,
     get_cached_limiter,
+    raise_audio_file_http_error,
 )
 from songmaker_cli.api_models.queue_streams import (
     LibraryTakePool,
@@ -26,6 +27,7 @@ from songmaker_cli.api_models.queue_streams import (
     QueueStreamSnapshotRequest,
 )
 from songmaker_cli.app_context import AppContext, get_app_context, get_db_session
+from songmaker_cli.audio_paths import AudioFileNotFoundError
 from songmaker_cli.constants import (
     AUDIO_MEDIA_TYPES,
     REDIS_RL_QUEUE_STREAM_PREFIX,
@@ -41,6 +43,7 @@ from songmaker_cli.queue_streams import (
     ensure_sources_detachable,
     load_queue_stream_manifest,
     pin_snapshot,
+    prepare_queue_stream_admission,
     queue_stream_audio_path,
     track_source_from_generation,
     unpin_snapshot,
@@ -104,6 +107,10 @@ def api_create_queue_stream(
 
     ensure_sources_detachable(sources)
     session.close()
+    try:
+        admission = prepare_queue_stream_admission(ctx, sources)
+    except AudioFileNotFoundError as exc:
+        raise_audio_file_http_error(exc, public=False)
 
     snapshot = build_queue_stream_snapshot(
         ctx,
@@ -111,6 +118,7 @@ def api_create_queue_stream(
         scope="auth",
         scope_id=user.id,
         stream_url="",
+        admission=admission,
     )
     snapshot.stream_url = f"/api/queue-streams/{snapshot.snapshot_id}/audio"
     return snapshot
@@ -356,6 +364,10 @@ def api_create_library_queue_stream(
     )
     ensure_sources_detachable(membership.sources)
     session.close()
+    try:
+        admission = prepare_queue_stream_admission(ctx, membership.sources)
+    except AudioFileNotFoundError as exc:
+        raise_audio_file_http_error(exc, public=False)
 
     snapshot = build_queue_stream_snapshot(
         ctx,
@@ -364,6 +376,7 @@ def api_create_library_queue_stream(
         scope_id=user.id,
         stream_url="",
         force_windowed=not membership.skipped_complete,
+        admission=admission,
     )
     snapshot.stream_url = f"/api/queue-streams/{snapshot.snapshot_id}/audio"
     snapshot.skipped = membership.skipped

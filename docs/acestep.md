@@ -56,15 +56,19 @@ scoring worker (songmaker_cli.scoring_worker.ScoringWorkerSettings)
 ### LoRA training handoff
 
 A LoRA job explicitly loads its selected mode (normally `sft`) before it
-submits training. The worker then initializes the Fork with that mode's
-canonical model name before scanning the dataset. It physically stages the
-dataset inside the Fork's safe root, trains there, and exports from the final
-training output into a separate export directory. Only the exported adapter is
-copied back through the shared training handoff directory; the product job
-moves it to `user_loras/<user>/<id>/lora/` and marks the LoRA ready. The worker
-removes its workspace after success, failure, or cancellation when `rmtree`
-succeeds. A `SIGKILL` can leave `/opt/acestep/training/<id>` in the container
-layer; the product job removes the shared `training_tmp` handoff directory.
+submits the Songmaker-owned training configuration. The worker then initializes
+the Fork with that mode's canonical model name before scanning the dataset. It
+physically stages the dataset inside the Fork's safe root, trains there, and
+exports from the final training output into a separate export directory. Each
+training poll updates the existing TaskStore progress stream, which Songmaker
+consumes through SSE while the Fork reports progress; the timeout and heartbeat
+ordering is documented in [the architecture](architecture.md#worker-and-job-timeouts).
+Only the exported adapter is copied back through the shared training handoff
+directory; the product job moves it to `user_loras/<user>/<id>/lora/` and marks
+the LoRA ready. The worker removes its workspace after success, failure, or
+cancellation when `rmtree` succeeds. A `SIGKILL` can leave
+`/opt/acestep/training/<id>` in the container layer; the product job removes the
+shared `training_tmp` handoff directory.
 
 **Auto-scoring (issue #222).** Every successfully persisted generation gets a
 score job automatically — `jobs.generation._auto_score_generation`, called
@@ -147,7 +151,11 @@ python:3.12-slim
 
 **FFmpeg is a system dependency of the ACE-Step worker image.** `gpu-torch-base` installs the distro `ffmpeg` package, so the inner ACE-Step venv can load TorchCodec's shared FFmpeg libraries while decoding training audio and operators have `ffprobe` available for diagnosis.
 
-The old `ARQ_JOB_TIMEOUT=1800` workaround in `.env` is no longer needed. The Python settings defaults are `ARQ_JOB_TIMEOUT=1000` and `ACESTEP_STARTUP_TIMEOUT_SECONDS=900`, matching `.env.docker.example`. `docker-compose.yml` currently supplies shorter 300-second fallbacks when those env vars are unset, so set the longer values in `.env` for Docker deployments that cold-load xl-turbo or vLLM on fresh containers.
+The old `ARQ_JOB_TIMEOUT=1800` workaround in `.env` is no longer needed. The
+Python settings and `docker-compose.yml` both default `ARQ_JOB_TIMEOUT` to
+1000 seconds. `ACESTEP_STARTUP_TIMEOUT_SECONDS` remains a separate 900-second
+Python setting, while Compose keeps its 300-second fallback; set the longer
+value in `.env` when a Docker deployment cold-loads xl-turbo or vLLM.
 
 **Music-worker image bloat fix:** prior to Phase 8, music-worker shared `Dockerfile.worker` with scoring-worker and carried ~5 GB of unused torch + scoring + whisper wheels. Phase 8 split that file into `docker/music-worker.Dockerfile` (server extras only) and `docker/scoring-worker.Dockerfile` (server + scoring + whisper). Music-worker is now ~860 MB. This is safe because music-worker's import chain (`music_worker.py` → `jobs.py` → `scoring.{pipeline,models}`) is torch-free at module load — torch imports inside the scoring stack are lazy (inside function bodies) and music-worker never registers `run_scoring_job`.
 
@@ -461,11 +469,11 @@ Most of these are set on the subprocess by `subprocess_runner.py:build_env()` wh
 
 ## Failure Cause Contract
 
-A failed generation carries ACE-Step's own words all the way to the take list. When a job fails, the server's `mark_failed` records the **full traceback** on the job record, and both payload builders put it in the result entry's `error` field: the job store's (`query_result_service.py`) and — since our fork's `songmaker/vendor-2026-08-24` line (upstream [#1300](https://github.com/ace-step/ACE-Step-1.5/pull/1300)) — the local cache's (`jobs/local_cache_updates.py`). The cache branch is the one that matters in practice: `/query_result` serves the cache before the store, so before that fix a deployed worker reported `status: 2` with no cause at all. `status_message` only ever appears on *succeeded* analysis payloads; the client reads it as a secondary source but a failure carries `error`.
+ACE-Step records a failed task's own words in its worker result record so Songmaker can log the cause for diagnosis. Songmaker never copies that raw detail into a musician-facing job error or take-list response: those surfaces use fixed messages. `status_message` only ever appears on *succeeded* analysis payloads; a failed worker result carries `error` for the server-side client to log.
 
 This contract covers jobs that reach `mark_failed`. A job that dies before that point (before `run_one_job_runtime`) writes no terminal cache entry at all — a client sees a bare timeout instead of a cause. That gap is tracked upstream, not yet patched: [FlexOr2/ACE-Step-1.5#1](https://github.com/FlexOr2/ACE-Step-1.5/issues/1).
 
-`AceStepClient._poll_result` decodes the entry through `ResultItem`, logs the full text at ERROR, and raises `GenerationFailedError` with the traceback's **last line** (the exception and its message, e.g. `RuntimeError: Music generation failed: Insufficient free VRAM: need ~2.0 GB, only 1.3 GB available`), capped at `_MAX_CAUSE_CHARS`. It never raises an empty message: without any detail it uses the named reason `generation failed (no detail from ACE-Step)`. The worker's generate runner puts an `AceStepError` message into the task error verbatim (other exception types keep their `TypeName: message` form); the scheduler relays a worker error event as `WorkerGenerationFailed`, the one exception type whose message is user-facing — an empty error field is a protocol violation and stays a `WorkerProtocolError`. `_sanitize_error` passes `WorkerGenerationFailed` through, so `jobs.error` holds the real cause while every other failure keeps its generic message. The frontend job store keeps the cause per song in `generationFailures`, and the take list shows it (full text in the row's `title`) until the next generation starts or the user dismisses it. This survives a reload or a later visit too: the job row now carries the generating song's `song_id` (see `Job.song_id` in `db/models.py`, set at creation via `create_job`/`create_job_with_rate_limit`), and `GET /api/songs/{song_id}/last-failed-generation` returns that song's *last* generate/repaint/cover job (by `started_at`) only if it's still FAILED — any newer job of any outcome, or a newer non-archived take, supersedes it. `selectSong`/`initNavigation` hydrate `generationFailures` from it whenever a song is opened, but a live SSE update always wins: once a song has had a live resolution this session (a dismiss or a fresh generate) hydration skips it for the rest of the session — see `hydrateGenerationFailure` in `stores/jobs.ts`. Showing raw server text to the operator is deliberate: it is what makes a failure diagnosable without grepping worker logs.
+`AceStepClient._poll_result` decodes the entry through `ResultItem`, logs the full text at ERROR, and raises `GenerationFailedError` with the traceback's **last line** (the exception and its message, e.g. `RuntimeError: Music generation failed: Insufficient free VRAM: need ~2.0 GB, only 1.3 GB available`), capped at `_MAX_CAUSE_CHARS`. It never raises an empty message: without any detail it uses the named reason `generation failed (no detail from ACE-Step)`. The worker's generate runner puts an `AceStepError` message into the task error verbatim (other exception types keep their `TypeName: message` form); the scheduler relays that event as `WorkerGenerationFailed`, while an empty error field remains a `WorkerProtocolError`. The job layer logs the raw worker cause and maps `WorkerGenerationFailed` to the fixed musician-facing message `Worker generation failed`; the silent-stream dose remains `Worker stream went silent`. `jobs.error`, `GET /api/songs/{song_id}/last-failed-generation`, and the frontend take list therefore expose only those fixed messages. The raw ACE-Step text stays in server logs for diagnosis.
 
 ## VRAM Pre-flight Note
 

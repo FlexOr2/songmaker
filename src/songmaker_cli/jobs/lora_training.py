@@ -49,6 +49,7 @@ from songmaker_cli.scheduler import (
     _iterate_task_events,
     pick_worker,
 )
+from songmaker_cli.settings import LoraTrainingJobConfig
 
 from ._runtime import _sanitize_error, _touch_heartbeat, _update_job
 
@@ -391,6 +392,7 @@ async def _prepare_and_submit_lora(
     target_mode: str,
     user_id: str,
     worker: _WorkerHandle,
+    training_config: LoraTrainingJobConfig | None = None,
 ) -> tuple[TrainLoraTaskResultDTO, Path, Path] | None:
     renew_task: asyncio.Task[None] | None = None
     handover = _LoraHoldHandover()
@@ -450,13 +452,16 @@ async def _prepare_and_submit_lora(
         def on_heartbeat() -> None:
             _touch_heartbeat(db_factory, job_id)
 
+        request_payload = {
+            "mode": target_mode,
+            "dataset_dir": str(dataset_dir),
+            "output_dir": str(tmp_output),
+        }
+        if training_config is not None:
+            request_payload.update(training_config.payload())
         worker_result = await _pick_and_call_worker(
             target_mode=target_mode,
-            request_payload={
-                "mode": target_mode,
-                "dataset_dir": str(dataset_dir),
-                "output_dir": str(tmp_output),
-            },
+            request_payload=request_payload,
             worker=worker,
             hold_token=hold_token,
             renew_task=renew_task,
@@ -580,10 +585,10 @@ def cleanup_failed_lora_with_factory(
         session.commit()
 
     if not _cleanup_failed_lora_paths(audio_dir, user_id, lora_id):
-        _audit_failed_lora_cleanup(db_factory, audio_dir)
+        _log_failed_lora_cleanup(db_factory, audio_dir)
 
 
-def audit_orphaned_lora_work_dirs(
+def log_orphaned_lora_work_dirs(
     db_factory: sessionmaker[Session],
     audio_dir: Path,
 ) -> None:
@@ -618,13 +623,13 @@ def audit_orphaned_lora_work_dirs(
         )
 
 
-def _audit_failed_lora_cleanup(
+def _log_failed_lora_cleanup(
     db_factory: sessionmaker[Session],
     audio_dir: Path,
 ) -> None:
     """Log an audit failure without blocking later LoRA reconciliation rows."""
     try:
-        audit_orphaned_lora_work_dirs(db_factory, audio_dir)
+        log_orphaned_lora_work_dirs(db_factory, audio_dir)
     except Exception:
         log.exception("Failed to audit orphaned LoRA work dirs after cleanup error")
 
@@ -698,7 +703,7 @@ def reconcile_crashed_loras(
 
         reconciled += 1
         if not _cleanup_failed_lora_paths(audio_dir, user_id, lora_id):
-            _audit_failed_lora_cleanup(db_factory, audio_dir)
+            _log_failed_lora_cleanup(db_factory, audio_dir)
 
 
 async def run_lora_training_job(
@@ -711,6 +716,7 @@ async def run_lora_training_job(
     audio_dir: Path | None = None,
     redis: Redis | None = None,
     target_mode: str = MODEL_DEFAULT_MODE,
+    training_config: LoraTrainingJobConfig | None = None,
 ) -> None:
     """ARQ job: materialize dataset, dispatch training to a worker, persist.
 
@@ -818,6 +824,7 @@ async def run_lora_training_job(
                 target_mode=target_mode,
                 user_id=user_id,
                 worker=worker,
+                training_config=training_config,
             )
             if submitted is None:
                 return
@@ -834,7 +841,7 @@ async def run_lora_training_job(
                 db_factory,
                 job_id,
                 JobStatus.FAILED,
-                error=_sanitize_error(exc),
+                error=_sanitize_error(exc, job_id),
                 error_type="no_workers",
             )
             return
@@ -931,7 +938,7 @@ async def run_lora_training_job(
     except PreviousAdapterRestoredError as exc:
         log.exception("LoRA training job %s kept its previous adapter: %s", job_id, exc)
         if not _cleanup_failed_lora_paths(audio_dir, user_id, lora_id):
-            _audit_failed_lora_cleanup(db_factory, audio_dir)
+            _log_failed_lora_cleanup(db_factory, audio_dir)
         storage_rel = str(
             Path(USER_LORAS_DIRNAME) / user_id / lora_id / USER_LORA_OUTPUT_DIRNAME,
         )
@@ -956,22 +963,23 @@ async def run_lora_training_job(
             db_factory,
             job_id,
             JobStatus.FAILED,
-            error=_sanitize_error(exc),
+            error=_sanitize_error(exc, job_id),
             error_type="lora_training_error",
         )
     except Exception as exc:
         log.exception("LoRA training job %s failed: %s", job_id, exc)
+        sanitized_error = _sanitize_error(exc, job_id)
         cleanup_failed_lora_with_factory(
             lora_id=lora_id,
             user_id=user_id,
             audio_dir=audio_dir,
             db_factory=db_factory,
-            error_message=_sanitize_error(exc),
+            error_message=_sanitize_error(exc, job_id),
         )
         _update_job(
             db_factory,
             job_id,
             JobStatus.FAILED,
-            error=_sanitize_error(exc),
+            error=sanitized_error,
             error_type="lora_training_error",
         )

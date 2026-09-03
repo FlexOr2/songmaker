@@ -756,10 +756,12 @@ def test_shared_audio_hides_path_traversal_as_a_missing_file(
     assert str(sharing_app.app.state.ctx.audio_dir) not in traversal_log
 
 
+@pytest.mark.acceptance("ACC-SHARE-18")
 def test_shared_audio_not_found_bad_slug(sharing_app: TestClient) -> None:
     unauthed = TestClient(sharing_app.app, cookies={})
     resp = unauthed.get("/shared/bad-slug/audio/admin_user/g1.mp3")
     assert resp.status_code == 404
+    assert resp.json()["detail"] == "Not Found"
 
 
 # ── Share payload media fields (#128) ───────────────────────────────
@@ -940,6 +942,24 @@ def test_shared_generation_hides_a_noncanonical_stored_audio_path(
     assert unauthed.get(f"/shared/gen/{slug}/audio/admin_user/g1.mp3").status_code == 404
 
 
+def test_shared_generation_manifest_uses_the_stored_canonical_path_without_resolving(
+    sharing_app: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    slug = sharing_app.post("/api/generations/g1/share").json()["share_slug"]
+
+    def _fail_resolve(_path: Path, *args, **kwargs):
+        raise AssertionError("share JSON must not resolve audio paths")
+
+    monkeypatch.setattr(Path, "resolve", _fail_resolve)
+    unauthed = TestClient(sharing_app.app, cookies={})
+
+    response = unauthed.get(f"/shared/gen/{slug}")
+
+    assert response.status_code == 200
+    assert response.json()["audio_url"] == f"/shared/gen/{slug}/audio/admin_user/g1.mp3"
+
+
 def test_shared_generation_audio_authorizes_canonical_missing_names_before_file_checks(
     sharing_app: TestClient,
     monkeypatch: pytest.MonkeyPatch,
@@ -975,6 +995,43 @@ def test_shared_generation_audio_authorizes_canonical_missing_names_before_file_
     assert response.status_code == 404
     assert len(queries) == 1
     assert filesystem_calls == []
+
+
+def test_shared_generation_audio_lookup_runs_off_the_event_loop(
+    sharing_app: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import asyncio
+    import threading
+
+    import httpx
+
+    from songmaker_cli import sharing_api
+
+    slug = sharing_app.post("/api/generations/g1/share").json()["share_slug"]
+    real_lookup = sharing_api.get_generation_by_slug
+    observed_threads: list[int] = []
+
+    def _observing_lookup(db, shared_slug: str):
+        observed_threads.append(threading.get_ident())
+        return real_lookup(db, shared_slug)
+
+    monkeypatch.setattr(sharing_api, "get_generation_by_slug", _observing_lookup)
+
+    async def _request_audio() -> tuple[int, int]:
+        event_loop_thread = threading.get_ident()
+        transport = httpx.ASGITransport(app=sharing_app.app)
+        async with httpx.AsyncClient(
+            transport=transport, base_url="http://testserver",
+        ) as client:
+            response = await client.get(f"/shared/gen/{slug}/audio/admin_user/g1.mp3")
+        return response.status_code, event_loop_thread
+
+    status_code, event_loop_thread = asyncio.run(_request_audio())
+
+    assert status_code == 200
+    assert observed_threads
+    assert observed_threads[0] != event_loop_thread
 
 
 def test_shared_generation_reports_the_takes_measured_duration(

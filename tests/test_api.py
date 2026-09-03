@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 import subprocess
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -260,6 +261,23 @@ def test_get_song(client: TestClient) -> None:
     d = resp.json()
     assert d["title"] == "Thunder"
     assert len(d["generations"]) == 2
+
+
+def test_get_song_includes_source_take_version_for_provenance(client: TestClient) -> None:
+    with client.app.state.ctx.db() as session:
+        session.add(Generation(
+            id="g3", song_id="s1", version_id="v1", generation_number=3,
+            mp3_path="u-test/g3.mp3", src_generation_id="g1",
+        ))
+        session.commit()
+
+    response = client.get("/api/songs/s1")
+
+    assert response.status_code == 200
+    generation = next(item for item in response.json()["generations"] if item["id"] == "g3")
+    assert generation["src_generation_id"] == "g1"
+    assert generation["src_generation_number"] == 1
+    assert generation["src_generation_version_number"] == 1
 
 
 def test_create_song(client: TestClient) -> None:
@@ -3304,21 +3322,34 @@ def test_body_size_limit_rejects_large_request(tmp_path: Path) -> None:
 def test_sanitize_error_known_type() -> None:
     from songmaker_cli.jobs import _sanitize_error
 
-    assert _sanitize_error(ConnectionError("x")) == "ACE-Step server not reachable"
-    assert _sanitize_error(TimeoutError("x")) == "Generation timed out"
-    assert _sanitize_error(RuntimeError("x")) == "Internal error during processing"
+    assert _sanitize_error(ConnectionError("x"), "j1") == "ACE-Step server not reachable"
+    assert _sanitize_error(TimeoutError("x"), "j1") == "Generation timed out"
+    assert _sanitize_error(RuntimeError("x"), "j1") == "Internal error during processing"
 
 
 def test_sanitize_error_unknown_type() -> None:
     from songmaker_cli.jobs import _sanitize_error
 
-    assert _sanitize_error(KeyError("x")) == "An unexpected error occurred"
+    assert _sanitize_error(KeyError("x"), "j1") == "An unexpected error occurred"
 
 
 def test_sanitize_error_generation_setup() -> None:
     from songmaker_cli.jobs import GenerationSetupError, _sanitize_error
 
-    assert _sanitize_error(GenerationSetupError("Song not found")) == "Song not found"
+    assert _sanitize_error(GenerationSetupError("Song not found"), "j1") == "Song not found"
+
+
+def test_sanitize_error_hides_unknown_generation_setup_details(
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    from songmaker_cli.jobs import GenerationSetupError, _sanitize_error
+
+    raw_error = "/srv/songmaker/private.db is unavailable"
+    with caplog.at_level(logging.ERROR, logger="songmaker_cli.jobs._runtime"):
+        message = _sanitize_error(GenerationSetupError(raw_error), "j1")
+
+    assert message == "An unexpected error occurred"
+    assert raw_error in caplog.text
 
 
 def test_chat_success_finalizes_job(client: TestClient) -> None:

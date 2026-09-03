@@ -100,6 +100,8 @@
 		SONG_COVER_REPLACE_LABEL,
 		SONG_COVER_UPLOAD_LABEL,
 		EDITOR_GENERATE_LABEL,
+		EDITOR_GENERATE_COVER_LABEL,
+		EDITOR_GENERATE_REPAINT_LABEL,
 		EDITOR_GENERATING_LABEL,
 		EDITOR_GPU_OFFLINE_LABEL,
 		EDITOR_GPU_OFFLINE_TITLE,
@@ -393,8 +395,7 @@
 		// Plain mutation: the take row that asked for it owns the outcome the
 		// listener sees, success and failure alike (#163/3).
 		addToPlaylist: addGenerationToPlaylist,
-		clickVersion: onVersionClick,
-		useAsSource: (gen) => setSourceFromGeneration(gen, 'repaint')
+		clickVersion: onVersionClick
 	});
 
 	async function refreshTakes(songId: string): Promise<void> {
@@ -650,6 +651,9 @@
 		}
 		if (generatePending) return EDITOR_GENERATING_LABEL;
 		if (gpuOffline) return EDITOR_GPU_OFFLINE_LABEL;
+		if ($sourceGeneration) {
+			return $sourceMode === 'cover' ? EDITOR_GENERATE_COVER_LABEL : EDITOR_GENERATE_REPAINT_LABEL;
+		}
 		return EDITOR_GENERATE_LABEL;
 	}
 </script>
@@ -792,7 +796,7 @@
 						{latestVersionNumber}
 						{generateJob}
 						onagain={applyAgain}
-						onuseasreference={(gen) => setSourceFromGeneration(gen, 'repaint')}
+						onsource={setSourceFromGeneration}
 						onretry={() => {
 							if (song) void refreshTakes(song.id);
 						}}
@@ -814,7 +818,7 @@
 							{latestVersionNumber}
 							{generateJob}
 							onagain={applyAgain}
-							onuseasreference={(gen) => setSourceFromGeneration(gen, 'repaint')}
+							onsource={setSourceFromGeneration}
 							onretry={() => {
 								if (song) void refreshTakes(song.id);
 							}}

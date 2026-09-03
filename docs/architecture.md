@@ -97,11 +97,14 @@ User clicks "Generate"                    User clicks "Score"
   Music Worker (orchestrator)              Scoring Worker
   ├── see [Generation Flow](#generation-flow) ├── spawn scorer subprocess
   │   for Lua admission, hold defer, config   ├── AudioBox aesthetics
-  │   build, worker HTTP, and persistence
-  ├── consume SSE → task done                 ├── BPM, dynamics, silence, spectral
-                                                  ├── lyrical coherence (Claude)
-                                                  ├── save scores to DB
-                                                  └── Job status: completed
+  │   build, worker HTTP, and persistence      ├── Whisper transcription
+  ├── apply repaint/cover overrides            ├── BPM, dynamics, silence, spectral
+  ├── scheduler.dispatch_generation:          ├── lyrical coherence (configured judge provider)
+  │   ├── pick acestep-worker                ├── save scores to DB
+  │   ├── INCR queue_depth (Redis)             └── Job status: completed
+  │   ├── /load_model + /generate (HTTP)
+  │   ├── consume SSE → task done
+  │   └── DECR queue_depth (finally)
   ├── post_process_generation (to_thread):
   │   ├── read worker WAV from volume
   │   ├── decode + splice (if repaint)

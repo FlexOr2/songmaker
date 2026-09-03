@@ -252,7 +252,7 @@ def test_create_song_first_in_album_uses_initial_track_number(
 
 
 def test_create_generation_first_for_song_uses_initial_number(
-    seeded_session: Session,
+    seeded_session: Session, tmp_path: Path,
 ) -> None:
     from songmaker_cli.db.queries import create_generation
     from songmaker_cli.db.queries.generations import INITIAL_GENERATION_NUMBER
@@ -266,6 +266,7 @@ def test_create_generation_first_for_song_uses_initial_number(
         version_id=None,
         mp3_path="x.mp3",
         model_mode="sft",
+        audio_dir=tmp_path,
     )
     seeded_session.commit()
     assert gen.generation_number == INITIAL_GENERATION_NUMBER
@@ -299,20 +300,25 @@ def test_generation_version_lyrics_stay_on_the_producing_version(
     assert SongResponse.from_orm(song).lyrics == "latest draft"
 
 
-def test_generation_missing_version_lyrics_is_null(seeded_session: Session) -> None:
+def test_generation_missing_version_lyrics_is_null(
+    seeded_session: Session, tmp_path: Path,
+) -> None:
     gen = create_generation(
         seeded_session,
         song_id="s1",
         version_id=None,
         mp3_path="test/no_version.mp3",
         model_mode="sft",
+        audio_dir=tmp_path,
     )
     seeded_session.commit()
     loaded = get_generation(seeded_session, gen.id)
     assert GenerationResponse.from_orm(loaded).version_lyrics is None
 
 
-def test_generation_empty_version_lyrics_is_null(seeded_session: Session) -> None:
+def test_generation_empty_version_lyrics_is_null(
+    seeded_session: Session, tmp_path: Path,
+) -> None:
     empty = Version(
         id="v-empty",
         song_id="s1",
@@ -328,6 +334,7 @@ def test_generation_empty_version_lyrics_is_null(seeded_session: Session) -> Non
         version_id=empty.id,
         mp3_path="test/empty_lyrics.mp3",
         model_mode="sft",
+        audio_dir=tmp_path,
     )
     seeded_session.commit()
     loaded = get_generation(seeded_session, gen.id)
@@ -699,7 +706,7 @@ def test_job_to_dict(seeded_session: Session) -> None:
 # ── Create generation + scores tests ─────────────────────────────────
 
 
-def test_create_generation(seeded_session: Session) -> None:
+def test_create_generation(seeded_session: Session, tmp_path: Path) -> None:
     gen = create_generation(
         seeded_session,
         "s1",
@@ -708,6 +715,7 @@ def test_create_generation(seeded_session: Session) -> None:
         model_mode="sft",
         seed=123,
         generation_params={"bpm": 140},
+        audio_dir=tmp_path,
     )
     seeded_session.commit()
     assert gen.generation_number == 3
@@ -715,7 +723,52 @@ def test_create_generation(seeded_session: Session) -> None:
     assert gen.mp3_path == "test/new_gen.mp3"
 
 
-def test_create_generation_with_model_mode(seeded_session: Session) -> None:
+def test_create_generation_canonicalizes_mp3_path(
+    seeded_session: Session, tmp_path: Path,
+) -> None:
+    gen = create_generation(
+        seeded_session,
+        "s1",
+        "v1",
+        "test/../test/new_gen.mp3",
+        model_mode="sft",
+        audio_dir=tmp_path,
+    )
+
+    assert gen.mp3_path == "test/new_gen.mp3"
+
+
+def test_create_generation_preserves_empty_mp3_path_for_wav_only_take(
+    seeded_session: Session, tmp_path: Path,
+) -> None:
+    gen = create_generation(
+        seeded_session,
+        "s1",
+        "v1",
+        "",
+        model_mode="sft",
+        wav_path="test/new_gen.wav",
+        audio_dir=tmp_path,
+    )
+
+    assert gen.mp3_path == ""
+
+
+def test_create_generation_rejects_an_mp3_path_outside_the_audio_directory(
+    seeded_session: Session, tmp_path: Path,
+) -> None:
+    with pytest.raises(ValueError, match="must stay within the audio directory"):
+        create_generation(
+            seeded_session,
+            "s1",
+            "v1",
+            "../outside.mp3",
+            model_mode="sft",
+            audio_dir=tmp_path,
+        )
+
+
+def test_create_generation_with_model_mode(seeded_session: Session, tmp_path: Path) -> None:
     gen = create_generation(
         seeded_session,
         "s1",
@@ -723,12 +776,13 @@ def test_create_generation_with_model_mode(seeded_session: Session) -> None:
         "test/gen.mp3",
         model_mode="turbo",
         seed=1,
+        audio_dir=tmp_path,
     )
     seeded_session.commit()
     assert gen.model_mode == "turbo"
 
 
-def test_create_generation_with_wav_path(seeded_session: Session) -> None:
+def test_create_generation_with_wav_path(seeded_session: Session, tmp_path: Path) -> None:
     gen = create_generation(
         seeded_session,
         "s1",
@@ -737,6 +791,7 @@ def test_create_generation_with_wav_path(seeded_session: Session) -> None:
         model_mode="sft",
         seed=1,
         wav_path="test/gen.wav",
+        audio_dir=tmp_path,
     )
     seeded_session.commit()
     assert gen.wav_path == "test/gen.wav"
@@ -774,8 +829,8 @@ def test_create_generation_measures_duration_even_when_requested_zero(
     assert probed == [tmp_path / "test/gen.mp3"]
 
 
-def test_create_generation_without_audio_dir_leaves_duration_unmeasured(
-    seeded_session: Session,
+def test_create_generation_without_an_audio_file_leaves_duration_unmeasured(
+    seeded_session: Session, tmp_path: Path,
 ) -> None:
     gen = create_generation(
         seeded_session,
@@ -784,6 +839,7 @@ def test_create_generation_without_audio_dir_leaves_duration_unmeasured(
         "test/gen.mp3",
         model_mode="sft",
         seed=1,
+        audio_dir=tmp_path,
     )
     seeded_session.commit()
     assert gen.audio_duration_sec is None
@@ -1683,10 +1739,10 @@ def test_reaper_marks_a_stale_running_job_as_heartbeat_lost(db_session: Session)
     j_old.heartbeat_at = old_time
     db_session.commit()
 
-    count = recover_stale_jobs_by_age_and_type(db_session)
+    recovered = recover_stale_jobs_by_age_and_type(db_session)
     db_session.commit()
 
-    assert count == 1
+    assert recovered == {JobType.GENERATE: 1}
 
     old_after = get_job(db_session, j_old.id)
     assert old_after.status == "failed"
@@ -1718,7 +1774,7 @@ def test_reaper_does_not_overwrite_job_completed_between_read_and_update(
 
     monkeypatch.setattr(job_queries, "_before_stale_job_recovery_update", complete_candidate)
 
-    assert recover_stale_jobs_by_age_and_type(db_session, now=now) == 0
+    assert recover_stale_jobs_by_age_and_type(db_session, now=now) == {}
     assert job.status == JobStatus.COMPLETED
     assert job.error is None
     assert job.completed_at is not None
@@ -1732,7 +1788,7 @@ def test_reaper_leaves_a_recent_job_alone(db_session: Session) -> None:
     update_job_status(db_session, j1.id, "running")
     db_session.commit()
 
-    assert recover_stale_jobs_by_age_and_type(db_session) == 0
+    assert recover_stale_jobs_by_age_and_type(db_session) == {}
 
 
 def test_reaper_marks_an_unknown_workers_old_queued_job_as_too_old(db_session: Session) -> None:
@@ -1746,10 +1802,10 @@ def test_reaper_marks_an_unknown_workers_old_queued_job_as_too_old(db_session: S
     j_queued.heartbeat_at = old
     db_session.commit()
 
-    count = recover_stale_jobs_by_age_and_type(db_session)
+    recovered = recover_stale_jobs_by_age_and_type(db_session)
     db_session.commit()
 
-    assert count == 1
+    assert recovered == {JobType.GENERATE: 1}
     after = get_job(db_session, j_queued.id)
     assert after.status == "failed"
     assert after.error_type == "queued_too_long"
@@ -1771,7 +1827,7 @@ def test_reaper_uses_the_supplied_resolved_queue_depth_for_an_alive_worker(
         now=now,
         worker_liveness={JobType.GENERATE: WorkerLiveness.ALIVE},
         max_queue_depth=1,
-    ) == 1
+    ) == {JobType.GENERATE: 1}
     assert get_job(db_session, job.id).error_type == "queued_full_queue_bound"
 
 
@@ -1794,7 +1850,9 @@ def test_reaper_uses_each_types_queued_and_heartbeat_threshold(
     healthy.heartbeat_at = now
     db_session.commit()
 
-    assert recover_stale_jobs_by_age_and_type(db_session, now=now) == 2
+    assert recover_stale_jobs_by_age_and_type(
+        db_session, now=now,
+    ) == {job_type: 2}
     assert get_job(db_session, queued.id).error_type == "queued_too_long"
     assert get_job(db_session, running.id).error_type == "heartbeat_lost"
     assert get_job(db_session, healthy.id).status == JobStatus.RUNNING
@@ -1815,7 +1873,7 @@ def test_reaper_keeps_jobs_at_each_strict_threshold_cutoff(
     running.heartbeat_at = now - timedelta(seconds=thresholds.heartbeat_seconds)
     db_session.commit()
 
-    assert recover_stale_jobs_by_age_and_type(db_session, now=now) == 0
+    assert recover_stale_jobs_by_age_and_type(db_session, now=now) == {}
     assert get_job(db_session, queued.id).status == JobStatus.QUEUED
     assert get_job(db_session, running.id).status == JobStatus.RUNNING
 
@@ -1865,7 +1923,7 @@ def test_chat_recovery_reads_its_constant_table_not_settings(
     recovered = recover_stale_jobs_by_age_and_type(db_session, now=now)
     db_session.commit()
 
-    assert recovered == 1
+    assert recovered == {JobType.CHAT: 1}
     assert get_job(db_session, job.id).error_type == "heartbeat_lost"
 
 
@@ -1887,10 +1945,10 @@ def test_reaper_distinguishes_queued_vs_running(
         job.heartbeat_at = old
     db_session.commit()
 
-    count = recover_stale_jobs_by_age_and_type(db_session)
+    recovered = recover_stale_jobs_by_age_and_type(db_session)
     db_session.commit()
 
-    assert count == 2
+    assert recovered == {JobType.GENERATE: 2}
     queued_after = get_job(db_session, j_queued.id)
     running_after = get_job(db_session, j_running.id)
     assert queued_after.error_type == "queued_too_long"
@@ -1919,10 +1977,10 @@ def test_user_filtered_reaper(db_session: Session) -> None:
     j_stale.heartbeat_at = stale
     db_session.commit()
 
-    count = recover_stale_jobs_by_age_and_type(db_session, user_id=user.id)
+    recovered = recover_stale_jobs_by_age_and_type(db_session, user_id=user.id)
     db_session.commit()
 
-    assert count == 1
+    assert recovered == {JobType.GENERATE: 1}
     assert get_job(db_session, j_stale.id).status == "failed"
     assert get_job(db_session, j_recent.id).status == "running"
 
@@ -1947,10 +2005,10 @@ def test_user_filtered_reaper_only_owns_its_jobs(db_session: Session) -> None:
     j_b.heartbeat_at = stale
     db_session.commit()
 
-    count = recover_stale_jobs_by_age_and_type(db_session, user_id=user_a.id)
+    recovered = recover_stale_jobs_by_age_and_type(db_session, user_id=user_a.id)
     db_session.commit()
 
-    assert count == 1
+    assert recovered == {JobType.GENERATE: 1}
     assert get_job(db_session, j_a.id).status == "failed"
     assert get_job(db_session, j_b.id).status == "running"
 
@@ -1965,10 +2023,10 @@ def test_user_filtered_reaper_catches_queued_jobs(db_session: Session) -> None:
     j_queued.started_at = datetime.now(timezone.utc) - timedelta(seconds=3600)
     db_session.commit()
 
-    count = recover_stale_jobs_by_age_and_type(db_session, user_id=user.id)
+    recovered = recover_stale_jobs_by_age_and_type(db_session, user_id=user.id)
     db_session.commit()
 
-    assert count == 1
+    assert recovered == {JobType.GENERATE: 1}
     assert get_job(db_session, j_queued.id).status == "failed"
 
 
@@ -1980,7 +2038,7 @@ def test_user_filtered_reaper_leaves_fresh_jobs_alone(db_session: Session) -> No
     update_job_status(db_session, j.id, "running")
     db_session.commit()
 
-    assert recover_stale_jobs_by_age_and_type(db_session, user_id=user.id) == 0
+    assert recover_stale_jobs_by_age_and_type(db_session, user_id=user.id) == {}
 
 
 # ── queue_position ────────────────────────────────────────────────

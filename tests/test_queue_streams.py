@@ -25,8 +25,13 @@ from songmaker_cli.queue_stream_api import (
     shuffle_library_sources,
 )
 from songmaker_cli.queue_streams import (
+    FFMPEG_TIMEOUT_SECONDS,
+    QUEUE_STREAM_DURATION_LIMIT_DETAIL,
+    QUEUE_STREAM_MAX_DURATION_SECONDS,
     QueueStreamSource,
     build_queue_stream_snapshot,
+    queue_stream_duration_fits_ffmpeg_timeout,
+    queue_stream_ffmpeg_timeout_seconds,
     read_audio_duration,
     track_source_from_generation,
 )
@@ -545,13 +550,85 @@ def test_shared_playlist_queue_stream_snapshot_and_audio(
 
 
 @pytest.mark.parametrize(
+    ("share_endpoint", "stream_endpoint"),
+    [
+        ("/api/albums/a1/share", "/shared/{slug}/stream"),
+        ("/api/playlists/pl1/share", "/shared/playlist/{slug}/stream"),
+    ],
+)
+def test_shared_stream_manifests_only_playable_takes(
+    tmp_path: Path,
+    monkeypatch,
+    share_endpoint: str,
+    stream_endpoint: str,
+) -> None:
+    _patch_audio_build(monkeypatch)
+    client, factory = make_test_app(tmp_path, seed_db=_seed_queue_data)
+    _write_audio_files(tmp_path)
+    login_and_csrf(client, "owner", "pass1234")
+
+    with factory() as session:
+        archived = session.get(Generation, "g1")
+        assert archived is not None
+        archived.is_archived = True
+        session.add(PlaylistEntry(
+            id="pe3", playlist_id="pl1", generation_id="g2", position=2,
+        ))
+        session.commit()
+
+    slug = client.post(share_endpoint).json()["share_slug"]
+    public = TestClient(client.app, cookies={})
+    response = public.post(stream_endpoint.format(slug=slug))
+
+    assert response.status_code == 200
+    tracks = response.json()["tracks"]
+    assert {track["generation_id"] for track in tracks} == {"g2"}
+    assert all(public.get(track["audio_url"]).status_code == 200 for track in tracks)
+
+
+@pytest.mark.parametrize(
+    ("share_endpoint", "stream_endpoint"),
+    [
+        ("/api/albums/a1/share", "/shared/{slug}/stream"),
+        ("/api/playlists/pl1/share", "/shared/playlist/{slug}/stream"),
+    ],
+)
+def test_shared_stream_manifests_skip_noncanonical_audio_paths(
+    tmp_path: Path,
+    monkeypatch,
+    share_endpoint: str,
+    stream_endpoint: str,
+) -> None:
+    _patch_audio_build(monkeypatch)
+    client, factory = make_test_app(tmp_path, seed_db=_seed_queue_data)
+    _write_audio_files(tmp_path)
+    login_and_csrf(client, "owner", "pass1234")
+
+    with factory() as session:
+        generation = session.get(Generation, "g1")
+        assert generation is not None
+        generation.mp3_path = "owner-id/../owner-id/g1.mp3"
+        session.add(PlaylistEntry(
+            id="pe3", playlist_id="pl1", generation_id="g2", position=2,
+        ))
+        session.commit()
+
+    slug = client.post(share_endpoint).json()["share_slug"]
+    public = TestClient(client.app, cookies={})
+    response = public.post(stream_endpoint.format(slug=slug))
+
+    assert response.status_code == 200
+    assert [track["generation_id"] for track in response.json()["tracks"]] == ["g2"]
+
+
+@pytest.mark.parametrize(
     ("share_endpoint", "stream_url"),
     [
         ("/api/albums/a1/share", "/shared/{slug}/stream"),
         ("/api/playlists/pl1/share", "/shared/playlist/{slug}/stream"),
     ],
 )
-def test_shared_queue_stream_hides_path_traversal_as_a_missing_file(
+def test_shared_queue_stream_skips_path_traversal_like_a_missing_take(
     tmp_path: Path,
     monkeypatch,
     caplog: pytest.LogCaptureFixture,
@@ -582,11 +659,12 @@ def test_shared_queue_stream_hides_path_traversal_as_a_missing_file(
 
     missing_response = public.post(stream_url.format(slug=slug))
 
-    assert traversal_response.status_code == 404
-    assert traversal_response.json()["detail"] == "Not Found"
+    expected_status = 200 if "albums" in share_endpoint else 422
+    assert traversal_response.status_code == expected_status
+    if expected_status == 200:
+        assert [track["generation_id"] for track in traversal_response.json()["tracks"]] == ["g2"]
     assert missing_response.status_code == 404
     assert missing_response.json()["detail"] == "Not Found"
-    assert traversal_response.headers == missing_response.headers
     traversal_log = next(
         record for record in caplog.records
         if record.name == "songmaker_cli.audio_paths"
@@ -617,6 +695,31 @@ def test_shared_playlist_queue_stream_revalidates_entries(
     audio = public.get(data["stream_url"], headers={"Range": "bytes=0-3"})
 
     assert audio.status_code == 404
+
+
+def test_shared_playlist_queue_stream_revalidates_archived_takes(
+    tmp_path: Path,
+    monkeypatch,
+) -> None:
+    _patch_audio_build(monkeypatch)
+    client, factory = make_test_app(tmp_path, seed_db=_seed_queue_data)
+    _write_audio_files(tmp_path)
+    login_and_csrf(client, "owner", "pass1234")
+    slug = client.post("/api/playlists/pl1/share").json()["share_slug"]
+    public = TestClient(client.app, cookies={})
+
+    response = public.post(f"/shared/playlist/{slug}/stream")
+    assert response.status_code == 200
+    manifest = response.json()
+
+    with factory() as session:
+        generation = session.get(Generation, "g1")
+        assert generation is not None
+        generation.is_archived = True
+        session.commit()
+
+    assert public.get(manifest["tracks"][0]["audio_url"]).status_code == 404
+    assert public.get(manifest["stream_url"]).status_code == 404
 
 
 def test_queue_stream_cache_quota_keeps_new_snapshot(
@@ -687,51 +790,54 @@ def test_queue_stream_request_model_rejects_more_than_500_tracks(
     assert resp_at_limit.json()["windowed"] is True
 
 
-def test_queue_stream_windowed_by_duration(tmp_path: Path, monkeypatch) -> None:
+def test_queue_stream_accepts_duration_at_cap(tmp_path: Path, monkeypatch) -> None:
     _patch_audio_build(monkeypatch)
     import songmaker_cli.queue_streams as qs
 
-    # duration=10s per track; cap at 15s admits only the first track
-    monkeypatch.setattr(qs, "QUEUE_STREAM_MAX_DURATION_SECONDS", 15)
+    monkeypatch.setattr(qs, "QUEUE_STREAM_MAX_DURATION_SECONDS", 10)
     client, _ = make_test_app(tmp_path, seed_db=_seed_queue_data)
     _write_audio_files(tmp_path)
     login_and_csrf(client, "owner", "pass1234")
 
-    resp = client.post(
-        "/api/queue-streams",
-        json={"tracks": [{"generation_id": "g1"}, {"generation_id": "g2"}]},
-    )
+    resp = client.post("/api/queue-streams", json={"tracks": [{"generation_id": "g1"}]})
 
     assert resp.status_code == 200
-    data = resp.json()
-    assert data["windowed"] is True
-    assert len(data["tracks"]) == 1
-    assert data["tracks"][0]["generation_id"] == "g1"
+    assert resp.json()["total_duration"] == 10
 
 
-def test_queue_stream_cache_identity_includes_windowed_semantics(
+def test_queue_stream_rejects_duration_above_cap_before_ffmpeg(
     tmp_path: Path, monkeypatch
 ) -> None:
-    _patch_audio_build(monkeypatch)
     import songmaker_cli.queue_streams as qs
 
+    concat_calls: list[object] = []
+    monkeypatch.setattr(qs, "QUEUE_STREAM_MAX_DURATION_SECONDS", 15)
+    monkeypatch.setattr(qs, "probe_audio_duration", lambda _path: 10.0)
+    monkeypatch.setattr(
+        qs,
+        "run_ffmpeg_concat",
+        lambda *_args, **_kwargs: concat_calls.append("ffmpeg"),
+    )
     client, _ = make_test_app(tmp_path, seed_db=_seed_queue_data)
     _write_audio_files(tmp_path)
     login_and_csrf(client, "owner", "pass1234")
 
-    monkeypatch.setattr(qs, "QUEUE_STREAM_MAX_DURATION_SECONDS", 15)
-    windowed = client.post(
+    response = client.post(
         "/api/queue-streams",
         json={"tracks": [{"generation_id": "g1"}, {"generation_id": "g2"}]},
     )
-    assert windowed.status_code == 200
-    assert windowed.json()["windowed"] is True
 
-    monkeypatch.setattr(qs, "QUEUE_STREAM_MAX_DURATION_SECONDS", 60 * 60 * 6)
-    complete = client.post("/api/queue-streams", json={"tracks": [{"generation_id": "g1"}]})
-    assert complete.status_code == 200
-    assert complete.json()["windowed"] is False
-    assert complete.json()["snapshot_id"] != windowed.json()["snapshot_id"]
+    assert response.status_code == 422
+    assert response.json()["detail"] == QUEUE_STREAM_DURATION_LIMIT_DETAIL
+    assert concat_calls == []
+
+
+def test_queue_stream_duration_cap_sets_ffmpeg_timeout() -> None:
+    assert FFMPEG_TIMEOUT_SECONDS == queue_stream_ffmpeg_timeout_seconds(
+        QUEUE_STREAM_MAX_DURATION_SECONDS
+    )
+    assert queue_stream_duration_fits_ffmpeg_timeout(QUEUE_STREAM_MAX_DURATION_SECONDS)
+    assert not queue_stream_duration_fits_ffmpeg_timeout(QUEUE_STREAM_MAX_DURATION_SECONDS + 1)
 
 
 def test_queue_stream_cache_identity_includes_count_windowing(tmp_path: Path, monkeypatch) -> None:
@@ -995,6 +1101,30 @@ def test_library_stream_order_and_tracks(tmp_path: Path, monkeypatch) -> None:
     # indices are contiguous from 0
     assert [t["index"] for t in data["tracks"]] == [0, 1]
     assert data["tracks"][1]["start_offset"] == pytest.approx(10.0)
+
+
+def test_library_stream_rejects_duration_above_cap_before_ffmpeg(
+    tmp_path: Path, monkeypatch
+) -> None:
+    import songmaker_cli.queue_streams as qs
+
+    concat_calls: list[object] = []
+    monkeypatch.setattr(qs, "QUEUE_STREAM_MAX_DURATION_SECONDS", 15)
+    monkeypatch.setattr(qs, "probe_audio_duration", lambda _path: 10.0)
+    monkeypatch.setattr(
+        qs,
+        "run_ffmpeg_concat",
+        lambda *_args, **_kwargs: concat_calls.append("ffmpeg"),
+    )
+    client, _ = make_test_app(tmp_path, seed_db=_seed_library_data)
+    _write_library_audio_files(tmp_path)
+    login_and_csrf(client, "usera", "pass1234")
+
+    response = client.post("/api/queue-streams/library", json={})
+
+    assert response.status_code == 422
+    assert response.json()["detail"] == QUEUE_STREAM_DURATION_LIMIT_DETAIL
+    assert concat_calls == []
 
 
 def test_library_stream_picks_picked_over_first(tmp_path: Path, monkeypatch) -> None:
@@ -1829,6 +1959,11 @@ def test_library_stream_default_scan_limit_is_explicitly_partial(
     monkeypatch.setattr(queue_streams, "QUEUE_STREAM_MAX_TRACKS", 1_500)
     monkeypatch.setattr(queue_stream_api, "list_songs", lambda *_args, **_kwargs: songs)
     monkeypatch.setattr(queue_stream_api, "_library_skip", recording_skip)
+    monkeypatch.setattr(
+        queue_stream_api,
+        "prepare_queue_stream_admission",
+        lambda *_args: queue_streams.QueueStreamAdmission([], False),
+    )
     monkeypatch.setattr(queue_stream_api, "build_queue_stream_snapshot", fake_build)
 
     resp = client.post("/api/queue-streams/library", json={"shuffle": False})

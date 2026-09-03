@@ -1,6 +1,8 @@
 import { writable, get } from 'svelte/store';
 import type { GenerationItem, GenerationParams, VersionGenerationParams } from '$lib/api/types';
+import { RECIPE_REPAINT_OFF_LABEL, TAKE_COVER_LABEL, TAKE_REPAINT_LABEL } from '$lib/constants';
 import { applyGenerationSettings, pinnedSeed } from '$lib/stores/editor';
+import { nowPlayingTakeLabel } from '$lib/constants/now-playing';
 
 export type SourceMode = 'repaint' | 'cover';
 export type RepaintMode = 'conservative' | 'balanced' | 'aggressive';
@@ -30,10 +32,6 @@ export const repaintStrength = writable(0.5);
 export const coverStrength = writable(0.7);
 export const coverNoiseStrength = writable(0);
 
-// A take handed off from outside the editor — Now Playing's "Use as
-// reference" — lands here until its target song opens in SongDetailView,
-// which applies it (or drops it if the user cancels the navigation there
-// instead) and clears the store either way.
 export const pendingSource = writable<PendingSource | null>(null);
 
 export function seedRecipeModel(activeModelIds: readonly string[]): void {
@@ -159,10 +157,6 @@ function hasAnyParam(
 	return keys.some((key) => genParams[key] != null);
 }
 
-function capitalize(value: string): string {
-	return value.length > 0 ? value.charAt(0).toUpperCase() + value.slice(1) : value;
-}
-
 export interface RecipeChip {
 	key: string;
 	label: string;
@@ -202,12 +196,12 @@ function paramsSubsetEqual(
 // Pure projection from editor/recipe state to the labeled chip row — kept
 // side-effect free so it can be unit tested without mounting a component.
 export function recipeChips(input: RecipeChipInput): RecipeChip[] {
-	const repaintValue =
-		input.sourceGeneration === null
-			? 'Off'
-			: input.sourceMode === 'cover'
-				? 'Cover'
-				: capitalize(input.repaintMode);
+	const sourceTake = input.sourceGeneration
+		? nowPlayingTakeLabel(
+				input.sourceGeneration.version_number,
+				input.sourceGeneration.generation_number
+			)
+		: RECIPE_REPAINT_OFF_LABEL;
 	return [
 		{
 			key: 'model',
@@ -286,8 +280,11 @@ export function recipeChips(input: RecipeChipInput): RecipeChip[] {
 		},
 		{
 			key: 'repaint',
-			label: 'Repaint',
-			value: repaintValue,
+			label:
+				input.sourceMode === 'cover' && input.sourceGeneration
+					? TAKE_COVER_LABEL
+					: TAKE_REPAINT_LABEL,
+			value: sourceTake,
 			title: 'Regenerate part of a take instead of starting fresh',
 			changed: false
 		}

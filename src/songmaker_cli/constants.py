@@ -11,6 +11,24 @@ from acestep_engine.settings import get_engine_settings
 
 APP_NAME = "Hallucinai"
 
+JOB_ERROR_AUDIO_DOWNLOAD_FAILED: Final[str] = "Failed to download generated audio"
+JOB_ERROR_SERVER_UNREACHABLE: Final[str] = "ACE-Step server not reachable"
+JOB_ERROR_GENERATION_TIMED_OUT: Final[str] = "Generation timed out"
+JOB_ERROR_NO_WORKERS: Final[str] = "No ACE-Step workers available"
+JOB_ERROR_WORKER_GENERATION_FAILED: Final[str] = "Worker generation failed"
+JOB_ERROR_WORKER_STREAM_SILENT: Final[str] = "Worker stream went silent"
+JOB_ERROR_INTERNAL: Final[str] = "Internal error during processing"
+JOB_ERROR_UNEXPECTED: Final[str] = "An unexpected error occurred"
+JOB_ERROR_JUDGE_FAILED: Final[str] = "Lyrical coherence judge failed"
+JOB_ERROR_SONG_NOT_FOUND: Final[str] = "Song not found"
+JOB_ERROR_VERSION_NOT_FOUND: Final[str] = "Version not found"
+JOB_ERROR_REFERENCE_AUDIO_NOT_FOUND: Final[str] = "Reference audio not found"
+HTTP_NOT_FOUND: Final[str] = "Not Found"
+AUDIO_FILE_NOT_FOUND: Final[str] = "Audio file not found"
+JOB_ERROR_GENERATION_CANCELLED: Final[str] = (
+    "Job cancelled: exceeded ARQ_JOB_TIMEOUT or worker shutdown"
+)
+
 # The two PWA icon files SvelteKit's static build emits. Shared by
 # server.py (SPA-fallback 404 exclusion, see `_pwa_exact_paths`) and
 # rate_limit.py (per-IP budget exemption) so the two never drift.
@@ -143,6 +161,7 @@ COWRITER_DEFAULT_TAIL_TOKEN_BUDGET = 24_000
 COWRITER_MIN_TAIL_TOKEN_BUDGET = 2_000
 COWRITER_MAX_TAIL_TOKEN_BUDGET = 100_000
 COWRITER_CLI_TIMEOUT_SECONDS = 600
+COWRITER_GROK_CLI_LINE_CHANNEL_CAPACITY = 64
 COWRITER_MAX_TOOL_ROUNDS = 8
 COWRITER_MODELS_TIMEOUT_SECONDS = 15
 CLI_LOGIN_STATUS_CACHE_SECONDS = 30
@@ -208,6 +227,9 @@ CLAUDE_CLI_STATUS_ARGS: Final[tuple[str, ...]] = ("auth", "status")
 CLAUDE_CLI_LOGGED_IN_FIELD: Final[str] = "loggedIn"
 CLAUDE_CLI_AUTH_METHOD_FIELD: Final[str] = "authMethod"
 GROK_CLI_BINARY: Final[str] = "grok"
+GROK_CLI_AUTH_FILE: Final[str] = "/home/songmaker/.grok/auth.json"
+GROK_CLI_PROMPT_FILE_PLACEHOLDER: Final[str] = "<songmaker-private-prompt>"
+GROK_CLI_STREAMING_OUTPUT_FORMAT: Final[str] = "streaming-json"
 GROK_CLI_STATUS_ARGS: Final[tuple[str, ...]] = ("models",)
 GROK_CLI_LOGGED_IN_MARKER: Final[str] = "You are logged in with "
 GROK_CLI_LOGGED_OUT_MARKER: Final[str] = "You are not authenticated."
