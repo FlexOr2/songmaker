@@ -314,7 +314,13 @@ def test_codex_cli_token_configures_turns_and_supplies_known_cli_models(monkeypa
             "codex", ProviderSetupMethod.CODEX_CLI, "OPENAI_API_KEY",
         )
     )
-    assert list_provider_models("codex") == ["gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex"]
+    assert list_provider_models("codex") == [
+        "gpt-5.6",
+        "gpt-5.6-terra",
+        "gpt-5.6-sol",
+        "gpt-5.6-luna",
+        "gpt-6-astra",
+    ]
 
 
 def test_claude_key_needs_a_cli_login_for_the_co_writer(monkeypatch):

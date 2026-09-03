@@ -603,6 +603,33 @@ describe('admin models tab', () => {
 		expect(cowriter.textContent).toContain('Choose a model before saving.');
 	});
 
+	it('activates Codex with its CLI catalog and names its source', async () => {
+		api.fetchCowriterSettings.mockResolvedValue({
+			provider: 'claude',
+			model: 'claude-sonnet',
+			tail_token_budget: 8000,
+			allowed_providers: ['claude', 'codex', 'grok'],
+			allowed_models: ['claude-sonnet'],
+			models_by_provider: {
+				claude: ['claude-sonnet'],
+				codex: ['gpt-5.6', 'gpt-5.6-terra'],
+				grok: []
+			},
+			models_errors: {},
+			models_sources: { codex: 'known models for the CLI route' }
+		});
+		const target = await renderPage(true);
+		await selectTab(target, 'models');
+		const cowriter = sectionByHeading(target, 'Co-Writer');
+
+		pillNamed(cowriter, 'Codex').click();
+		await tick();
+
+		expect(cowriter.textContent).toContain('known models for the CLI route');
+		expect(requireElement<HTMLSelectElement>(cowriter, '#cowriter-model').value).toBe('gpt-5.6');
+		expect(buttonNamed(cowriter, 'Save Co-Writer').disabled).toBe(false);
+	});
+
 	it('disables picking an unconfigured provider in the scoring picker', async () => {
 		const target = await renderPage(true);
 		await selectTab(target, 'models');

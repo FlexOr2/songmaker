@@ -29,7 +29,7 @@ from songmaker_cli.constants import (
     SETTING_JUDGE_MODEL,
     SETTING_JUDGE_PROVIDER,
 )
-from songmaker_cli.cowriter.catalog import ProviderSurface
+from songmaker_cli.cowriter.catalog import ProviderSurface, list_provider_models
 from songmaker_cli.cowriter.errors import (
     ProviderModelCatalogUnavailableError,
     ProviderUnavailableError,
@@ -296,6 +296,9 @@ def test_codex_cli_catalog_is_returned_and_can_be_saved(admin_client, monkeypatc
     client, _ = admin_client
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(
+        "songmaker_cli.cowriter.catalog.list_provider_models", list_provider_models,
+    )
+    monkeypatch.setattr(
         "songmaker_cli.cowriter.catalog.codex_cli_access_token_is_present", lambda: True,
     )
     refresh_provider_snapshots()
@@ -303,13 +306,18 @@ def test_codex_cli_catalog_is_returned_and_can_be_saved(admin_client, monkeypatc
     settings = client.get("/api/settings/cowriter")
 
     assert settings.status_code == 200
-    assert settings.json()["models_by_provider"]["codex"] == ["gpt-5.4"]
+    codex_models = settings.json()["models_by_provider"]["codex"]
+    assert codex_models == list_provider_models("codex")
     assert settings.json()["models_sources"]["codex"] == "known models for the CLI route"
     saved = client.put(
-        "/api/settings/cowriter", json={"provider": "codex", "model": "gpt-5.4"},
+        "/api/settings/cowriter", json={"provider": "codex", "model": codex_models[0]},
     )
     assert saved.status_code == 200
     assert saved.json()["provider"] == "codex"
+    rejected = client.put(
+        "/api/settings/cowriter", json={"provider": "codex", "model": "not-a-model"},
+    )
+    assert rejected.status_code == 422
 
 
 def test_cowriter_rejects_unknown_and_cross_provider_models_before_and_after_saving(

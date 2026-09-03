@@ -55,10 +55,16 @@ ANTHROPIC_API_KEY_ENVIRONMENT: Final = "ANTHROPIC_API_KEY"
 XAI_API_KEY_ENVIRONMENT: Final = "XAI_API_KEY"
 OPENAI_API_KEY_ENVIRONMENT: Final = "OPENAI_API_KEY"
 
-# Owner: Codex CLI route. Checked 2026-09-04 against ``codex --help`` and
-# ``codex exec --help``: neither command exposes a non-interactive model list.
-# Keep this conservative list in sync with the Codex CLI release documentation.
-_CODEX_CLI_KNOWN_MODELS: Final = ("gpt-5.4", "gpt-5.3-codex", "gpt-5.2-codex")
+# Owner: Codex CLI route. Checked 2026-09-04: ``codex --help`` and
+# ``codex exec --help`` accept ``--model <MODEL>`` but do not enumerate models.
+# Source: https://developers.openai.com/api/docs/guides/latest-model
+_CODEX_CLI_KNOWN_MODELS: Final = (
+    "gpt-5.6",
+    "gpt-5.6-terra",
+    "gpt-5.6-sol",
+    "gpt-5.6-luna",
+    "gpt-6-astra",
+)
 _CODEX_CLI_KNOWN_MODELS_SOURCE: Final = "known models for the CLI route"
 
 log = logging.getLogger(__name__)
