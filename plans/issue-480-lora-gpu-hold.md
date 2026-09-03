@@ -17,9 +17,6 @@ ARQ-Slot mit dem Training.
   periodische Job-Reaper ist `stale_job_reaper_loop`
   (`src/songmaker_cli/lifecycle.py:434-437`); `ModelCache.acquire_for_use()`
   bleibt allein Eviction-Schutz (`src/acestep_worker/model_cache.py:208-215`).
-- „Queue leer“ vor dem Training heißt exakt `queue_depth` des gewählten
-  Workers ist 0; DB-/ARQ-queued Generierungen zählen nicht. Danach wartet nur
-  eine Generate ohne erfolgreiches Admit.
 - S4a baut nach #479, weil es dessen stabilen LoRA-Langläufervertrag konsumiert,
   ohne Zeitgrenzen, Heartbeat-Kadenz oder Epochen zu kopieren. S4b baut nach
   S4a und #481, weil #481 die Queued-Flächen in `SongDetailView`/`TakesList`
@@ -58,25 +55,22 @@ ARQ-Slot mit dem Training.
   den Dataset-Ordner materialisiert (`lora_training.py:424-455`).
 
 - **Ein Generate-Job kann mehrere Takes umfassen.** `GenerateRequest.count` ist
-  auf 1–10 begrenzt (`src/songmaker_cli/api_models/songs.py:557-560`), und
-  `run_generation_job()` ruft `dispatch_generation()` im `for i in
-  range(count)`-Loop auf (`src/songmaker_cli/jobs/generation.py:736-781`).
-  `dispatch_generation()` wählt derzeit jedes Mal neu und macht direkt danach
-  `INCR`, mit `DECR` im `finally` (`src/songmaker_cli/scheduler.py:427-453`).
-  Nach Take 1 ist `queue_depth` deshalb kurz 0; LoRA könnte reservieren und
-  Take 2 würde erst nach `RUNNING` in den bestehenden
-  `NoCapacityError`/`WorkerTaskFailed`- oder allgemeinen Fehlerpfad fallen.
-  Dasselbe Rennen entsteht bei einem Lua-Admit-409 zwischen Pick und Admit.
-  Der Generate-Job muss daher genau eine Occupancy für die ganze Take-Serie
-  halten: einmal atomar admitten/`INCR` **vor** dem Loop und erst im finalen
-  Cleanup nach dem letzten Take oder Abbruch `DECR`; zwischen Takes gibt es
-  kein `DECR`. Ein Admit-409 vor dem ersten `RUNNING` ist ein nichtfehlerhafter
-  Defer mit DB-Status `queued` und neuem ARQ-Umschlag; nach erfolgreichem
-  Serien-Admit kann dieser Konflikt innerhalb des Jobs nicht mehr auftreten.
+  auf 1–10 begrenzt (`src/songmaker_cli/api_models/songs.py:557-560`). S4a
+  admittiert deshalb genau einmal atomar vor dem Aufbau und hält diese
+  Occupancy für die ganze Take-Serie; der finale Cleanup macht einmal `DECR`.
+  Zwischen Takes gibt es kein `DECR`. Ein Hold-/Admit-409 vor dem ersten
+  `RUNNING` ist ein nichtfehlerhafter Defer mit DB-Status `queued` und neuem
+  ARQ-Umschlag; nach erfolgreichem Serien-Admit kann dieser Konflikt innerhalb
+  des Jobs nicht mehr auftreten.
 
 ## S4a — Redis-Occupancy, Hold und Scheduling
 
 ### Vertrag
+
+LoRA-Reserve gelingt nur, wenn der Queue-Zähler des gewählten Workers 0 ist
+und im Reserve-Zeitpunkt keine Generierung im Zustand `QUEUED` in der DB
+wartet. Die DB-Zähl-Query gehört unmittelbar vor den Reserve-Aufruf; eine
+danach eintreffende Generierung trifft den Hold und wartet ohnehin dahinter.
 
 1. Reserve gewinnt nur atomar, wenn der Queue-Zähler des Workers fehlt oder 0
    und kein Hold besteht. Admit gewinnt nur atomar, wenn kein Hold besteht;
@@ -84,7 +78,8 @@ ARQ-Slot mit dem Training.
    beide gewinnen.
 2. `POST /gpu_hold/reserve` liefert `{token}` oder 409; `renew` und `release`
    akzeptieren nur denselben Token. Der Hold-Key enthält den nicht erratbaren
-   Token, hat `EX = HeartbeatLoop`-TTL (heute 15 s), und jede Erneuerung hat
+   Token und heißt `songmaker:acestep:hold:{worker_id}`. Er hat
+   `EX = HeartbeatLoop`-TTL (heute 15 s), und jede Erneuerung hat
    die bestehende 5-s-Heartbeat-Kadenz (also strikt unter TTL).
 3. Nach einem erfolgreichen Reserve startet der LoRA-Job sofort einen eigenen
    Renewal-Task mit der 5-s-Kadenz und hält ihn **parallel** über

@@ -73,6 +73,14 @@ class TaskCreatedResponse(BaseModel):
     task_id: str
 
 
+class GpuHoldResponse(BaseModel):
+    token: str
+
+
+class GpuHoldTokenRequest(BaseModel):
+    token: str
+
+
 class WorkerTaskEvent(BaseModel):
     type: EventType
     data: dict[str, Any] = Field(default_factory=dict)
@@ -135,6 +143,7 @@ class TrainLoraRequest(BaseModel):
     mode: str
     dataset_dir: str
     output_dir: str
+    hold_token: str
     lokr_linear_dim: int = 64
     lokr_linear_alpha: int = 128
     lokr_factor: int = -1

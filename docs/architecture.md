@@ -69,8 +69,8 @@ own GPU. Workers self-register with the web container at startup
 (`POST /api/internal/workers/register`) and heartbeat ephemeral state to
 Redis with a 15s TTL. The music-worker is now a thin orchestrator: its
 arq `generate` job calls the scheduler (`scheduler.py`), which picks an
-online worker, INCRs queue depth atomically, dispatches via HTTP, and
-consumes the worker's task SSE stream until `done`. A stream that stays silent
+online worker, dispatches via HTTP, and consumes the worker's task SSE stream
+until `done`. A stream that stays silent
 for 630 seconds fails the generation with `Worker stream went silent`; transport
 drops still use the scheduler's bounded reconnect policy. The music-worker then
 post-processes the worker's WAV (decode → splice → master → MP3 → DB
@@ -95,13 +95,12 @@ User clicks "Generate"                    User clicks "Score"
         │                                         │
         ▼                                         ▼
   Music Worker (orchestrator)              Scoring Worker
-  ├── apply repaint/cover overrides        ├── spawn scorer subprocess
-  ├── scheduler.dispatch_generation:       ├── Whisper transcription
-  │   ├── pick acestep-worker              ├── AudioBox aesthetics
-  │   ├── INCR queue_depth (Redis)         ├── BPM, dynamics, silence, spectral
-  │   ├── /load_model + /generate (HTTP)   ├── lyrical coherence (Claude)
-  │   ├── consume SSE → task done          ├── save scores to DB
-  │   └── DECR queue_depth (finally)       └── Job status: completed
+  ├── build config + repaint/cover overrides ├── spawn scorer subprocess
+  ├── /load_model + /generate (HTTP)         ├── AudioBox aesthetics
+  ├── consume SSE → task done                 ├── BPM, dynamics, silence, spectral
+                                                  ├── lyrical coherence (Claude)
+                                                  ├── save scores to DB
+                                                  └── Job status: completed
   ├── post_process_generation (to_thread):
   │   ├── read worker WAV from volume
   │   ├── decode + splice (if repaint)
@@ -730,9 +729,9 @@ POST /api/songs/{id}/generate  (optional: {"model": "sft"} for model validation)
   → create Job record + audit log entry
   → enqueue to arq (Redis-backed, music queue)
   → music worker: run_generation_job()
+    → pick then atomically Lua-admit one online acestep-worker for the full take series
+      → LoRA hold: keep the Job queued and defer a fresh ARQ envelope
     → build config (model defaults + admin defaults + preset + song params)
-    → scheduler.dispatch_generation()
-      → pick an online acestep-worker
       → POST /load_model if the target mode is not loaded
       → POST /generate and consume /tasks/{id}/stream SSE until done
     → read worker WAV from the shared audio volume

@@ -31,7 +31,9 @@ def _run(coro):
 
 
 def _make_deps(
-    tmp_path: Path, *, vram_reader: VramReader | None = None,
+    tmp_path: Path,
+    *,
+    vram_reader: VramReader | None = None,
 ) -> tuple[WorkerDeps, fakeredis.aioredis.FakeRedis]:
     redis = fakeredis.aioredis.FakeRedis(decode_responses=False)
     loaded_log: list[str] = []
@@ -65,7 +67,9 @@ def _make_deps(
         await store.complete(
             task_id,
             GenerationTaskResult(
-                mode=mode, audio_path=f"/fake/{task_id}.wav", seed=42,
+                mode=mode,
+                audio_path=f"/fake/{task_id}.wav",
+                seed=42,
             ),
         )
 
@@ -79,6 +83,7 @@ def _make_deps(
         registration=None,
         checkpoint_dir=tmp_path,
         audio_output_dir=tmp_path / "audio",
+        internal_token="test-internal-token",
         generate_runner=fake_generate_runner,
     )
     deps.heartbeat = HeartbeatLoop(
@@ -135,7 +140,8 @@ def test_health_returns_503_when_gpu_is_unavailable(tmp_path: Path) -> None:
     unable to generate. Simulated, not a lucky real GPU."""
     deps, _ = _make_deps(tmp_path)
     deps.gpu_health_checker = lambda: GpuHealth(
-        GpuHealthStatus.UNAVAILABLE, detail="Driver/library version mismatch",
+        GpuHealthStatus.UNAVAILABLE,
+        detail="Driver/library version mismatch",
     )
     app = create_app(deps)
     with TestClient(app) as client:
@@ -163,7 +169,8 @@ def test_build_state_payload_carries_gpu_healthy_false_when_gpu_unavailable(
 
     deps, _ = _make_deps(tmp_path)
     deps.gpu_health_checker = lambda: GpuHealth(
-        GpuHealthStatus.UNAVAILABLE, detail="Driver/library version mismatch",
+        GpuHealthStatus.UNAVAILABLE,
+        detail="Driver/library version mismatch",
     )
     payload = _run(build_state_payload(deps))
     assert payload["gpu_healthy"] is False
@@ -199,7 +206,8 @@ def test_loaded_models_initial(tmp_path: Path) -> None:
 
 def test_loaded_models_reports_vram_measured_true_with_a_reader(tmp_path: Path) -> None:
     deps, _ = _make_deps(
-        tmp_path, vram_reader=lambda: VramStats(used_gb=15.3, total_gb=24.0),
+        tmp_path,
+        vram_reader=lambda: VramStats(used_gb=15.3, total_gb=24.0),
     )
     app = create_app(deps)
     with TestClient(app) as client:
@@ -302,6 +310,24 @@ def test_generate_requires_loaded(tmp_path: Path) -> None:
     assert resp.status_code == 409
 
 
+def test_generate_rejects_a_worker_held_for_lora_training(tmp_path: Path) -> None:
+    deps, _ = _make_deps(tmp_path)
+    app = create_app(deps)
+    with TestClient(app) as client:
+        assert client.post("/load_model", json={"mode": "sft"}).status_code == 200
+        reserve = client.post(
+            "/gpu_hold/reserve",
+            headers={"X-Internal-Token": "test-internal-token"},
+        )
+        assert reserve.status_code == 200
+        resp = client.post(
+            "/generate",
+            json={"mode": "sft", "config": {"prompt": "test", "lyrics": ""}},
+        )
+    assert resp.status_code == 409
+    assert resp.json()["detail"] == "GPU is held for LoRA training"
+
+
 def test_generate_returns_task_id(tmp_path: Path) -> None:
     deps, _ = _make_deps(tmp_path)
     app = create_app(deps)
@@ -318,16 +344,18 @@ def test_generate_returns_task_id(tmp_path: Path) -> None:
 def _full_ace_step_config_payload() -> dict[str, Any]:
     """A generation request shaped like the real scheduler payload — every
     AceStepConfig field present, several set away from their defaults."""
-    return asdict(AceStepConfig(
-        prompt="synthwave anthem",
-        lyrics="verse one\nchorus",
-        bpm=128,
-        audio_duration=90,
-        seed=42,
-        inference_steps=12,
-        guidance_scale=1.5,
-        batch_size=2,
-    ))
+    return asdict(
+        AceStepConfig(
+            prompt="synthwave anthem",
+            lyrics="verse one\nchorus",
+            bpm=128,
+            audio_duration=90,
+            seed=42,
+            inference_steps=12,
+            guidance_scale=1.5,
+            batch_size=2,
+        )
+    )
 
 
 def test_generate_passes_the_full_config_through_losslessly(tmp_path: Path) -> None:
@@ -338,13 +366,19 @@ def test_generate_passes_the_full_config_through_losslessly(tmp_path: Path) -> N
     received: list[AceStepConfig] = []
 
     async def capturing_runner(
-        store: TaskStore, task_id: str, *,
-        mode: str, config: AceStepConfig, port: int, audio_output_dir: Path,
+        store: TaskStore,
+        task_id: str,
+        *,
+        mode: str,
+        config: AceStepConfig,
+        port: int,
+        audio_output_dir: Path,
     ) -> None:
         received.append(config)
         await store.mark_running(task_id)
         await store.complete(
-            task_id, GenerationTaskResult(mode=mode, audio_path="/x", seed=0),
+            task_id,
+            GenerationTaskResult(mode=mode, audio_path="/x", seed=0),
         )
 
     deps.generate_runner = capturing_runner
@@ -476,13 +510,18 @@ def _patch_engine_modules(monkeypatch: pytest.MonkeyPatch, generate) -> None:
     fake_client_cls = MagicMock()
     fake_client_cls.return_value.generate = generate
     monkeypatch.setitem(
-        sys.modules, "acestep_engine.client", MagicMock(AceStepClient=fake_client_cls),
+        sys.modules,
+        "acestep_engine.client",
+        MagicMock(AceStepClient=fake_client_cls),
     )
 
 
 def test_default_generate_runner_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     fake_result = MagicMock(
-        wav_bytes=b"WAV", seed=99, cot_caption="caption", cot_lyrics="lyrics",
+        wav_bytes=b"WAV",
+        seed=99,
+        cot_caption="caption",
+        cot_lyrics="lyrics",
         delivered_batch_size=None,
     )
     _patch_engine_modules(monkeypatch, MagicMock(return_value=fake_result))
@@ -510,7 +549,8 @@ def test_default_generate_runner_success(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_default_generate_runner_carries_delivered_batch_size(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """A VRAM-guard batch reduction reported by the client reaches the task result.
 
@@ -519,7 +559,10 @@ def test_default_generate_runner_carries_delivered_batch_size(
     delivered one on the way to the task store.
     """
     fake_result = MagicMock(
-        wav_bytes=b"WAV", seed=1, cot_caption="", cot_lyrics="",
+        wav_bytes=b"WAV",
+        seed=1,
+        cot_caption="",
+        cot_lyrics="",
         delivered_batch_size=1,
     )
     _patch_engine_modules(monkeypatch, MagicMock(return_value=fake_result))
@@ -544,10 +587,15 @@ def test_default_generate_runner_carries_delivered_batch_size(
 
 
 def test_default_generate_runner_emits_progress(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     fake_result = MagicMock(
-        wav_bytes=b"WAV", seed=1, cot_caption="", cot_lyrics="", delivered_batch_size=None,
+        wav_bytes=b"WAV",
+        seed=1,
+        cot_caption="",
+        cot_lyrics="",
+        delivered_batch_size=None,
     )
 
     captured_progress: list[float] = []
@@ -612,7 +660,8 @@ def test_default_generate_runner_failure(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_default_generate_runner_reports_acestep_cause_verbatim(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from acestep_engine.errors import GenerationFailedError
 
@@ -736,7 +785,8 @@ def test_health_returns_503_until_registered_then_200(tmp_path: Path) -> None:
 
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(
-                transport=transport, base_url="http://test",
+                transport=transport,
+                base_url="http://test",
             ) as client:
                 resp = await client.get("/health")
                 assert resp.status_code == 503
@@ -954,7 +1004,8 @@ def test_generate_acquires_and_releases_refcount(tmp_path: Path) -> None:
         async with lifespan(app):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(
-                transport=transport, base_url="http://test",
+                transport=transport,
+                base_url="http://test",
             ) as client:
                 await client.post("/load_model", json={"mode": "sft"})
                 resp = await client.post(
@@ -1003,7 +1054,8 @@ def test_generate_releases_refcount_on_runner_exception(tmp_path: Path) -> None:
         async with lifespan(app):
             transport = httpx.ASGITransport(app=app)
             async with httpx.AsyncClient(
-                transport=transport, base_url="http://test",
+                transport=transport,
+                base_url="http://test",
             ) as client:
                 await client.post("/load_model", json={"mode": "sft"})
                 resp = await client.post(

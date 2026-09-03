@@ -26,7 +26,10 @@ log = logging.getLogger(__name__)
 
 
 def create_job(
-    session: Session, job_type: str, user_id: str | None = None, song_id: str | None = None,
+    session: Session,
+    job_type: str,
+    user_id: str | None = None,
+    song_id: str | None = None,
 ) -> Job:
     job = Job(type=job_type, user_id=user_id, song_id=song_id)
     session.add(job)
@@ -35,7 +38,10 @@ def create_job(
 
 
 def count_user_jobs_in_window(
-    session: Session, user_id: str, job_type: str, window_seconds: int = 3600,
+    session: Session,
+    user_id: str,
+    job_type: str,
+    window_seconds: int = 3600,
 ) -> int:
     cutoff = datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
     return (
@@ -60,25 +66,31 @@ def count_user_active_jobs(session: Session, user_id: str, job_type: str | None 
 
 
 def count_total_queued_jobs(session: Session) -> int:
+    return session.query(Job).filter(Job.status.in_(JOB_ACTIVE_STATUSES)).count()
+
+
+def count_queued_generation_jobs(session: Session) -> int:
     return (
         session.query(Job)
-        .filter(Job.status.in_(JOB_ACTIVE_STATUSES))
+        .filter(
+            Job.status == JobStatus.QUEUED,
+            Job.type == JobType.GENERATE,
+        )
         .count()
     )
 
 
 def update_job_status(
-    session: Session, job_id: str, status: str,
-    progress: float = 0.0, error: str | None = None,
+    session: Session,
+    job_id: str,
+    status: str,
+    progress: float = 0.0,
+    error: str | None = None,
     error_type: str | None = None,
+    queue_reason: str | None = None,
     worker_pid: int | None = None,
 ) -> bool:
-    job = (
-        session.query(Job)
-        .filter_by(id=job_id)
-        .with_for_update()
-        .first()
-    )
+    job = session.query(Job).filter_by(id=job_id).with_for_update().first()
     if job is None or job.status in JOB_TERMINAL_STATUSES:
         return False
     now = datetime.now(timezone.utc)
@@ -86,6 +98,7 @@ def update_job_status(
     job.progress = progress
     job.error = error
     job.error_type = error_type
+    job.queue_reason = queue_reason
     if worker_pid is not None:
         job.worker_pid = worker_pid
     if status in (JobStatus.RUNNING, JobStatus.PARTIAL):
@@ -97,12 +110,7 @@ def update_job_status(
 
 
 def update_job_heartbeat(session: Session, job_id: str) -> None:
-    job = (
-        session.query(Job)
-        .filter_by(id=job_id)
-        .with_for_update()
-        .first()
-    )
+    job = session.query(Job).filter_by(id=job_id).with_for_update().first()
     if job is None or job.status in JOB_TERMINAL_STATUSES:
         return
     job.heartbeat_at = datetime.now(timezone.utc)
@@ -131,12 +139,7 @@ def get_last_generate_job_for_song(session: Session, song_id: str) -> Job | None
 
 
 def lock_active_job(session: Session, job_id: str) -> Job | None:
-    job = (
-        session.query(Job)
-        .filter_by(id=job_id)
-        .with_for_update()
-        .first()
-    )
+    job = session.query(Job).filter_by(id=job_id).with_for_update().first()
     if job is None or job.status in JOB_TERMINAL_STATUSES:
         return None
     return job
@@ -273,11 +276,7 @@ def recover_stale_jobs_by_type(
     now = datetime.now(timezone.utc)
     recovered: dict[str, int] = {}
     for job_type, statuses in recoverable_statuses.items():
-        stale = (
-            session.query(Job)
-            .filter(Job.type == job_type, Job.status.in_(statuses))
-            .all()
-        )
+        stale = session.query(Job).filter(Job.type == job_type, Job.status.in_(statuses)).all()
         for job in stale:
             job.status = JobStatus.FAILED
             job.error = "Server restarted while job was in progress"
@@ -338,7 +337,11 @@ def recover_stale_jobs_by_age_and_type(
         if job.status == JobStatus.QUEUED:
             liveness = liveness_for_job_type(JobType(job.type), worker_liveness)
             verdict = _queued_verdict(
-                job, thresholds, liveness, now, max_queue_depth,
+                job,
+                thresholds,
+                liveness,
+                now,
+                max_queue_depth,
             )
             if verdict is None:
                 continue
@@ -375,11 +378,7 @@ def recover_stale_jobs_by_age_and_type(
 
 def job_counts_by_type_and_status(session: Session) -> dict[str, dict[str, int]]:
     """Return {type: {status: count}} for all jobs."""
-    rows = (
-        session.query(Job.type, Job.status, func.count())
-        .group_by(Job.type, Job.status)
-        .all()
-    )
+    rows = session.query(Job.type, Job.status, func.count()).group_by(Job.type, Job.status).all()
     result: dict[str, dict[str, int]] = {}
     for job_type, status, count in rows:
         result.setdefault(job_type, {})[status] = count
@@ -393,9 +392,7 @@ def last_job_failure_time(session: Session) -> datetime | None:
     newest of those is the newest failure.
     """
     newest = (
-        session.query(func.max(Job.completed_at))
-        .filter(Job.status == JobStatus.FAILED)
-        .scalar()
+        session.query(func.max(Job.completed_at)).filter(Job.status == JobStatus.FAILED).scalar()
     )
     if newest is None:
         return None

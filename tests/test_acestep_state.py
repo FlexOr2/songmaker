@@ -10,17 +10,23 @@ import pytest
 
 from songmaker_cli.acestep_state import (
     DOWNLOAD_KEY_PREFIX,
+    GPU_HOLD_KEY_PREFIX,
     QUEUE_KEY_PREFIX,
     WORKER_KEY_PREFIX,
+    admit_generation,
     clear_download_in_progress,
     decr_queue_depth,
     download_key,
+    gpu_hold_key,
     incr_queue_depth,
     list_worker_states,
     queue_depth_key,
     read_download_in_progress,
     read_queue_depth,
     read_worker_state,
+    release_gpu_hold,
+    renew_gpu_hold,
+    reserve_gpu_hold,
     set_download_in_progress,
     worker_is_online,
     worker_state_key,
@@ -62,6 +68,7 @@ def test_heartbeat_payload_keys_match_admin_reader() -> None:
 
     async def fake_loader(_: str):
         from acestep_worker.model_cache import LoadedModel
+
         return LoadedModel(mode="sft", handle=None, port=8101)
 
     async def fake_unloader(_) -> None:
@@ -92,6 +99,7 @@ def test_heartbeat_payload_keys_match_admin_reader() -> None:
         registration=None,
         checkpoint_dir=Path("/nonexistent"),
         audio_output_dir=Path("/nonexistent"),
+        internal_token="test-internal-token",
         generate_runner=MagicMock(),
     )
     payload = asyncio.run(build_state_payload(deps))
@@ -137,6 +145,35 @@ def test_worker_state_key_format() -> None:
 
 def test_queue_depth_key_format() -> None:
     assert queue_depth_key("acestep-worker-0") == "songmaker:acestep:queue:acestep-worker-0"
+
+
+def test_gpu_hold_key_format() -> None:
+    assert gpu_hold_key("acestep-worker-0") == "songmaker:acestep:hold:acestep-worker-0"
+    assert GPU_HOLD_KEY_PREFIX == "songmaker:acestep:hold"
+
+
+def test_reserve_wins_against_a_later_generation_admit(redis, event_loop) -> None:
+    assert event_loop.run_until_complete(reserve_gpu_hold(redis, "w1", "token", 15))
+
+    assert not event_loop.run_until_complete(admit_generation(redis, "w1"))
+    assert event_loop.run_until_complete(read_queue_depth(redis, "w1")) == 0
+
+
+def test_generation_admit_wins_against_a_later_hold_reserve(redis, event_loop) -> None:
+    assert event_loop.run_until_complete(admit_generation(redis, "w1"))
+
+    assert not event_loop.run_until_complete(reserve_gpu_hold(redis, "w1", "token", 15))
+    assert event_loop.run_until_complete(read_queue_depth(redis, "w1")) == 1
+
+
+def test_hold_token_controls_renew_and_release(redis, event_loop) -> None:
+    assert event_loop.run_until_complete(reserve_gpu_hold(redis, "w1", "token", 15))
+    assert event_loop.run_until_complete(redis.ttl(gpu_hold_key("w1"))) == 15
+    assert not event_loop.run_until_complete(renew_gpu_hold(redis, "w1", "wrong", 15))
+    assert not event_loop.run_until_complete(release_gpu_hold(redis, "w1", "wrong"))
+    assert event_loop.run_until_complete(renew_gpu_hold(redis, "w1", "token", 15))
+    assert event_loop.run_until_complete(release_gpu_hold(redis, "w1", "token"))
+    assert event_loop.run_until_complete(admit_generation(redis, "w1"))
 
 
 def test_read_worker_state_missing(redis, event_loop) -> None:
@@ -223,10 +260,7 @@ def test_read_download_in_progress_missing(redis, event_loop) -> None:
 
 def test_set_then_read_download_in_progress(redis, event_loop) -> None:
     event_loop.run_until_complete(set_download_in_progress(redis, "xl-sft", "job-abc"))
-    assert (
-        event_loop.run_until_complete(read_download_in_progress(redis, "xl-sft"))
-        == "job-abc"
-    )
+    assert event_loop.run_until_complete(read_download_in_progress(redis, "xl-sft")) == "job-abc"
 
 
 def test_clear_download_in_progress(redis, event_loop) -> None:
@@ -242,6 +276,7 @@ def test_clear_download_in_progress_idempotent(redis, event_loop) -> None:
 
 def test_set_download_in_progress_has_ttl(redis, event_loop) -> None:
     from songmaker_cli.acestep_state import DOWNLOAD_TTL_SECONDS
+
     event_loop.run_until_complete(set_download_in_progress(redis, "turbo", "job-x"))
     ttl = event_loop.run_until_complete(redis.ttl(download_key("turbo")))
     assert 0 < ttl <= DOWNLOAD_TTL_SECONDS
@@ -255,14 +290,12 @@ def test_set_download_in_progress_returns_true_on_acquire(redis, event_loop) -> 
 
 
 def test_set_download_in_progress_returns_false_when_already_set(
-    redis, event_loop,
+    redis,
+    event_loop,
 ) -> None:
     event_loop.run_until_complete(set_download_in_progress(redis, "sft", "job-1"))
     again = event_loop.run_until_complete(
         set_download_in_progress(redis, "sft", "job-2"),
     )
     assert again is False
-    assert (
-        event_loop.run_until_complete(read_download_in_progress(redis, "sft"))
-        == "job-1"
-    )
+    assert event_loop.run_until_complete(read_download_in_progress(redis, "sft")) == "job-1"
