@@ -1,9 +1,14 @@
 import { get, writable } from 'svelte/store';
 import { ApiError } from '$lib/api/fetch';
 import { fetchAlbums } from '$lib/api/albums';
-import { searchLibrary, type LibrarySearchHit, type LibrarySort } from '$lib/api/library';
+import { searchLibrary, type LibrarySort } from '$lib/api/library';
 import { fetchSongs } from '$lib/api/songs';
-import type { AlbumItem, SongItem } from '$lib/api/types';
+import type {
+	AlbumItem,
+	LibrarySearchResponse,
+	SongItem,
+	SongSummaryResponse
+} from '$lib/api/types';
 import {
 	LIBRARY_ALBUM_PAGE_SIZE,
 	LIBRARY_QUERY_REQUIRED,
@@ -22,6 +27,7 @@ import { selectedGenerationId, selectedSongId } from '$lib/stores/player';
 import { patchSharesFromSong } from '$lib/stores/shares';
 
 export type LibrarySearchStatus = 'idle' | 'loading' | 'error' | 'ready';
+export type LibrarySearchHit = LibrarySearchResponse['items'][number];
 
 export interface LibrarySearchState {
 	q: string;
@@ -43,7 +49,7 @@ export interface LibraryBrowseState {
 
 export interface LibraryAlbumGroup {
 	album: AlbumItem;
-	songs: SongItem[];
+	songs: SongSummaryResponse[];
 }
 
 const EMPTY_SEARCH: LibrarySearchState = {
@@ -300,10 +306,37 @@ export function applySyncedSong(song: SongItem): void {
 	librarySearch.update((state) => ({
 		...state,
 		items: state.items.map((hit) =>
-			hit.type === 'song' && hit.song.id === song.id ? { ...hit, song } : hit
+			hit.type === 'song' && hit.song.id === song.id ? { ...hit, song: toSongSummary(song) } : hit
 		)
 	}));
 	patchSharesFromSong(song);
+}
+
+function toSongSummary(song: SongItem): SongSummaryResponse {
+	return {
+		id: song.id,
+		slug: song.slug,
+		title: song.title,
+		album_id: song.album_id,
+		album_title: song.album_title,
+		artist: song.artist,
+		track_number: song.track_number,
+		vocal_language: song.vocal_language,
+		lyrics: song.lyrics,
+		prompt: song.prompt,
+		bpm: song.bpm,
+		audio_duration: song.audio_duration,
+		key_scale: song.key_scale,
+		generation_params: song.generation_params ? { ...song.generation_params } : null,
+		version_count: song.version_count,
+		generation_count: song.generation_count,
+		is_shared: song.is_shared,
+		share_slug: song.share_slug,
+		best_scores: song.best_scores ? { ...song.best_scores } : null,
+		best_rating: song.best_rating,
+		cover: song.cover,
+		created_at: song.created_at
+	};
 }
 
 export function listLoadedSongIds(): string[] {
