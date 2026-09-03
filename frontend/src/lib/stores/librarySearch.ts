@@ -313,30 +313,8 @@ export function applySyncedSong(song: SongItem): void {
 }
 
 function toSongSummary(song: SongItem): SongSummaryResponse {
-	return {
-		id: song.id,
-		slug: song.slug,
-		title: song.title,
-		album_id: song.album_id,
-		album_title: song.album_title,
-		artist: song.artist,
-		track_number: song.track_number,
-		vocal_language: song.vocal_language,
-		lyrics: song.lyrics,
-		prompt: song.prompt,
-		bpm: song.bpm,
-		audio_duration: song.audio_duration,
-		key_scale: song.key_scale,
-		generation_params: song.generation_params ? { ...song.generation_params } : null,
-		version_count: song.version_count,
-		generation_count: song.generation_count,
-		is_shared: song.is_shared,
-		share_slug: song.share_slug,
-		best_scores: song.best_scores ? { ...song.best_scores } : null,
-		best_rating: song.best_rating,
-		cover: song.cover,
-		created_at: song.created_at
-	};
+	const { generations: _generations, ...summary } = song;
+	return summary as SongSummaryResponse;
 }
 
 export function listLoadedSongIds(): string[] {

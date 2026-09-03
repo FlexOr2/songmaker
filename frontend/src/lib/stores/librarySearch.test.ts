@@ -504,6 +504,11 @@ describe('applySyncedSong', () => {
 			type: 'song',
 			song: expect.objectContaining({ title: 'Search Updated' })
 		});
+		const firstHit = get(librarySearch).items[0];
+		expect(firstHit?.type).toBe('song');
+		if (firstHit?.type === 'song') {
+			expect(firstHit.song).not.toHaveProperty('generations');
+		}
 		expect(listLoadedSongIds().sort()).toEqual(['s-search', 's1']);
 	});
 
