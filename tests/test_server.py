@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 import asyncio
+import json
+import logging
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from unittest.mock import MagicMock, patch
@@ -1127,6 +1129,24 @@ class TestConfigureLogging:
         assert isinstance(formatter, structlog.stdlib.ProcessorFormatter)
         last_processor = formatter.processors[-1]
         assert isinstance(last_processor, structlog.processors.JSONRenderer)
+
+    def test_json_mode_emits_common_log_fields(
+        self, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    ) -> None:
+        monkeypatch.setenv("LOG_FORMAT", "json")
+        from songmaker_cli.logging_config import configure_logging
+        configure_logging()
+
+        logging.getLogger("songmaker.test").info("worker ready")
+
+        payload = json.loads(capsys.readouterr().err)
+        assert payload == {
+            "event": "worker ready",
+            "level": "info",
+            "logger": "songmaker.test",
+            "timestamp": payload["timestamp"],
+        }
+        assert datetime.fromisoformat(payload["timestamp"])
 
 
 # ── health endpoint ──────────────────────────────────────────────
