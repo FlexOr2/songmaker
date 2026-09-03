@@ -27,6 +27,7 @@ from songmaker_cli.constants import (
     CLI_LOGIN_STATUS_CACHE_SECONDS,
     CLI_OUTPUT_READ_LIMIT_BYTES,
     CLI_TERMINATION_GRACE_SECONDS,
+    CODEX_CLI_AUTH_FILE,
     CODEX_CLI_BINARY,
     CODEX_CLI_LOGGED_IN_MARKER,
     CODEX_CLI_LOGGED_OUT_MARKER,
@@ -849,6 +850,33 @@ def grok_cli_token_is_present() -> bool:
         if key:
             return True
     return False
+
+
+def codex_cli_access_token_is_present() -> bool:
+    """Whether the Codex CLI credential mirror contains a non-empty access token."""
+    try:
+        raw_auth = Path(CODEX_CLI_AUTH_FILE).read_text()
+    except FileNotFoundError:
+        return False
+    except OSError as exc:
+        raise AgentCliUnavailableError("could not read Codex CLI credentials") from exc
+    try:
+        document = json.loads(raw_auth)
+    except json.JSONDecodeError as exc:
+        raise AgentCliUnavailableError("could not parse Codex CLI credentials") from exc
+    if not isinstance(document, dict):
+        raise AgentCliUnavailableError("could not parse Codex CLI credentials")
+    if "tokens" not in document:
+        return False
+    tokens = document["tokens"]
+    if not isinstance(tokens, dict):
+        raise AgentCliUnavailableError("could not parse Codex CLI credentials")
+    if "access_token" not in tokens:
+        return False
+    access_token = tokens["access_token"]
+    if not isinstance(access_token, str):
+        raise AgentCliUnavailableError("could not parse Codex CLI credentials")
+    return bool(access_token)
 
 
 def _parse_grok_login(output: str) -> CliLogin:

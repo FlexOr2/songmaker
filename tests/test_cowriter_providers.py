@@ -697,13 +697,14 @@ def _stub_cli_runners(
                     ),
                 ),
                 "codex": (
+                    _status("configured", setup_method="codex_cli"),
                     _status(
                         "cli_login_needs_api_key",
                         needs="api_key",
                         setup_method="codex_cli",
                         environment_key="OPENAI_API_KEY",
                     ),
-                ) * 2,
+                ),
             },
         ),
         (
@@ -769,6 +770,10 @@ def test_provider_status_projects_the_catalog_contract(
     monkeypatch.setattr(
         "songmaker_cli.cowriter.catalog.grok_cli_token_is_present",
         lambda: grok_login.logged_in,
+    )
+    monkeypatch.setattr(
+        "songmaker_cli.cowriter.catalog.codex_cli_access_token_is_present",
+        lambda: codex_login.logged_in,
     )
     grok = GrokCliStatus(login=grok_login, model_names=("grok-4.6",))
     calls = _stub_cli_runners(

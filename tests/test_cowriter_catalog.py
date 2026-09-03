@@ -188,8 +188,8 @@ def test_unconfigured_provider_names_missing_environment_key(
         lambda: GrokCliStatus(login=LOGGED_OUT, model_names=()),
     )
     monkeypatch.setattr(
-        "songmaker_cli.cowriter.catalog.codex_cli_login",
-        lambda: LOGGED_OUT,
+        "songmaker_cli.cowriter.catalog.codex_cli_access_token_is_present",
+        lambda: False,
     )
 
     assert get_provider_configuration(provider, ProviderSurface.JUDGE) == UnconfiguredProvider(
@@ -267,7 +267,8 @@ def test_claude_cli_catalog_failure_is_named_error(monkeypatch):
 def test_catalog_without_api_credentials_names_missing_key(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(
-        "songmaker_cli.cowriter.catalog.codex_cli_login", lambda: LOGGED_OUT,
+        "songmaker_cli.cowriter.catalog.codex_cli_access_token_is_present",
+        lambda: False,
     )
 
     with pytest.raises(ProviderUnavailableError, match="OPENAI_API_KEY"):
@@ -298,19 +299,25 @@ def test_grok_cli_token_configures_turns_and_supplies_its_model_catalog(monkeypa
     assert list_provider_models("grok") == ["grok-4.6"]
 
 
-def test_codex_cli_login_needs_the_api_key_for_turns(monkeypatch):
+def test_codex_cli_token_configures_turns_and_judge_needs_an_api_key(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setattr(
-        "songmaker_cli.cowriter.catalog.codex_cli_login",
-        lambda: CliLogin(logged_in=True, auth_method="codex"),
+        "songmaker_cli.cowriter.catalog.codex_cli_access_token_is_present",
+        lambda: True,
     )
 
+    assert get_provider_configuration("codex", ProviderSurface.CO_WRITER) == (
+        ConfiguredProvider("codex", ProviderSetupMethod.CODEX_CLI)
+    )
     assert get_provider_configuration("codex", ProviderSurface.JUDGE) == (
         CliLoginNeedsApiKeyProvider(
             "codex", ProviderSetupMethod.CODEX_CLI, "OPENAI_API_KEY",
         )
     )
-    with pytest.raises(ProviderUnavailableError, match="OPENAI_API_KEY"):
+    with pytest.raises(
+        ProviderModelCatalogUnavailableError,
+        match="codex CLI has no non-interactive model catalog",
+    ):
         list_provider_models("codex")
 
 

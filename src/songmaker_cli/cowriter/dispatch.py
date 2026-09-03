@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-import json
 from collections.abc import AsyncIterator
-from pathlib import Path
 
 from sqlalchemy.orm import Session
 
-from songmaker_cli.agent_cli import AgentCliUnavailableError, grok_cli_token_is_present
+from songmaker_cli.agent_cli import (
+    AgentCliUnavailableError,
+    codex_cli_access_token_is_present,
+    grok_cli_token_is_present,
+)
 from songmaker_cli.claude.provider import StreamEvent
 from songmaker_cli.constants import (
-    CODEX_CLI_AUTH_FILE,
     COWRITER_GROK_CHAT_URL,
     COWRITER_OPENAI_CHAT_URL,
     COWRITER_PROVIDERS,
@@ -171,25 +172,6 @@ def _grok_cli_token_is_present() -> bool:
 
 def _codex_cli_access_token_is_present() -> bool:
     try:
-        raw_auth = Path(CODEX_CLI_AUTH_FILE).read_text()
-    except FileNotFoundError:
-        return False
-    except OSError as exc:
+        return codex_cli_access_token_is_present()
+    except AgentCliUnavailableError as exc:
         raise ProviderUnavailableError("codex", "codex_cli_error") from exc
-    try:
-        document = json.loads(raw_auth)
-    except json.JSONDecodeError as exc:
-        raise ProviderUnavailableError("codex", "codex_cli_error") from exc
-    if not isinstance(document, dict):
-        raise ProviderUnavailableError("codex", "codex_cli_error")
-    if "tokens" not in document:
-        return False
-    tokens = document["tokens"]
-    if not isinstance(tokens, dict):
-        raise ProviderUnavailableError("codex", "codex_cli_error")
-    if "access_token" not in tokens:
-        return False
-    access_token = tokens["access_token"]
-    if not isinstance(access_token, str):
-        raise ProviderUnavailableError("codex", "codex_cli_error")
-    return bool(access_token)

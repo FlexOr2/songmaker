@@ -19,6 +19,7 @@ from pydantic import SecretStr
 
 from songmaker_cli.agent_cli import (
     AgentCliUnavailableError,
+    codex_cli_access_token_is_present,
     codex_cli_login,
     grok_cli_status,
     grok_cli_token_is_present,
@@ -326,7 +327,7 @@ def _api_key_carries(provider: str, surface: ProviderSurface) -> bool:
 
 def _cli_carries(method: ProviderSetupMethod, surface: ProviderSurface) -> bool:
     return method is ProviderSetupMethod.CLAUDE_CLI or (
-        method is ProviderSetupMethod.GROK_CLI
+        method in {ProviderSetupMethod.GROK_CLI, ProviderSetupMethod.CODEX_CLI}
         and surface is ProviderSurface.CO_WRITER
     )
 
@@ -343,7 +344,7 @@ def _cli_setup_method(provider: str) -> ProviderSetupMethod | None:
             return ProviderSetupMethod.CLAUDE_CLI
         if provider == _GROK_PROVIDER and grok_cli_token_is_present():
             return ProviderSetupMethod.GROK_CLI
-        if provider == _CODEX_PROVIDER and codex_cli_login().logged_in:
+        if provider == _CODEX_PROVIDER and codex_cli_access_token_is_present():
             return ProviderSetupMethod.CODEX_CLI
     except AgentCliUnavailableError as exc:
         log.warning("%s CLI probe unavailable: %s: %s", provider, type(exc).__name__, exc)
