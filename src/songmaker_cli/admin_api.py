@@ -31,7 +31,6 @@ from songmaker_cli.api_models import (
     EvictModelOnWorkerRequest,
     GenerationRetentionReportResponse,
     JobResponse,
-    LoadedModelDetail,
     LoadModelOnWorkerRequest,
     LoginAttemptResponse,
     ModelAvailability,
@@ -314,47 +313,16 @@ def _derive_worker_status(state: dict | None) -> str:
     return "online"
 
 
-def _parse_loaded(raw_loaded) -> list[LoadedModelDetail]:
-    if not raw_loaded:
-        return []
-    out: list[LoadedModelDetail] = []
-    for entry in raw_loaded:
-        if isinstance(entry, dict) and "mode" in entry:
-            out.append(
-                LoadedModelDetail(
-                    mode=str(entry["mode"]),
-                    size_gb=float(entry.get("size_gb", 0.0)),
-                ),
-            )
-        elif isinstance(entry, str):
-            out.append(LoadedModelDetail(mode=entry, size_gb=0.0))
-    return out
-
-
 def _loaded_modes(state: dict | None) -> list[str]:
     if state is None:
         return []
-    return [d.mode for d in _parse_loaded(state.get("loaded", []))]
+    return [detail.mode for detail in WorkerEphemeralState.model_validate(state).loaded]
 
 
 def _state_from_dict(state: dict | None, queue_depth: int) -> WorkerEphemeralState | None:
     if state is None:
         return None
-    return WorkerEphemeralState(
-        loaded=_parse_loaded(state.get("loaded", [])),
-        target_loading=state.get("target_loading"),
-        loading_started_at=state.get("loading_started_at"),
-        loading_last_log_line=state.get("loading_last_log_line"),
-        queue_depth=queue_depth,
-        vram_used_gb=state.get("vram_used_gb"),
-        vram_total_gb=state.get("vram_total_gb"),
-        vram_measured=state.get("vram_measured"),
-        available_modes=list(state.get("available_modes", [])),
-        pinned=list(state.get("pinned", [])),
-        last_heartbeat_at=state.get("last_heartbeat_at"),
-        gpu_healthy=state.get("gpu_healthy"),
-        gpu_health_detail=state.get("gpu_health_detail"),
-    )
+    return WorkerEphemeralState.model_validate({**state, "queue_depth": queue_depth})
 
 
 async def _post_to_worker(

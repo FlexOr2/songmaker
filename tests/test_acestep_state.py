@@ -146,9 +146,9 @@ def test_heartbeat_payload_keys_match_admin_reader() -> None:
 @pytest.mark.parametrize(
     ("payload_vram_measured", "expected"),
     [
-        pytest.param({"vram_measured": True}, True, id="measured"),
-        pytest.param({"vram_measured": False}, False, id="estimated"),
-        pytest.param({}, None, id="legacy-payload-missing-field"),
+        pytest.param({"loaded": [], "vram_measured": True}, True, id="measured"),
+        pytest.param({"loaded": [], "vram_measured": False}, False, id="estimated"),
+        pytest.param({"loaded": []}, None, id="legacy-payload-missing-field"),
     ],
 )
 def test_state_from_dict_reads_vram_measured(
