@@ -301,13 +301,16 @@ def get_shared_album_stream(
         gen = _picked_generation(song)
         if not gen:
             continue
+        audio_url = _shared_audio_url(f"/shared/{slug}/audio", gen)
+        if audio_url is None:
+            continue
         sources.append(
             track_source_from_generation(
                 gen,
                 key=f"{song.id}:{gen.id}:{index}",
                 index=len(sources),
                 entry_id=None,
-                audio_url=f"/shared/{slug}/audio/{gen.mp3_path}",
+                audio_url=audio_url,
             )
         )
     ensure_sources_detachable(sources)
@@ -529,13 +532,18 @@ def get_shared_playlist_stream(
         gen = entry.generation
         if gen is None or not is_playable_take(gen):
             continue
+        audio_url = _shared_audio_url(
+            f"/shared/playlist/{slug}/audio", gen,
+        )
+        if audio_url is None:
+            continue
         sources.append(
             track_source_from_generation(
                 gen,
                 key=entry.id,
                 index=len(sources),
                 entry_id=entry.id,
-                audio_url=f"/shared/playlist/{slug}/audio/{gen.mp3_path}",
+                audio_url=audio_url,
             )
         )
     ensure_sources_detachable(sources)

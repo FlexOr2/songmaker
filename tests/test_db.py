@@ -738,6 +738,22 @@ def test_create_generation_canonicalizes_mp3_path(
     assert gen.mp3_path == "test/new_gen.mp3"
 
 
+def test_create_generation_preserves_empty_mp3_path_for_wav_only_take(
+    seeded_session: Session, tmp_path: Path,
+) -> None:
+    gen = create_generation(
+        seeded_session,
+        "s1",
+        "v1",
+        "",
+        model_mode="sft",
+        wav_path="test/new_gen.wav",
+        audio_dir=tmp_path,
+    )
+
+    assert gen.mp3_path == ""
+
+
 def test_create_generation_rejects_an_mp3_path_outside_the_audio_directory(
     seeded_session: Session, tmp_path: Path,
 ) -> None:
