@@ -191,6 +191,8 @@ Operators need to know what's in Redis to debug stuck state. Keys to know:
 | `songmaker:acestep:hold:{worker_id}` | Worker `/gpu_hold/*` endpoints | Scheduler admission and worker `/generate` | 15 s | Token-bound LoRA training hold; renews every 5 s and prevents generation admission. |
 | `songmaker:acestep:download:{mode}` | `download_model_on_worker` arq job (atomic SET-NX) | admin endpoint pre-check, arq job duplicate guard | 1800 s | Download-in-progress flag; value is the job_id of the arq job that owns it |
 
+The Worker Pool panel mirrors a live hold as Training with the remaining hold lease; this projection never owns, renews, or releases the hold.
+
 **Useful debug commands:**
 
 ```bash

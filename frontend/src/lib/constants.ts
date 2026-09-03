@@ -110,6 +110,9 @@ export const TAKES_ERROR = 'Failed to load takes';
 // {version} is replaced with the version number Generate would create next.
 export const TAKES_DRAFT_BANNER_TEMPLATE = 'Draft — unsaved changes. Generate creates v{version}.';
 export const TAKES_GENERATING_LABEL = 'generating';
+export const TAKES_QUEUED_LABEL = 'queued';
+export const EDITOR_QUEUE_POSITION_TEMPLATE = 'Queued (#{position})';
+export const WORKER_TRAINING_REMAINING_TEMPLATE = 'Training ({seconds}s remaining)';
 export const TAKES_MOBILE_HINT = 'Tap play → details in Now Playing';
 export const TAKES_DELETE_VERSION_LABEL = 'Delete version…';
 
