@@ -295,6 +295,8 @@ def test_pick_worker_ignores_unreadable_heartbeat_instead_of_preferring_it(
     redis = _InMemoryRedis()
     _set_state(redis, "renamed-field", {"renamed_loaded": ["sft"]})
     _set_state(redis, "cold-worker", {"loaded": []})
+    _set_queue(redis, "renamed-field", 0)
+    _set_queue(redis, "cold-worker", 1)
 
     picked = _run(pick_worker(db_session, redis, "sft"))
 
