@@ -172,6 +172,7 @@ def test_grok_dispatch_names_the_missing_api_credential_when_no_mirror_exists(
         asyncio.run(collect())
 
 
+@pytest.mark.acceptance("ACC-COWRITER-11")
 def test_grok_dispatch_does_not_fall_back_to_http_after_a_cli_error(monkeypatch) -> None:
     monkeypatch.setattr(dispatch, "_grok_cli_token_is_present", lambda: True)
 

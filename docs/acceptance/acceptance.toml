@@ -6,3 +6,17 @@ text = "After a musician selects a second take as a Pick for the same song, the 
 requirements = ["REQ-CURATION-02"]
 proof_kind = "integration"
 critical = true
+
+[[acceptance]]
+id = "ACC-COWRITER-09"
+text = "A Grok Co-Writer turn with a subscription token uses the Grok CLI route only."
+requirements = ["REQ-COWRITER-09"]
+proof_kind = "integration"
+critical = true
+
+[[acceptance]]
+id = "ACC-COWRITER-11"
+text = "A Grok CLI failure ends the turn with its named error and does not switch to HTTP."
+requirements = ["REQ-COWRITER-11"]
+proof_kind = "integration"
+critical = true

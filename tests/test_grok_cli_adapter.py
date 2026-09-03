@@ -45,6 +45,7 @@ def _stream():
     )
 
 
+@pytest.mark.acceptance("ACC-COWRITER-09")
 def test_grok_cli_streams_text_then_one_final_and_pins_its_command(monkeypatch) -> None:
     calls = []
     lines = [
