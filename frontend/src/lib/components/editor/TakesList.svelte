@@ -9,6 +9,8 @@
 		TAKE_ARCHIVED_TITLE,
 		TAKE_COVER_LABEL,
 		TAKE_KEEP_LABEL,
+		TAKE_PROVENANCE_COVER_PREFIX,
+		TAKE_PROVENANCE_REPAINT_PREFIX,
 		TAKE_PICK_LABEL,
 		TAKE_REPAINT_LABEL,
 		TAKE_RESCORING_LABEL,
@@ -226,6 +228,24 @@
 		onsource(gen, mode);
 	}
 
+	interface TakeProvenance {
+		label: string;
+		sourceId: string | null;
+	}
+
+	function takeProvenance(gen: GenerationItem): TakeProvenance | null {
+		const taskType = gen.generation_params?.task_type;
+		if ((taskType !== 'repaint' && taskType !== 'cover') || gen.src_generation_number == null) {
+			return null;
+		}
+		const source = song.generations.find((candidate) => candidate.id === gen.src_generation_id);
+		const sourceVersionNumber = source?.version_number ?? gen.src_generation_version_number ?? null;
+		return {
+			label: `${taskType === 'repaint' ? TAKE_PROVENANCE_REPAINT_PREFIX : TAKE_PROVENANCE_COVER_PREFIX} ${nowPlayingTakeLabel(sourceVersionNumber, gen.src_generation_number)}`,
+			sourceId: source?.id ?? null
+		};
+	}
+
 	async function handleBulkDelete(): Promise<void> {
 		const ids = [...$selectedIds];
 		if (ids.length === 0) return;
@@ -408,6 +428,7 @@
 				</div>
 				{#each group.generations as gen (gen.id)}
 					{@const duration = formatDuration(gen)}
+					{@const provenance = takeProvenance(gen)}
 					{@const headline = headlineScore(gen)}
 					{@const flag = qualityFlag(gen.scores)}
 					{@const modelMode = takeModelModeLabel(gen.model_mode)}
@@ -416,6 +437,7 @@
 					     a11y check cannot narrow through a dynamic role. -->
 					<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
 					<div
+						id={`take-${gen.id}`}
 						class="take-row"
 						class:playing={isGenPlaying(gen)}
 						class:buffering={isGenLoading(gen)}
@@ -581,6 +603,22 @@
 								{/if}
 							{/if}
 						</span>
+
+						{#if provenance}
+							{#if $selectionMode}
+								<button type="button" class="take-origin" onclick={() => toggleSelection(gen.id)}>
+									{provenance.label}
+								</button>
+							{:else}
+								<span class="take-origin">
+									{#if provenance.sourceId}
+										<a href={`#take-${provenance.sourceId}`}>{provenance.label}</a>
+									{:else}
+										{provenance.label}
+									{/if}
+								</span>
+							{/if}
+						{/if}
 					</div>
 				{/each}
 			</div>
@@ -827,6 +865,29 @@
 		min-width: var(--take-body-min);
 	}
 
+	.take-origin {
+		background: none;
+		border: 0;
+		color: var(--accent);
+		cursor: pointer;
+		flex-basis: 100%;
+		font: inherit;
+		font-size: 0.68rem;
+		margin-left: 1.25rem;
+		padding: 0;
+		text-align: left;
+	}
+
+	.take-origin:not(button) {
+		cursor: default;
+	}
+
+	.take-origin a {
+		color: inherit;
+		text-decoration: underline;
+		text-underline-offset: 0.15em;
+	}
+
 	.take-label {
 		font-family: var(--font-display);
 		font-size: 0.85rem;
@@ -954,6 +1015,7 @@
 	}
 
 	.take-row.archived .take-label,
+	.take-row.archived .take-origin,
 	.take-row.archived .take-duration,
 	.take-row.archived .score-badge,
 	.take-row.archived .model-badge,

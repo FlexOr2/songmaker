@@ -480,6 +480,68 @@ describe('TakesList', () => {
 		expect(playTakeAndShowNowPlaying).not.toHaveBeenCalled();
 	});
 
+	it.each([
+		['repaint', 'Repaint from v1 · take 1'],
+		['cover', 'Cover from v1 · take 1']
+	] as const)(
+		'shows %s provenance with a link to its existing source',
+		async (task_type, label) => {
+			const source = generation({ id: 'source', version_number: 1, generation_number: 1 });
+			const result = generation({
+				id: 'result',
+				version_number: 2,
+				generation_number: 1,
+				src_generation_id: source.id,
+				src_generation_number: source.generation_number,
+				src_generation_version_number: source.version_number,
+				generation_params: { task_type }
+			});
+			const { target } = await render({ song: song({ generations: [source, result] }) });
+			const provenance = target.querySelector<HTMLElement>('#take-result .take-origin');
+
+			expect(provenance?.textContent?.trim()).toBe(label);
+			expect(provenance?.parentElement?.classList.contains('take-row')).toBe(true);
+			expect(provenance?.closest('.take-body')).toBeNull();
+			expect(provenance?.querySelector('a')?.getAttribute('href')).toBe('#take-source');
+		}
+	);
+
+	it('keeps provenance as text when its source metadata has no loaded target', async () => {
+		const result = generation({
+			id: 'result',
+			src_generation_id: 'deleted-source',
+			src_generation_number: 1,
+			src_generation_version_number: 1,
+			generation_params: { task_type: 'repaint' }
+		});
+		const { target } = await render({ song: song({ generations: [result] }) });
+		const provenance = target.querySelector<HTMLElement>('#take-result .take-origin');
+
+		expect(provenance?.textContent?.trim()).toBe('Repaint from v1 · take 1');
+		expect(provenance?.querySelector('a')).toBeNull();
+	});
+
+	it('keeps source provenance non-navigating while selection mode selects the take', async () => {
+		const source = generation({ id: 'source', version_number: 1, generation_number: 1 });
+		const result = generation({
+			id: 'result',
+			src_generation_id: source.id,
+			src_generation_number: source.generation_number,
+			src_generation_version_number: source.version_number,
+			generation_params: { task_type: 'repaint' }
+		});
+		const { target } = await render({ song: song({ generations: [source, result] }) });
+		enterSelectionMode();
+		await tick();
+		const row = target.querySelector<HTMLElement>('#take-result');
+
+		const provenance = row?.querySelector<HTMLButtonElement>('.take-origin');
+		expect(provenance?.querySelector('a')).toBeNull();
+		provenance?.click();
+		await tick();
+		expect(get(selectedIds).has('result')).toBe(true);
+	});
+
 	it('plays the take and opens Now Playing on its play target click', async () => {
 		const { target } = await render();
 		const row = target.querySelector<HTMLElement>('.take-row');

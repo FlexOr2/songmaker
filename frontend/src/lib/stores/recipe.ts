@@ -1,5 +1,6 @@
 import { writable, get } from 'svelte/store';
 import type { GenerationItem, GenerationParams, VersionGenerationParams } from '$lib/api/types';
+import { RECIPE_REPAINT_OFF_LABEL, TAKE_COVER_LABEL, TAKE_REPAINT_LABEL } from '$lib/constants';
 import { applyGenerationSettings, pinnedSeed } from '$lib/stores/editor';
 
 export type SourceMode = 'repaint' | 'cover';
@@ -155,10 +156,6 @@ function hasAnyParam(
 	return keys.some((key) => genParams[key] != null);
 }
 
-function capitalize(value: string): string {
-	return value.length > 0 ? value.charAt(0).toUpperCase() + value.slice(1) : value;
-}
-
 export interface RecipeChip {
 	key: string;
 	label: string;
@@ -198,12 +195,9 @@ function paramsSubsetEqual(
 // Pure projection from editor/recipe state to the labeled chip row — kept
 // side-effect free so it can be unit tested without mounting a component.
 export function recipeChips(input: RecipeChipInput): RecipeChip[] {
-	const repaintValue =
-		input.sourceGeneration === null
-			? 'Off'
-			: input.sourceMode === 'cover'
-				? 'Cover'
-				: capitalize(input.repaintMode);
+	const sourceTake = input.sourceGeneration
+		? `${input.sourceGeneration.version_number === null ? '' : `v${input.sourceGeneration.version_number} · `}take ${input.sourceGeneration.generation_number}`
+		: RECIPE_REPAINT_OFF_LABEL;
 	return [
 		{
 			key: 'model',
@@ -282,8 +276,11 @@ export function recipeChips(input: RecipeChipInput): RecipeChip[] {
 		},
 		{
 			key: 'repaint',
-			label: 'Repaint',
-			value: repaintValue,
+			label:
+				input.sourceMode === 'cover' && input.sourceGeneration
+					? TAKE_COVER_LABEL
+					: TAKE_REPAINT_LABEL,
+			value: sourceTake,
 			title: 'Regenerate part of a take instead of starting fresh',
 			changed: false
 		}
