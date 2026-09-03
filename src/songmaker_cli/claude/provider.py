@@ -1166,9 +1166,7 @@ def _verify_tool_surface_sync(
         is_zombie = isinstance(exc, _ZombieProbeError)
         if is_zombie:
             _record_tool_surface_failure(key, str(exc), is_zombie=True)
-        if not is_zombie and not isinstance(
-            exc, (_JudgeTimeoutExhausted, _ClaudeCliProcessPoolSaturated),
-        ):
+        if not is_zombie and not isinstance(exc, _ClaudeCliProcessPoolSaturated):
             _record_tool_surface_failure(
                 key, str(exc), is_zombie=False,
             )

@@ -157,16 +157,6 @@ class WorkerBase:
             await redis.delete(self.recovery_lock_key)
         return sum(recovered.values())
 
-    async def cleanup_stale_cron(self, ctx) -> int:
-        """Recover stale jobs and run worker-specific terminal cleanup."""
-        from songmaker_cli.db.queries import recover_stale_jobs_by_age_and_type
-
-        with self.get_db_factory()() as session:
-            recovered = recover_stale_jobs_by_age_and_type(session)
-            session.commit()
-        await self._reconcile_recovered_jobs(recovered)
-        return sum(recovered.values())
-
     async def _reconcile_recovered_jobs(self, recovered: dict[str, int]) -> None:
         """Run worker-specific cleanup after stale jobs become terminal."""
 

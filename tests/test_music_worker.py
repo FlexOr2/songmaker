@@ -3,16 +3,16 @@
 from __future__ import annotations
 
 import asyncio
+import logging
 from datetime import datetime, timedelta, timezone
 from unittest.mock import AsyncMock, MagicMock, patch
-
-import pytest
 
 import songmaker_cli.music_worker as mw_mod
 from songmaker_cli.constants import AuditAction, JobStatus, JobType, LoraStatus
 from songmaker_cli.db.engine import init_test_db
-from songmaker_cli.db.models import AuditLog, Job, User, UserLora
+from songmaker_cli.db.models import Album, AuditLog, Job, User, UserLora
 from songmaker_cli.music_worker import MusicWorker
+from songmaker_cli.settings import get_settings
 
 
 def _run(coro):
@@ -97,24 +97,39 @@ def test_generate_passes_repaint_params() -> None:
     assert kwargs["repaint_params"].repainting_end == 1.0
 
 
-def test_cleanup_stale_cron_audits_orphans_and_expires_files() -> None:
-    worker = _make_worker()
-    worker.audit_orphaned_files = MagicMock()
+def test_file_cleanup_cron_audits_orphans_and_expires_files(tmp_path, caplog) -> None:
+    factory = init_test_db(tmp_path / "songmaker.db")
+    audio_dir = tmp_path / "audio"
+    orphan = audio_dir / "u1" / "orphan.mp3"
+    orphan.parent.mkdir(parents=True)
+    orphan.touch()
+    cutoff = datetime.now(timezone.utc) - timedelta(
+        days=get_settings().soft_delete_retention_days + 1,
+    )
+    with factory() as session:
+        session.add(User(id="u1", username="u1", password_hash="x"))
+        session.add(Album(
+            id="expired-album", title="Expired", artist="", deleted_at=cutoff,
+        ))
+        session.commit()
 
-    with (
-        patch.object(
-            MusicWorker.__mro__[1], "cleanup_stale_cron", new_callable=AsyncMock,
-            return_value=0,
-        ) as mock_base,
-        patch("songmaker_cli.cleanup.run_cleanup_expired") as mock_expired,
-    ):
-        ctx = _mock_ctx()
-        result = _run(worker.cleanup_stale_cron(ctx))
+    worker = MusicWorker()
+    worker.get_db_factory = MagicMock(return_value=factory)
+    worker.audio_dir = MagicMock(return_value=audio_dir)
 
-    assert result == 0
-    mock_base.assert_awaited_once_with(ctx)
-    worker.audit_orphaned_files.assert_called_once()
-    mock_expired.assert_called_once()
+    with caplog.at_level(logging.WARNING, logger="songmaker_cli.worker_base"):
+        _run(worker.cleanup_files_cron(_mock_ctx()))
+
+    with factory() as session:
+        expired_album = (
+            session.query(Album)
+            .execution_options(include_deleted=True)
+            .filter_by(id="expired-album")
+            .one_or_none()
+        )
+
+    assert expired_album is None
+    assert any(str(orphan) in message for message in caplog.messages)
 
 
 def test_on_startup_calls_recover_on_startup() -> None:
@@ -145,33 +160,28 @@ def test_on_shutdown_disposes_db() -> None:
     worker._db_engine.dispose.assert_called_once()
 
 
-@pytest.mark.parametrize("recovery_path", ["startup", "cron"])
-def test_music_recovery_paths_reconcile_recovered_loras_once(tmp_path, recovery_path) -> None:
+def test_startup_recovers_music_job_types_and_reconciles_lora_once(tmp_path) -> None:
     factory = init_test_db(tmp_path / "songmaker.db")
     audio_dir = tmp_path / "audio"
     audio_dir.mkdir()
-    stale_heartbeat = datetime.now(timezone.utc) - timedelta(days=1)
     with factory() as session:
         session.add(User(id="u1", username="u1", password_hash="x"))
-        job_kwargs = (
-            {} if recovery_path == "startup" else {"heartbeat_at": stale_heartbeat}
-        )
         session.add_all([
             Job(
                 id="generate-1", type=JobType.GENERATE,
-                status=JobStatus.RUNNING, **job_kwargs,
+                status=JobStatus.RUNNING,
             ),
             Job(
                 id="lora-job-1", type=JobType.LORA_TRAINING,
-                status=JobStatus.RUNNING, **job_kwargs,
+                status=JobStatus.RUNNING,
             ),
             Job(
                 id="load-model-1", type=JobType.LOAD_MODEL_ON_WORKER,
-                status=JobStatus.RUNNING, **job_kwargs,
+                status=JobStatus.RUNNING,
             ),
             Job(
                 id="download-model-1", type=JobType.DOWNLOAD_MODEL_ON_WORKER,
-                status=JobStatus.RUNNING, **job_kwargs,
+                status=JobStatus.RUNNING,
             ),
             UserLora(
                 id="lora-1", user_id="u1", name="Lora", slug="lora",
@@ -186,12 +196,8 @@ def test_music_recovery_paths_reconcile_recovered_loras_once(tmp_path, recovery_
     redis = AsyncMock()
     redis.set = AsyncMock(return_value=True)
 
-    if recovery_path == "startup":
-        with patch("songmaker_cli.logging_config.configure_logging"):
-            _run(worker.on_startup({"redis": redis}))
-    else:
-        with patch("songmaker_cli.cleanup.run_cleanup_expired"):
-            _run(worker.cleanup_stale_cron({"redis": redis}))
+    with patch("songmaker_cli.logging_config.configure_logging"):
+        _run(worker.on_startup({"redis": redis}))
 
     with factory() as session:
         generate = session.query(Job).filter_by(id="generate-1").one()
@@ -209,12 +215,9 @@ def test_music_recovery_paths_reconcile_recovered_loras_once(tmp_path, recovery_
         JobType.LOAD_MODEL_ON_WORKER,
         JobType.DOWNLOAD_MODEL_ON_WORKER,
     )
-    expected_error_type = (
-        "server_restart" if recovery_path == "startup" else "heartbeat_lost"
-    )
     for job in (generate, lora_job, load_model, download_model):
         assert job.status == JobStatus.FAILED
-        assert job.error_type == expected_error_type
+        assert job.error_type == "server_restart"
     assert lora.status == LoraStatus.FAILED
     assert len(audits) == 1
 
@@ -267,6 +270,29 @@ def test_queued_music_jobs_survive_worker_restart(tmp_path) -> None:
     assert lora.status == LoraStatus.QUEUED
 
 
+def test_file_cleanup_cron_leaves_queued_generate_job_untouched(tmp_path) -> None:
+    factory = init_test_db(tmp_path / "songmaker.db")
+    audio_dir = tmp_path / "audio"
+    audio_dir.mkdir()
+    with factory() as session:
+        session.add(Job(
+            id="generate-queued", type=JobType.GENERATE, status=JobStatus.QUEUED,
+            heartbeat_at=datetime.now(timezone.utc) - timedelta(days=1),
+        ))
+        session.commit()
+
+    worker = MusicWorker()
+    worker.get_db_factory = MagicMock(return_value=factory)
+    worker.audio_dir = MagicMock(return_value=audio_dir)
+
+    _run(worker.cleanup_files_cron(_mock_ctx()))
+
+    with factory() as session:
+        job = session.query(Job).filter_by(id="generate-queued").one()
+
+    assert job.status == JobStatus.QUEUED
+
+
 def test_music_worker_settings_queue_name() -> None:
     from songmaker_cli.constants import ARQ_MUSIC_QUEUE_NAME
     from songmaker_cli.music_worker import MusicWorkerSettings
@@ -276,7 +302,7 @@ def test_music_worker_settings_queue_name() -> None:
 def test_music_worker_settings_has_cron() -> None:
     from songmaker_cli.music_worker import MusicWorkerSettings
     names = {job.name for job in MusicWorkerSettings.cron_jobs}
-    assert "cron:MusicWorker.cleanup_stale_cron" in names
+    assert "cron:MusicWorker.cleanup_files_cron" in names
     assert "cron:MusicWorker.generation_retention_cron" in names
 
 
