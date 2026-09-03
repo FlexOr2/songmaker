@@ -480,10 +480,10 @@ describe('TakesList', () => {
 		expect(playTakeAndShowNowPlaying).not.toHaveBeenCalled();
 	});
 
-	it('plays the take and opens Now Playing on row click', async () => {
+	it('plays the take and opens Now Playing on its play target click', async () => {
 		const { target } = await render();
 		const row = target.querySelector<HTMLElement>('.take-row');
-		row?.click();
+		row?.querySelector<HTMLElement>('.take-body')?.click();
 		expect(playTakeAndShowNowPlaying).toHaveBeenCalledWith(
 			expect.objectContaining({ id: 'g1' }),
 			expect.objectContaining({ id: 's1' })
@@ -660,9 +660,9 @@ describe('TakesList archived takes', () => {
 	it('stops announcing itself as a button while it cannot act', async () => {
 		const { target } = await renderWithArchived();
 		const [playable, archived] = Array.from(target.querySelectorAll<HTMLElement>('.take-row'));
-		expect(playable.getAttribute('role')).toBe('button');
-		expect(archived.getAttribute('role')).toBeNull();
-		expect(archived.getAttribute('tabindex')).toBeNull();
+		expect(playable.querySelector('.take-body')?.getAttribute('role')).toBe('button');
+		expect(archived.querySelector('.take-body')?.getAttribute('role')).toBeNull();
+		expect(archived.querySelector('.take-body')?.getAttribute('tabindex')).toBeNull();
 	});
 
 	it('is a button again in selection mode, where ticking it still does something', async () => {
@@ -670,16 +670,16 @@ describe('TakesList archived takes', () => {
 		enterSelectionMode();
 		await tick();
 		const archived = target.querySelectorAll<HTMLElement>('.take-row')[1];
-		expect(archived.getAttribute('role')).toBe('button');
+		expect(archived.querySelector('.take-body')?.getAttribute('role')).toBe('button');
 		expect(archived.querySelector('.take-action-btn')).toBeNull();
-		archived.click();
+		archived.querySelector<HTMLElement>('.take-body')?.click();
 		await tick();
 		expect(get(selectedIds).has('g-arch')).toBe(true);
 	});
 
 	it('still plays a take that is not archived', async () => {
 		const { target } = await renderWithArchived();
-		target.querySelector<HTMLElement>('.take-row')?.click();
+		target.querySelector<HTMLElement>('.take-row .take-body')?.click();
 		await tick();
 		expect(playTakeAndShowNowPlaying).toHaveBeenCalledWith(
 			expect.objectContaining({ id: 'g1' }),

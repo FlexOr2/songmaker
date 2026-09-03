@@ -421,13 +421,20 @@
 						class:buffering={isGenLoading(gen)}
 						class:selected={$selectedIds.has(gen.id)}
 						class:archived={gen.is_archived}
-						onclick={(e) => handleRowClick(gen, e)}
-						onkeydown={(e) => handleRowKeydown(gen, e)}
-						role={rowIsActionable(gen) ? 'button' : undefined}
-						tabindex={rowIsActionable(gen) ? 0 : undefined}
 						title={gen.is_archived ? TAKE_ARCHIVED_TITLE : undefined}
 					>
-						<span class="take-body">
+						<!-- The play target is deliberately a sibling of the take actions.
+							     Making the row itself a button put source controls inside a
+							     second interactive target, so its centre could land on an
+							     action after the compact layout wrapped. -->
+						<!-- svelte-ignore a11y_no_noninteractive_tabindex -->
+						<span
+							class="take-body"
+							onclick={(e) => handleRowClick(gen, e)}
+							onkeydown={(e) => handleRowKeydown(gen, e)}
+							role={rowIsActionable(gen) ? 'button' : undefined}
+							tabindex={rowIsActionable(gen) ? 0 : undefined}
+						>
 							{#if $selectionMode}
 								<span class="selection-checkbox">
 									<Icon name={$selectedIds.has(gen.id) ? 'check-square' : 'square'} size={16} />
