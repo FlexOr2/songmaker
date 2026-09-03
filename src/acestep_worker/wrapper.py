@@ -51,6 +51,10 @@ from acestep_worker.models import (
     WorkerTaskEvent,
 )
 from acestep_worker.registry_client import RegistryClient, WorkerRegistration
+from acestep_worker.settings import (
+    DEFAULT_SHARED_AUDIO_ROOT,
+    DEFAULT_TRAINING_WORKSPACE_DIRNAME,
+)
 from acestep_worker.subprocess_runner import SubprocessStartError
 from acestep_worker.task_store import TaskStore
 
@@ -72,6 +76,8 @@ class WorkerDeps:
     checkpoint_dir: Path
     audio_output_dir: Path
     generate_runner: GenerateRunner
+    shared_audio_root: Path = Path(DEFAULT_SHARED_AUDIO_ROOT)
+    training_workspace_dirname: str = DEFAULT_TRAINING_WORKSPACE_DIRNAME
     train_lora_runner: TrainLoraRunner | None = None
     registered: bool = False
     registration_task: asyncio.Task[None] | None = None
@@ -242,6 +248,12 @@ def build_router(deps: WorkerDeps) -> APIRouter:
 
     @router.post("/tasks/train_lora", response_model=TaskCreatedResponse)
     async def train_lora(req: TrainLoraRequest) -> TaskCreatedResponse:
+        try:
+            validated_request = _validate_train_lora_request(
+                req, deps.shared_audio_root,
+            )
+        except ValueError as exc:
+            raise HTTPException(status_code=422, detail=str(exc)) from exc
         if deps.train_lora_runner is None:
             raise HTTPException(
                 status_code=501,
@@ -264,10 +276,10 @@ def build_router(deps: WorkerDeps) -> APIRouter:
                 await deps.train_lora_runner(
                     deps.task_store,
                     task_id,
-                    request=req,
+                    request=validated_request,
                     port=loaded.port,
                     checkpoint_dir=deps.checkpoint_dir,
-                    shared_audio_root=deps.audio_output_dir.parent,
+                    training_workspace_dirname=deps.training_workspace_dirname,
                 )
             finally:
                 await deps.cache.release(req.mode)
@@ -354,7 +366,7 @@ async def default_train_lora_runner(
     request: TrainLoraRequest,
     port: int,
     checkpoint_dir: Path,
-    shared_audio_root: Path,
+    training_workspace_dirname: str,
 ) -> None:
     from acestep_engine.models import LoraTrainingConfig
     from acestep_engine.training_client import (
@@ -366,18 +378,14 @@ async def default_train_lora_runner(
 
     await task_store.mark_running(task_id)
     client = AceStepTrainingClient(host="http://127.0.0.1", port=port)
-    workspace = checkpoint_dir / "training" / task_id
+    workspace = checkpoint_dir / training_workspace_dirname / task_id
     dataset_dir = workspace / "dataset"
     output_dir = workspace / "output"
     export_dir = workspace / "export"
 
     try:
-        source_dataset_dir = _shared_audio_path(
-            request.dataset_dir, shared_audio_root, "dataset",
-        )
-        requested_output_dir = _shared_audio_path(
-            request.output_dir, shared_audio_root, "output",
-        )
+        source_dataset_dir = Path(request.dataset_dir)
+        requested_output_dir = Path(request.output_dir)
         if workspace.is_relative_to(source_dataset_dir):
             raise ValueError(
                 f"LoRA workspace must not be nested in dataset: {source_dataset_dir}",
@@ -491,6 +499,17 @@ async def default_train_lora_runner(
             pass
         except OSError:
             log.exception("Failed to remove LoRA training workspace %s", workspace)
+
+
+def _validate_train_lora_request(
+    request: TrainLoraRequest, shared_audio_root: Path,
+) -> TrainLoraRequest:
+    dataset_dir = _shared_audio_path(request.dataset_dir, shared_audio_root, "dataset")
+    output_dir = _shared_audio_path(request.output_dir, shared_audio_root, "output")
+    return request.model_copy(update={
+        "dataset_dir": str(dataset_dir),
+        "output_dir": str(output_dir),
+    })
 
 
 def _shared_audio_path(path: str, root: Path, kind: str) -> Path:

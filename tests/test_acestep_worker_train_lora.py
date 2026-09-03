@@ -2,8 +2,7 @@
 
 The default_train_lora_runner is tested indirectly here; we install a
 fake runner that emits a deterministic progress/done sequence so we can
-assert event ordering and that the cache serialize-lock makes training
-incompatible with concurrent generation on the same subprocess."""
+assert event ordering."""
 
 from __future__ import annotations
 
@@ -59,7 +58,7 @@ def _make_deps(tmp_path: Path, with_train_runner: bool = True) -> WorkerDeps:
     async def fake_train_runner(
         store: TaskStore, task_id: str,
         *, request: TrainLoraRequest, port: int, checkpoint_dir: Path,
-        shared_audio_root: Path,
+        training_workspace_dirname: str,
     ) -> None:
         operation_events.append(f"train_lora:{request.mode}")
         train_events.append(f"start:{port}")
@@ -86,8 +85,10 @@ def _make_deps(tmp_path: Path, with_train_runner: bool = True) -> WorkerDeps:
         checkpoint_dir=tmp_path,
         audio_output_dir=tmp_path / "audio",
         generate_runner=fake_generate_runner,
+        shared_audio_root=tmp_path / "shared",
         train_lora_runner=fake_train_runner if with_train_runner else None,
     )
+    deps.shared_audio_root.mkdir()
     deps.heartbeat = HeartbeatLoop(
         redis=redis, worker_id="w0",
         state_provider=lambda: _state(deps),
@@ -109,11 +110,17 @@ def _auth_headers() -> dict[str, str]:
 
 def test_train_lora_requires_loaded_mode(tmp_path: Path) -> None:
     deps = _make_deps(tmp_path)
+    dataset_dir = deps.shared_audio_root / "dataset"
+    dataset_dir.mkdir()
     app = create_app(deps)
     with TestClient(app) as client:
         resp = client.post(
             "/tasks/train_lora",
-            json={"mode": "sft", "dataset_dir": "/tmp/d", "output_dir": "/tmp/o"},
+            json={
+                "mode": "sft",
+                "dataset_dir": str(dataset_dir),
+                "output_dir": str(deps.shared_audio_root / "output"),
+            },
             headers=_auth_headers(),
         )
     assert resp.status_code == 409
@@ -121,12 +128,18 @@ def test_train_lora_requires_loaded_mode(tmp_path: Path) -> None:
 
 def test_train_lora_501_when_runner_missing(tmp_path: Path) -> None:
     deps = _make_deps(tmp_path, with_train_runner=False)
+    dataset_dir = deps.shared_audio_root / "dataset"
+    dataset_dir.mkdir()
     _run(deps.cache.load("sft"))
     app = create_app(deps)
     with TestClient(app) as client:
         resp = client.post(
             "/tasks/train_lora",
-            json={"mode": "sft", "dataset_dir": "/tmp/d", "output_dir": "/tmp/o"},
+            json={
+                "mode": "sft",
+                "dataset_dir": str(dataset_dir),
+                "output_dir": str(deps.shared_audio_root / "output"),
+            },
             headers=_auth_headers(),
         )
     assert resp.status_code == 501
@@ -134,6 +147,8 @@ def test_train_lora_501_when_runner_missing(tmp_path: Path) -> None:
 
 def test_train_lora_happy_path_emits_sse_events(tmp_path: Path) -> None:
     deps = _make_deps(tmp_path)
+    dataset_dir = deps.shared_audio_root / "dataset"
+    dataset_dir.mkdir()
     app = create_app(deps)
     with TestClient(app) as client:
         loaded = client.post(
@@ -144,8 +159,8 @@ def test_train_lora_happy_path_emits_sse_events(tmp_path: Path) -> None:
             "/tasks/train_lora",
             json={
                 "mode": "sft",
-                "dataset_dir": str(tmp_path / "ds"),
-                "output_dir": str(tmp_path / "out"),
+                "dataset_dir": str(dataset_dir),
+                "output_dir": str(deps.shared_audio_root / "out"),
             },
             headers=_auth_headers(),
         )
@@ -169,8 +184,7 @@ def test_train_lora_happy_path_emits_sse_events(tmp_path: Path) -> None:
 
 def test_train_lora_pins_mode_from_eviction(tmp_path: Path) -> None:
     """A training task in flight increments the cache's in-use count so
-    the mode is protected from eviction — the same mechanism generation
-    uses to serialize GPU work on the underlying ACE-Step subprocess."""
+    the mode is protected from eviction."""
     deps = _make_deps(tmp_path)
     _run(deps.cache.load("sft"))
 
@@ -179,7 +193,7 @@ def test_train_lora_pins_mode_from_eviction(tmp_path: Path) -> None:
     async def blocking_runner(
         store: TaskStore, task_id: str,
         *, request: TrainLoraRequest, port: int, checkpoint_dir: Path,
-        shared_audio_root: Path,
+        training_workspace_dirname: str,
     ) -> None:
         await store.mark_running(task_id)
         await release_event.wait()
@@ -203,7 +217,7 @@ def test_train_lora_pins_mode_from_eviction(tmp_path: Path) -> None:
             blocking_runner(deps.task_store, task_id, request=TrainLoraRequest(
                 mode="sft", dataset_dir="/x", output_dir="/y",
             ), port=loaded.port, checkpoint_dir=deps.checkpoint_dir,
-            shared_audio_root=deps.audio_output_dir.parent),
+            training_workspace_dirname=deps.training_workspace_dirname),
         )
         await asyncio.sleep(0)
         assert deps.cache._in_use.get("sft", 0) == 1
@@ -312,7 +326,7 @@ def test_default_train_lora_runner_dispatches(tmp_path: Path) -> None:
             default_train_lora_runner(
                 task_store, task_id, request=request, port=8001,
                 checkpoint_dir=tmp_path / "safe-root",
-                shared_audio_root=tmp_path,
+                training_workspace_dirname="training",
             ),
         )
 
@@ -380,7 +394,7 @@ def test_default_train_lora_runner_fails_on_preprocess_error(tmp_path: Path) -> 
             default_train_lora_runner(
                 task_store, task_id, request=request, port=8001,
                 checkpoint_dir=tmp_path / "safe-root",
-                shared_audio_root=tmp_path,
+                training_workspace_dirname="training",
             ),
         )
     snap = _run(task_store.get(task_id))
@@ -420,61 +434,68 @@ def test_default_train_lora_runner_fails_on_zero_samples(tmp_path: Path) -> None
             default_train_lora_runner(
                 task_store, task_id, request=request, port=8001,
                 checkpoint_dir=tmp_path / "safe-root",
-                shared_audio_root=tmp_path,
+                training_workspace_dirname="training",
             ),
         )
     snap = _run(task_store.get(task_id))
     assert snap.state == "error"
 
 
-def test_foreign_output_is_rejected_before_fork_safe_path(tmp_path: Path) -> None:
-    from unittest.mock import patch
+@pytest.mark.parametrize(
+    "invalid_path",
+    [
+        "outside_dataset",
+        "parent_escape",
+        "absolute_output",
+        "dataset_symlink",
+        "output_symlink",
+        "existing_output",
+    ],
+)
+def test_train_lora_rejects_unsafe_shared_paths_before_creating_task(
+    tmp_path: Path, invalid_path: str,
+) -> None:
+    deps = _make_deps(tmp_path)
+    dataset_dir = deps.shared_audio_root / "dataset"
+    dataset_dir.mkdir()
+    outside_dataset = tmp_path / "outside-dataset"
+    outside_dataset.mkdir()
+    dataset_symlink = deps.shared_audio_root / "dataset-link"
+    dataset_symlink.symlink_to(dataset_dir, target_is_directory=True)
+    output_symlink = deps.shared_audio_root / "output-link"
+    output_symlink.symlink_to(deps.shared_audio_root / "target")
 
-    task_store = TaskStore()
-    task_id = _run(task_store.create("train_lora"))
-    shared_root = tmp_path / "shared"
-    dataset_dir = shared_root / "dataset"
-    dataset_dir.mkdir(parents=True)
-    request = TrainLoraRequest(
-        mode="sft",
-        dataset_dir=str(dataset_dir),
-        output_dir=str(tmp_path / "foreign-output"),
-        train_epochs=1,
-        poll_interval_seconds=0.001,
-    )
+    dataset_path = dataset_dir
+    output_path = deps.shared_audio_root / "output"
+    if invalid_path == "outside_dataset":
+        dataset_path = outside_dataset
+    elif invalid_path == "parent_escape":
+        output_path = deps.shared_audio_root / "dataset" / ".." / ".." / "outside-output"
+    elif invalid_path == "absolute_output":
+        output_path = tmp_path / "outside-output"
+    elif invalid_path == "dataset_symlink":
+        dataset_path = dataset_symlink
+    elif invalid_path == "existing_output":
+        output_path.mkdir()
+    else:
+        output_path = output_symlink
 
-    with patch(
-        "acestep_engine.training_client.AceStepTrainingClient.initialize_model",
-    ) as initialize_model:
-        _run(default_train_lora_runner(
-            task_store,
-            task_id,
-            request=request,
-            port=8001,
-            checkpoint_dir=tmp_path / "safe-root",
-            shared_audio_root=shared_root,
-        ))
+    _run(deps.cache.load("sft"))
+    app = create_app(deps)
+    with TestClient(app) as client:
+        response = client.post(
+            "/tasks/train_lora",
+            json={
+                "mode": "sft",
+                "dataset_dir": str(dataset_path),
+                "output_dir": str(output_path),
+            },
+            headers=_auth_headers(),
+        )
 
-    snap = _run(task_store.get(task_id))
-    assert snap.state == "error"
-    assert "outside shared audio root" in (snap.error or "")
-    initialize_model.assert_not_called()
-    assert not (tmp_path / "safe-root" / "training" / task_id).exists()
-
-
-def test_existing_shared_output_is_not_reused_or_removed(tmp_path: Path) -> None:
-    from acestep_worker.wrapper import _shared_audio_path
-
-    shared_root = tmp_path / "shared"
-    output_dir = shared_root / "training_tmp"
-    output_dir.mkdir(parents=True)
-    marker = output_dir / "keep"
-    marker.write_text("keep")
-
-    with pytest.raises(ValueError, match="must be a new shared directory"):
-        _shared_audio_path(str(output_dir), shared_root, "output")
-
-    assert marker.read_text() == "keep"
+    assert response.status_code == 422
+    assert _run(deps.task_store.size()) == 0
+    assert getattr(deps, "_operation_events") == ["load_model:sft"]
 
 
 def test_cancellation_waits_for_staging_copy_before_workspace_cleanup(
@@ -510,7 +531,7 @@ def test_cancellation_waits_for_staging_copy_before_workspace_cleanup(
             request=request,
             port=8001,
             checkpoint_dir=tmp_path / "safe-root",
-            shared_audio_root=shared_root,
+            training_workspace_dirname="training",
         ))
         await asyncio.to_thread(copy_started.wait)
         runner.cancel()

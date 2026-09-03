@@ -61,9 +61,10 @@ canonical model name before scanning the dataset. It physically stages the
 dataset inside the Fork's safe root, trains there, and exports from the final
 training output into a separate export directory. Only the exported adapter is
 copied back through the shared training handoff directory; the product job
-moves it to `user_loras/<user>/<id>/lora/` and marks the LoRA ready. This keeps
-Fork-safe paths strict and leaves no product dataset or training workspace in
-the Fork after success, failure, or cancellation.
+moves it to `user_loras/<user>/<id>/lora/` and marks the LoRA ready. The worker
+removes its workspace after success, failure, or cancellation when `rmtree`
+succeeds. A `SIGKILL` can leave `/opt/acestep/training/<id>` in the container
+layer; the product job removes the shared `training_tmp` handoff directory.
 
 **Auto-scoring (issue #222).** Every successfully persisted generation gets a
 score job automatically — `jobs.generation._auto_score_generation`, called
