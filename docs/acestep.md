@@ -60,8 +60,9 @@ submits the Songmaker-owned training configuration. The worker then initializes
 the Fork with that mode's canonical model name before scanning the dataset. It
 physically stages the dataset inside the Fork's safe root, trains there, and
 exports from the final training output into a separate export directory. Each
-training poll updates the existing TaskStore progress stream, so Songmaker's
-SSE consumer keeps the job heartbeat fresh while the Fork reports progress.
+training poll updates the existing TaskStore progress stream, which Songmaker
+consumes through SSE while the Fork reports progress; the timeout and heartbeat
+ordering is documented in [the architecture](architecture.md#worker-and-job-timeouts).
 Only the exported adapter is copied back through the shared training handoff
 directory; the product job moves it to `user_loras/<user>/<id>/lora/` and marks
 the LoRA ready. The worker removes its workspace after success, failure, or
