@@ -1189,10 +1189,14 @@ def test_no_check_runs_past_the_commit_grace_period_counts_as_a_failed_tick(
     checkout.adopt_current_head_as_deployed()
     checkout.move_main_forward()
     checkout.set_check_runs()
-    checkout.set_clock(
-        checkout.remote_main_commit_timestamp() + CHECK_RUN_APPEARANCE_GRACE_SECONDS,
-    )
+    checkout.set_clock(checkout.remote_main_commit_timestamp() + 1)
 
+    first_tick = checkout.tick()
+
+    assert first_tick.returncode == 0
+    assert "GitHub has not reported a check run yet" in checkout.journal
+
+    checkout.advance_clock(CHECK_RUN_APPEARANCE_GRACE_SECONDS)
     result = checkout.tick()
 
     assert result.returncode == 0
