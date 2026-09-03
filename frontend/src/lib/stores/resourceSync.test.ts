@@ -38,6 +38,7 @@ import {
 	RESOURCE_EVENT_STREAM_PATH,
 	RESOURCE_SYNC_BOOTSTRAP_ERROR_LIMIT,
 	RESOURCE_SYNC_ERROR,
+	RESOURCE_SYNC_TRACKED_EVENT_LIMIT,
 	RESOURCE_SYNC_VISIBILITY_DEBOUNCE_MS,
 	SSE_RECONNECT_BASE_DELAY_MS,
 	SSE_RECONNECT_JITTER_RATIO,
@@ -375,6 +376,36 @@ describe('resource sync interleavings', () => {
 });
 
 describe('resource sync owner', () => {
+	it('bounds deferred events and remembered generation ids', async () => {
+		let loaded: string[] = [];
+		const { controller, sources, loadedWatch } = setup({
+			listLoadedSongIds: () => loaded,
+			fetchSong: async (songId) => song({ id: songId, generations: [gen(`g-${songId}`)] })
+		});
+		controller.start();
+		latestSource(sources).emit('hello', { high_water_mark: '0' });
+		await flush();
+		await controller.waitForReady();
+
+		for (let sequence = 1; sequence <= RESOURCE_SYNC_TRACKED_EVENT_LIMIT + 1; sequence++) {
+			latestSource(sources).emit(
+				'generation.created',
+				created(String(sequence), `g-deferred-${sequence}`, `s-${sequence}`)
+			);
+		}
+		await flush();
+		expect(controller.trackedSizes.deferred).toBe(RESOURCE_SYNC_TRACKED_EVENT_LIMIT);
+
+		loaded = Array.from(
+			{ length: RESOURCE_SYNC_TRACKED_EVENT_LIMIT + 1 },
+			(_, index) => `s-${index + 1}`
+		);
+		loadedWatch.notify?.();
+		for (let i = 0; i < 1000; i++) await Promise.resolve();
+		expect(controller.trackedSizes.deferred).toBe(0);
+		expect(controller.trackedSizes.seenGenerationIds).toBe(RESOURCE_SYNC_TRACKED_EVENT_LIMIT);
+	});
+
 	it('duplicate sequence and generation id stay idempotent', async () => {
 		let snapshotDone = false;
 		const { controller, sources, fetchCalls, upserted } = setup({
