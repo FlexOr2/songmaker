@@ -15,8 +15,10 @@ from songmaker_cli import agent_cli
 from songmaker_cli.agent_cli import (
     AgentCliUnavailableError,
     CachedProbe,
+    CliLineChannel,
     CliProbeBudgetExceeded,
     CliRun,
+    CliRunOutcome,
     CliRunReason,
     _cli_output,
     claude_cli_login,
@@ -981,3 +983,101 @@ def test_a_spawned_cli_never_sees_our_secrets(monkeypatch) -> None:
     env = scrubbed_env()
 
     assert not [key for key in SECRET_ENV_KEYS if key in env]
+
+
+def test_bounded_runner_sends_complete_stdout_lines_and_then_its_outcome() -> None:
+    channel = CliLineChannel(maximum_lines=2)
+
+    outcome = run_cli_bounded(
+        ("/bin/sh", "-c", "printf 'one\\ntwo\\n'"),
+        stdin_payload=None,
+        read="all",
+        deadline=time.monotonic() + 1,
+        stdout_line_channel=channel,
+    )
+
+    assert channel.receive(timeout=1) == b"one\n"
+    assert channel.receive(timeout=1) == b"two\n"
+    assert channel.receive(timeout=1) == outcome
+
+
+def test_bounded_runner_reaps_after_a_line_consumer_requests_cancellation() -> None:
+    channel = CliLineChannel(maximum_lines=2)
+    outcomes = []
+
+    runner = threading.Thread(
+        target=lambda: outcomes.append(run_cli_bounded(
+            ("/bin/sh", "-c", "printf 'first\\n'; exec sleep 10"),
+            stdin_payload=None,
+            read="all",
+            deadline=time.monotonic() + 1,
+            stdout_line_channel=channel,
+        )),
+    )
+    runner.start()
+
+    assert channel.receive(timeout=1) == b"first\n"
+    channel.request_abort()
+    runner.join(timeout=2)
+
+    assert not runner.is_alive()
+    assert outcomes[0].reason is CliRunReason.CANCELLED
+    assert outcomes[0].complete is False
+    assert channel.receive(timeout=1) == outcomes[0]
+
+
+def test_bounded_runner_uses_and_removes_a_private_prompt_file() -> None:
+    observed = []
+    real_popen = subprocess.Popen
+
+    def capture_process(command, **kwargs):
+        prompt_path = command[4]
+        observed.append((prompt_path, os.stat(prompt_path).st_mode & 0o777))
+        return real_popen(command, **kwargs)
+
+    with patch("songmaker_cli.agent_cli.subprocess.Popen", side_effect=capture_process):
+        outcome = run_cli_bounded(
+            ("/bin/sh", "-c", "cat \"$1\"", "unused", "placeholder"),
+            stdin_payload=None,
+            read="all",
+            deadline=time.monotonic() + 1,
+            prompt_file_bytes=b"private prompt",
+            prompt_file_arg_index=4,
+        )
+
+    assert outcome.stdout == "private prompt"
+    assert observed[0][1] == 0o600
+    assert not os.path.exists(observed[0][0])
+
+
+def test_bounded_runner_creates_no_prompt_file_without_prompt_bytes() -> None:
+    with patch("songmaker_cli.agent_cli.tempfile.mkstemp") as create_prompt_file:
+        outcome = run_cli_bounded(
+            ("/bin/sh", "-c", "printf ready"),
+            stdin_payload=None,
+            read="all",
+            deadline=time.monotonic() + 1,
+        )
+
+    assert outcome.stdout == "ready"
+    create_prompt_file.assert_not_called()
+
+
+def test_cancelling_a_line_channel_discards_unread_output() -> None:
+    channel = CliLineChannel(maximum_lines=1)
+    outcome = CliRunOutcome(
+        started=True,
+        spawn_error=None,
+        returncode=-15,
+        stdout="",
+        stderr="",
+        complete=False,
+        became_zombie=False,
+        reason=CliRunReason.CANCELLED,
+    )
+
+    assert channel._send(b"discard\n")
+    channel.request_abort()
+    channel._close(outcome)
+
+    assert channel.receive(timeout=1) == outcome

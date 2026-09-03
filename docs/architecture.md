@@ -579,6 +579,13 @@ whose `lyrics` a public stream manifest redacts. A take scored without
 | Claude | API + CLI backends for chat and lyrical coherence | `claude/provider.py` |
 | CLI | Thin HTTP client to the same API | `main.py`, `cli_client.py` |
 
+The Co-Writer dispatcher owns provider transport choice. Claude turns use its
+MCP-enabled CLI; Grok chooses its subscription CLI when the mounted
+`auth.json` carries a token and otherwise uses `XAI_API_KEY`; Codex uses its
+API key. A Grok CLI failure remains on that selected path for the turn. The
+Grok adapter converts its bounded `streaming-json` process output to chat
+events.
+
 ### Engine packages (`src/`)
 
 | Package | Purpose |
