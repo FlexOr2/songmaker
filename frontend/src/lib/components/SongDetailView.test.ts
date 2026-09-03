@@ -71,7 +71,8 @@ import {
 	recipeModel,
 	recipeOpen,
 	coWriterOpen,
-	sourceGeneration
+	sourceGeneration,
+	sourceMode
 } from '$lib/stores/recipe';
 
 const fetchAlbum = vi.fn();
@@ -538,6 +539,23 @@ describe('SongDetailView adding a take to a playlist', () => {
 });
 
 describe('SongDetailView recipe and takes', () => {
+	it.each([
+		['Repaint', 'repaint'],
+		['Cover', 'cover']
+	] as const)('%s opens Recipe with the selected take in %s mode', async (label, mode) => {
+		const target = await renderView();
+		const row = target.querySelector<HTMLElement>('.take-row');
+		if (!row) throw new Error('Expected a take row');
+		Array.from(row.querySelectorAll<HTMLButtonElement>('.take-action-btn'))
+			.find((button) => button.textContent?.trim() === label)
+			?.click();
+		await tick();
+
+		expect(get(recipeOpen)).toBe(true);
+		expect(get(sourceGeneration)).toEqual(expect.objectContaining({ id: 'g1' }));
+		expect(get(sourceMode)).toBe(mode);
+	});
+
 	it('lands a picked-up source in the Recipe panel', async () => {
 		const target = await renderView();
 		expect(get(recipeOpen)).toBe(false);
