@@ -686,10 +686,8 @@ def _stub_cli_runners(
                 "claude": (_status("configured", setup_method="claude_cli"),) * 2,
                 "grok": (
                     _status(
-                        "cli_login_needs_api_key",
-                        needs="api_key",
+                        "configured",
                         setup_method="grok_cli",
-                        environment_key="XAI_API_KEY",
                     ),
                 ) * 2,
                 "codex": (
@@ -762,6 +760,10 @@ def test_provider_status_projects_the_catalog_contract(
         "songmaker_cli.cowriter.catalog.find_spec",
         lambda _name: object() if sdk_available else None,
     )
+    monkeypatch.setattr(
+        "songmaker_cli.cowriter.catalog.grok_cli_token_is_present",
+        lambda: grok_login.logged_in,
+    )
     grok = GrokCliStatus(login=grok_login, model_names=("grok-4.6",))
     calls = _stub_cli_runners(
         monkeypatch, claude=claude_login, grok=grok, codex=codex_login,
@@ -778,6 +780,41 @@ def test_provider_status_projects_the_catalog_contract(
             assert status.pop("probed_at") is not None
     assert actual == expected
     assert all(count <= 1 for count in calls.values())
+
+
+def test_grok_cli_token_is_configured_and_selectable_through_cowriter_settings(
+    admin_client, monkeypatch,
+):
+    monkeypatch.delenv("XAI_API_KEY", raising=False)
+    monkeypatch.setattr(
+        "songmaker_cli.cowriter.catalog.grok_cli_token_is_present", lambda: True,
+    )
+    _stub_cli_runners(
+        monkeypatch,
+        grok=GrokCliStatus(
+            login=CliLogin(logged_in=True, auth_method="grok"),
+            model_names=("grok-4.6",),
+        ),
+    )
+    refresh_provider_snapshots()
+
+    client, _ = admin_client
+    statuses = {
+        item["provider"]: item for item in client.get("/api/settings/providers").json()
+    }
+    grok = statuses["grok"]["cowriter"]
+    assert grok["state"] == "configured"
+    assert grok["setup_method"] == "grok_cli"
+
+    settings = client.get("/api/settings/cowriter").json()
+    assert settings["models_by_provider"]["grok"]
+    saved = client.put(
+        "/api/settings/cowriter",
+        json={"provider": "grok", "model": "grok-4.6"},
+    )
+
+    assert saved.status_code == 200
+    assert saved.json()["provider"] == "grok"
 
 
 @pytest.mark.parametrize("provider", ["claude", "grok", "codex"])
