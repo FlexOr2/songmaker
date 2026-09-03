@@ -556,20 +556,24 @@ describe('SongDetailView recipe and takes', () => {
 		expect(get(sourceMode)).toBe(mode);
 	});
 
-	it('lands a picked-up source in the Recipe panel', async () => {
-		const target = await renderView();
-		expect(get(recipeOpen)).toBe(false);
+	it.each(['repaint', 'cover'] as const)(
+		'lands a picked-up %s source in the Recipe panel',
+		async (mode) => {
+			const target = await renderView();
+			expect(get(recipeOpen)).toBe(false);
 
-		pendingSource.set({ generation: generation(), mode: 'repaint' });
-		await tick();
-		await tick();
-		expect(get(recipeOpen)).toBe(true);
-		clickNamed(header(target), EDITOR_VIEW_RECIPE_LABEL);
-		await tick();
-		clickNamed(header(target), EDITOR_VIEW_RECIPE_LABEL);
-		await tick();
-		expect(get(recipeOpen)).toBe(true);
-	});
+			pendingSource.set({ generation: generation(), mode });
+			await tick();
+			await tick();
+			expect(get(recipeOpen)).toBe(true);
+			expect(get(sourceMode)).toBe(mode);
+			clickNamed(header(target), EDITOR_VIEW_RECIPE_LABEL);
+			await tick();
+			clickNamed(header(target), EDITOR_VIEW_RECIPE_LABEL);
+			await tick();
+			expect(get(recipeOpen)).toBe(true);
+		}
+	);
 
 	it('keeps draft params when Again has no reusable take params', async () => {
 		songList.set([
@@ -908,7 +912,7 @@ describe('SongDetailView unsaved-draft guard', () => {
 		expect(addToast).toHaveBeenCalledWith('Saved version 5', 'success');
 	});
 
-	it('cross-song Use as Reference: Cancel leaves it unapplied and drops the pending source', async () => {
+	it('cross-song Repaint/Cover: Cancel leaves it unapplied and drops the pending source', async () => {
 		songList.set(albumSongs());
 		const target = await renderView();
 		setDraftLyrics('unsaved edit');
@@ -931,7 +935,7 @@ describe('SongDetailView unsaved-draft guard', () => {
 		expect(get(sourceGeneration)).toBeNull();
 	});
 
-	it('cross-song Use as Reference: Discard applies the source once the target song opens', async () => {
+	it('cross-song Repaint/Cover: Discard applies the source once the target song opens', async () => {
 		songList.set(albumSongs());
 		const target = await renderView();
 		setDraftLyrics('unsaved edit');
