@@ -83,7 +83,7 @@ async def stream_codex_cli_turn(
                 if item_type in _BLOCKED_ITEM_TYPES:
                     raise _CodexCliStreamFailure("codex_cli_tool_call_blocked")
                 if item_type not in _INFORMATIONAL_ITEM_TYPES:
-                    raise _unsupported_stream_event(event_type)
+                    raise _unsupported_stream_event(event_type, item_type)
                 if event_type == "item.completed" and item_type == "agent_message":
                     text = _completed_agent_message(event)
                     text_chunks.append(text)
@@ -174,8 +174,17 @@ def _item(event: dict[str, object]) -> dict[str, object]:
     return item
 
 
-def _unsupported_stream_event(event_type: str) -> _CodexCliStreamFailure:
-    log.warning("Codex CLI stream protocol error (event_type=%s)", event_type)
+def _unsupported_stream_event(
+    event_type: str, item_type: str | None = None,
+) -> _CodexCliStreamFailure:
+    if item_type is None:
+        log.warning("Codex CLI stream protocol error (event_type=%s)", event_type)
+    else:
+        log.warning(
+            "Codex CLI stream protocol error (event_type=%s, item_type=%s)",
+            event_type,
+            item_type,
+        )
     return _CodexCliStreamFailure("codex_cli_stream_protocol_error")
 
 

@@ -181,6 +181,23 @@ def test_codex_cli_names_unknown_stream_events_in_the_log(monkeypatch, caplog) -
     assert "event_type=turn.unknown" in caplog.text
 
 
+def test_codex_cli_names_unknown_item_types_without_logging_item_content(
+    monkeypatch, caplog,
+) -> None:
+    calls: list = []
+    monkeypatch.setattr(codex_cli_adapter, "run_cli_bounded", _runner([
+        b'{"type":"item.completed","item":{"type":"future_item","text":"secret"}}\n',
+    ], _outcome(), calls))
+    caplog.set_level("WARNING")
+
+    with pytest.raises(ProviderUnavailableError, match="codex_cli_stream_protocol_error"):
+        asyncio.run(_collect())
+
+    assert "event_type=item.completed" in caplog.text
+    assert "item_type=future_item" in caplog.text
+    assert "secret" not in caplog.text
+
+
 @pytest.mark.parametrize(
     "lines",
     (
