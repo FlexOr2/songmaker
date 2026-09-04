@@ -76,7 +76,9 @@ jobs:
 
           for attempt in $(seq 1 "$max_attempts"); do
             echo "Audit attempt ${attempt}/${max_attempts}"
-            pnpm audit --prod --fetch-retries=1 --fetch-timeout=30000 2>&1 | tee "$audit_log"
+            # pnpm audit does not accept fetch flags directly; configure its registry client per attempt.
+            npm_config_fetch_retries=1 npm_config_fetch_timeout=30000 \
+              pnpm audit --prod 2>&1 | tee "$audit_log"
             audit_status=${PIPESTATUS[0]}
 
             if [ "$audit_status" -eq 0 ]; then
@@ -88,14 +90,14 @@ jobs:
             fi
 
             if [ "$attempt" -lt "$max_attempts" ]; then
-              backoff_seconds=$((attempt * 10))
+              backoff_seconds=$((attempt * 20))
               echo "npm registry unavailable; retrying in ${backoff_seconds}s"
               sleep "$backoff_seconds"
             fi
           done
 
           # Registry outages are infrastructure failures, not evidence of a vulnerable dependency.
-          echo "::error title=npm registry unreachable::pnpm audit could not reach registry.npmjs.org after ${max_attempts} attempts; audit result is inconclusive."
+          echo "::warning title=npm registry unreachable::audit skipped after ${max_attempts} attempts"
           {
             echo "## npm audit: registry unreachable"
             echo
