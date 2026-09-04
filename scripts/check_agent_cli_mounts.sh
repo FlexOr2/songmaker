@@ -77,7 +77,6 @@ fi
 CLAUDE_CLI="${SONGMAKER_CLAUDE_CLI:-$HOME_DIR/.local/bin/claude}"
 GROK_CLI="${SONGMAKER_GROK_CLI:-$HOME_DIR/.grok/bin/grok}"
 CODEX_CLI="${SONGMAKER_CODEX_CLI:-$HOME_DIR/.local/node/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex}"
-CODEX_CODE_MODE_HOST="${SONGMAKER_CODEX_CODE_MODE_HOST:-$HOME_DIR/.local/node/lib/node_modules/@openai/codex/node_modules/@openai/codex-linux-x64/vendor/x86_64-unknown-linux-musl/bin/codex-code-mode-host}"
 
 problems=0
 
@@ -226,7 +225,6 @@ check_mirror_is_running
 check_binary claude "$CLAUDE_CLI" SONGMAKER_CLAUDE_CLI
 check_binary grok "$GROK_CLI" SONGMAKER_GROK_CLI
 check_binary codex "$CODEX_CLI" SONGMAKER_CODEX_CLI
-check_binary codex-code-mode-host "$CODEX_CODE_MODE_HOST" SONGMAKER_CODEX_CODE_MODE_HOST
 
 if [ "$problems" -gt 0 ]; then
     echo >&2

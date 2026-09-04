@@ -90,7 +90,8 @@ def test_codex_cli_streams_text_then_one_final_and_pins_its_command(monkeypatch)
     command, kwargs = calls[0]
     assert command == (
         "codex", "exec", "--json", "--sandbox", "read-only", "--skip-git-repo-check",
-        "--ignore-user-config", "--ignore-rules", "--ephemeral", "-c", 'approval_policy="never"',
+        "--ignore-user-config", "--ignore-rules", "--ephemeral", "--disable", "code_mode_host",
+        "--disable", "code_mode", "--disable", "code_mode_only", "-c", 'approval_policy="never"',
         "-c", "mcp_servers={}", "--model", "codex-test", "-",
     )
     assert kwargs["stdin_payload"] == b"system\n\nUser: hello"
@@ -243,6 +244,21 @@ def test_codex_cli_classifies_an_error_item_without_a_completed_turn(
     ], _outcome(), calls))
 
     with pytest.raises(ProviderUnavailableError, match=code):
+        asyncio.run(_collect())
+
+
+@pytest.mark.parametrize("event_type", ("item.started", "item.updated"))
+def test_codex_cli_rejects_nonterminal_error_items_as_protocol_errors(
+    monkeypatch, event_type,
+) -> None:
+    calls: list = []
+    monkeypatch.setattr(codex_cli_adapter, "run_cli_bounded", _runner([
+        json.dumps({"type": event_type, "item": {
+            "type": "error", "message": "not a terminal CLI failure",
+        }}).encode() + b"\n",
+    ], _outcome(), calls))
+
+    with pytest.raises(ProviderUnavailableError, match="codex_cli_stream_protocol_error"):
         asyncio.run(_collect())
 
 

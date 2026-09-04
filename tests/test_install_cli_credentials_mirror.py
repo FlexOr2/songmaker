@@ -327,7 +327,6 @@ def run_installer(tmp_path: Path, checkout: Path, home: Path):
             "SONGMAKER_CLAUDE_CLI": "/bin/sh",
             "SONGMAKER_GROK_CLI": "/bin/sh",
             "SONGMAKER_CODEX_CLI": "/bin/sh",
-            "SONGMAKER_CODEX_CODE_MODE_HOST": "/bin/sh",
         })
         built.setdefault("SUDO_USER", DEFAULT_SUDO_USER)
         built.setdefault("SONGMAKER_UNIT_DIR", str(units))

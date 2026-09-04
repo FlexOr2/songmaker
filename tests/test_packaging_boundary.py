@@ -330,11 +330,6 @@ def test_agent_cli_mounts_reject_short_syntax_and_host_profiles() -> None:
             "node_modules/@openai/codex-linux-x64/vendor/"
             "x86_64-unknown-linux-musl/bin/codex}"
         ),
-        "/usr/local/bin/codex-code-mode-host": (
-            "${SONGMAKER_CODEX_CODE_MODE_HOST:-~/.local/node/lib/node_modules/"
-            "@openai/codex/node_modules/@openai/codex-linux-x64/vendor/"
-            "x86_64-unknown-linux-musl/bin/codex-code-mode-host}"
-        ),
         "/home/songmaker/.codex/auth.json": (
             "${SONGMAKER_CLI_CREDENTIALS_DIR:-~/.songmaker/agent-cli-credentials}"
             "/codex.json"

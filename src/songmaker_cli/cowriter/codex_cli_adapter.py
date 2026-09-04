@@ -139,6 +139,12 @@ def _build_codex_cli_command(model: str) -> tuple[str, ...]:
         "--ignore-user-config",
         "--ignore-rules",
         "--ephemeral",
+        "--disable",
+        "code_mode_host",
+        "--disable",
+        "code_mode",
+        "--disable",
+        "code_mode_only",
         "-c",
         'approval_policy="never"',
         "-c",
@@ -185,7 +191,6 @@ def _log_completed_error_item(message: str) -> None:
 
 
 def _error_message_class(message: str) -> str:
-    """Return a short, path- and token-free diagnostic class for a CLI message."""
     words: list[str] = []
     for word in message.split():
         if not word.isalpha() or len(word) > 24:
