@@ -198,6 +198,54 @@ def test_codex_cli_names_unknown_item_types_without_logging_item_content(
     assert "secret" not in caplog.text
 
 
+def test_codex_cli_delivers_a_completed_turn_after_logging_an_error_item(
+    monkeypatch, caplog,
+) -> None:
+    calls: list = []
+    message = (
+        "Code Mode is unavailable because failed to spawn code-mode host "
+        "/private/companion/token-value"
+    )
+    monkeypatch.setattr(codex_cli_adapter, "run_cli_bounded", _runner([
+        json.dumps({"type": "item.completed", "item": {
+            "type": "error", "message": message,
+        }}).encode() + b"\n",
+        b'{"type":"item.completed","item":{"type":"agent_message","text":"OK"}}\n',
+        b'{"type":"turn.completed","usage":{}}\n',
+    ], _outcome(), calls))
+    caplog.set_level("WARNING")
+
+    assert asyncio.run(_collect()) == [
+        AssistantTextEvent(text="OK"),
+        FinalEvent(text="OK"),
+    ]
+
+    assert "message_class=code_mode_is_unavailable" in caplog.text
+    assert message not in caplog.text
+    assert "/private/companion" not in caplog.text
+
+
+@pytest.mark.parametrize(
+    ("message", "code"),
+    (
+        ("Code Mode is unavailable", "codex_cli_error"),
+        ("Request failed with 401 Unauthorized", "cli_login_expired"),
+    ),
+)
+def test_codex_cli_classifies_an_error_item_without_a_completed_turn(
+    monkeypatch, message, code,
+) -> None:
+    calls: list = []
+    monkeypatch.setattr(codex_cli_adapter, "run_cli_bounded", _runner([
+        json.dumps({"type": "item.completed", "item": {
+            "type": "error", "message": message,
+        }}).encode() + b"\n",
+    ], _outcome(), calls))
+
+    with pytest.raises(ProviderUnavailableError, match=code):
+        asyncio.run(_collect())
+
+
 @pytest.mark.parametrize(
     "lines",
     (

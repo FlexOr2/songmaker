@@ -397,8 +397,9 @@ being in place.
 
 ## Agent-CLI Mounts
 
-`songmaker-web` mounts the Claude, Grok, and Codex binaries and redacted
-credential mirrors read-only (`docker-compose.yml:98-133`). The scoring worker
+`songmaker-web` mounts the Claude, Grok, Codex, and Codex Code Mode host
+binaries and redacted
+credential mirrors read-only (`docker-compose.yml:98-144`). The scoring worker
 mounts only Claude's binary and credential mirror; it does not mount Grok or
 Codex (`docker-compose.yml:246-259`).
 
@@ -435,7 +436,9 @@ The one-turn Codex command is `codex exec --json --sandbox read-only` with
 `--ephemeral`, `approval_policy="never"`, and `mcp_servers={}`. It receives a
 private temporary working directory (which is deliberately not a Git
 repository), a stdin prompt rather than a prompt file, and the runner's
-secret-scrubbed environment, so `OPENAI_API_KEY` is never inherited. Its JSONL
+secret-scrubbed environment, so `OPENAI_API_KEY` is never inherited. The
+native `codex-code-mode-host` companion is mounted beside `codex`; without it
+the CLI emits an error item even when the turn later completes. Its JSONL
 gate permits only lifecycle observations, completed assistant text, and a
 completed turn with usage; it discards reasoning, aborts and refuses every
 reported command, MCP, web-search, or file-change item, and treats unknown or
@@ -500,13 +503,15 @@ look right prove nothing about currency if what rewrites them has been
 erroring out since yesterday. The service is not required to be *active* — a
 finished oneshot is legitimately inactive.
 
-`SONGMAKER_CLAUDE_CLI`, `SONGMAKER_GROK_CLI`, and `SONGMAKER_CODEX_CLI` take
+`SONGMAKER_CLAUDE_CLI`, `SONGMAKER_GROK_CLI`, `SONGMAKER_CODEX_CLI`, and
+`SONGMAKER_CODEX_CODE_MODE_HOST` take
 effect only when exported in the deployment environment, not when written only
 in `.env`: the preflight reads its values from the exported environment and
 does not load `.env`. For systemd boot and auto-deploy, these non-secret paths
 therefore belong in the persistent service environment. Compose currently
 mounts `SONGMAKER_CLAUDE_CLI`, `SONGMAKER_GROK_CLI`, and
-`SONGMAKER_CODEX_CLI` into `songmaker-web`.
+`SONGMAKER_CODEX_CLI` plus `SONGMAKER_CODEX_CODE_MODE_HOST` into
+`songmaker-web`.
 
 **Boot coupling.** `songmaker.service` has both `Requires=` and `After=` on
 `songmaker-cli-credentials-mirror.service`, then runs the argumentless
@@ -589,6 +594,7 @@ refusals above, each of which turns it red when removed.
 | `$SONGMAKER_GROK_CLI` (default `~/.grok/bin/grok`) | `/usr/local/bin/grok` |
 | `$SONGMAKER_CLI_CREDENTIALS_DIR/grok.json` | `/home/songmaker/.grok/auth.json` |
 | `$SONGMAKER_CODEX_CLI` (default native Codex binary) | `/usr/local/bin/codex` |
+| `$SONGMAKER_CODEX_CODE_MODE_HOST` (default native Codex Code Mode host) | `/usr/local/bin/codex-code-mode-host` |
 | `$SONGMAKER_CLI_CREDENTIALS_DIR/codex.json` | `/home/songmaker/.codex/auth.json` |
 
 `songmaker-scoring-worker` owns only `.claude` and mounts only the Claude
@@ -802,9 +808,10 @@ After a successful recreate, the tick runs `docker image prune --force --filter 
 - `ANTHROPIC_API_KEY`: Optional (for server-side Claude chat). Never logged or returned in responses.
 - `.env`: Gitignored. Never committed. Single source for pydantic Settings and
   Docker Compose substitutions except the non-secret
-  `SONGMAKER_CLAUDE_CLI`, `SONGMAKER_GROK_CLI`, and `SONGMAKER_CODEX_CLI` path
-  overrides: systemd boot and auto-deploy must receive those as persistent
-  exported environment values so the preflight sees the same paths as Compose.
+  `SONGMAKER_CLAUDE_CLI`, `SONGMAKER_GROK_CLI`, `SONGMAKER_CODEX_CLI`, and
+  `SONGMAKER_CODEX_CODE_MODE_HOST` path overrides: systemd boot and auto-deploy
+  must receive those as persistent exported environment values so the preflight
+  sees the same paths as Compose.
 
 ## Input Validation
 
