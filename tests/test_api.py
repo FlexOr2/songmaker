@@ -1593,6 +1593,53 @@ def test_repaint_without_ffmpeg_is_unavailable(client: TestClient) -> None:
     assert resp.json()["detail"] == "ffmpeg is not available"
 
 
+@pytest.mark.parametrize(
+    ("path", "payload"),
+    [
+        (
+            "/api/generations/g2/repaint",
+            {
+                "src_generation_id": "g2",
+                "repainting_start": 0.0,
+                "repainting_end": 0.5,
+                "model": "sft",
+            },
+        ),
+        (
+            "/api/generations/g2/cover",
+            {
+                "src_generation_id": "g2",
+                "audio_cover_strength": 0.5,
+                "model": "sft",
+            },
+        ),
+    ],
+)
+def test_repaint_and_cover_report_mp3_conversion_failure(
+    client: TestClient,
+    path: str,
+    payload: dict,
+) -> None:
+    from unittest.mock import patch
+
+    audio_dir = Path(client.app.state.ctx.audio_dir)
+    mp3_file = audio_dir / "u-test" / "g2.mp3"
+    mp3_file.parent.mkdir(parents=True, exist_ok=True)
+    mp3_file.write_bytes(b"fake-mp3-data")
+
+    with (
+        patch("songmaker_cli.generation_api.shutil.which", return_value="/usr/bin/ffmpeg"),
+        patch(
+            "songmaker_cli.generation_api.subprocess.run",
+            side_effect=subprocess.CalledProcessError(1, "ffmpeg"),
+        ),
+    ):
+        resp = client.post(path, json=payload)
+
+    assert resp.status_code == 500
+    assert resp.json()["detail"] == "Failed to convert MP3 to WAV"
+
+
 def test_repaint_not_found(client: TestClient) -> None:
     resp = client.post("/api/generations/nonexistent/repaint", json={
         "src_generation_id": "nonexistent",
@@ -1786,6 +1833,23 @@ def test_upload_reference_audio_too_small(client: TestClient) -> None:
     )
     assert resp.status_code == 400
     assert "too small" in resp.json()["detail"]
+
+
+def test_upload_reference_audio_rejects_content_above_the_configured_limit(
+    client: TestClient,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    import io
+
+    monkeypatch.setattr("songmaker_cli.constants.REFERENCE_AUDIO_MAX_BYTES", 256)
+
+    resp = client.post(
+        "/api/audio/upload",
+        files={"file": ("ref.wav", io.BytesIO(b"R" * 257), "audio/wav")},
+    )
+
+    assert resp.status_code == 400
+    assert resp.json()["detail"] == "File too large (max 0MB)"
 
 
 def test_generate_song_returns_503_and_enqueues_nothing_when_worker_gpu_is_broken(
