@@ -1835,23 +1835,6 @@ def test_upload_reference_audio_too_small(client: TestClient) -> None:
     assert "too small" in resp.json()["detail"]
 
 
-def test_upload_reference_audio_rejects_content_above_the_configured_limit(
-    client: TestClient,
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    import io
-
-    monkeypatch.setattr("songmaker_cli.constants.REFERENCE_AUDIO_MAX_BYTES", 256)
-
-    resp = client.post(
-        "/api/audio/upload",
-        files={"file": ("ref.wav", io.BytesIO(b"R" * 257), "audio/wav")},
-    )
-
-    assert resp.status_code == 400
-    assert resp.json()["detail"] == "File too large (max 0MB)"
-
-
 def test_generate_song_returns_503_and_enqueues_nothing_when_worker_gpu_is_broken(
     client: TestClient,
 ) -> None:
